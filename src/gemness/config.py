@@ -6,6 +6,7 @@ from pathlib import Path
 
 DEFAULT_OBSERVER_PORT = 56755
 DEFAULT_TRANSCRIPT_DIR = Path.home() / ".gemness" / "transcripts"
+DEFAULT_MODEL_LABEL = "Gemini CLI default"
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -38,6 +39,13 @@ def _choice_env(name: str, default: str, choices: set[str]) -> str:
     return value
 
 
+def _optional_str_env(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return value.strip()
+
+
 def _optional_path_env(name: str) -> Path | None:
     value = os.getenv(name)
     if value is None or value.strip() == "":
@@ -64,7 +72,7 @@ def _loopback_host(value: str) -> str:
 
 @dataclass(slots=True)
 class GemnessConfig:
-    model: str = os.getenv("GEMNESS_MODEL", "gemini-3.1-pro-preview")
+    model: str | None = field(default_factory=lambda: _optional_str_env("GEMNESS_MODEL"))
     observer_enabled: bool = _bool_env("GEMNESS_OBSERVER_ENABLED", True)
     observer_host: str = _loopback_host(os.getenv("GEMNESS_OBSERVER_HOST", "127.0.0.1"))
     observer_port: int = _int_env("GEMNESS_OBSERVER_PORT", DEFAULT_OBSERVER_PORT)

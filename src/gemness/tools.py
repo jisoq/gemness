@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import GemnessConfig
+from .config import DEFAULT_MODEL_LABEL, GemnessConfig
 from .json_utils import extract_cli_response, parse_json_candidate
 from .mcp_metadata import SERVER_NAME, SERVER_VERSION, TOOL_NAMES
 from .observer import ObserverHub, SessionCancelled
@@ -85,6 +85,8 @@ class GemnessService:
             "resolved": command_parts[0] if command_parts else self.config.gemini_command,
             "argv": command_parts,
             "model": self.config.model,
+            "model_label": _model_label(self.config.model),
+            "model_source": "configured" if self.config.model else "cli_default",
             "version": None,
             "skip_trust": self.config.gemini_skip_trust,
             "trust_workspace": self.config.gemini_trust_workspace,
@@ -144,14 +146,14 @@ class GemnessService:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
-        return self._run_text_session("ask_text", prompt, model or self.config.model, cwd=resolved_cwd, title_source=prompt)
+        return self._run_text_session("ask_text", prompt, _selected_model(model, self.config.model), cwd=resolved_cwd, title_source=prompt)
 
     def ask_json(self, prompt: str, schema: dict[str, Any], model: str | None = None, cwd: str | None = None) -> dict[str, Any]:
         try:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
-        return self._run_json_session("ask_json", prompt, schema, model or self.config.model, cwd=resolved_cwd, title_source=prompt)
+        return self._run_json_session("ask_json", prompt, schema, _selected_model(model, self.config.model), cwd=resolved_cwd, title_source=prompt)
 
     def review_current_diff(self, base_ref: str = "HEAD", model: str | None = None, cwd: str | None = None) -> dict[str, Any]:
         try:
@@ -159,13 +161,13 @@ class GemnessService:
             base_ref = validate_base_ref(base_ref)
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
-        model = model or self.config.model
+        model = _selected_model(model, self.config.model)
         try:
             native_resume_enabled, _native_reason = self._native_resume_available(resolved_cwd)
         except _NativeResumeRequiredError as exc:
             session = self.hub.create_session(
                 "review_current_diff",
-                model,
+                _model_label(model),
                 title=f"현재 diff 리뷰: {base_ref}",
                 project_root=str(resolved_cwd),
                 native_resume_enabled=False,
@@ -173,7 +175,7 @@ class GemnessService:
             return self._runner_error(session.session_id, self.hub.observer_url(session.session_id), GeminiRunResult.error(str(exc), exit_code=None))
         session = self.hub.create_session(
             "review_current_diff",
-            model,
+            _model_label(model),
             title=f"현재 diff 리뷰: {base_ref}",
             project_root=str(resolved_cwd),
             native_resume_enabled=native_resume_enabled,
@@ -219,7 +221,7 @@ class GemnessService:
             gemini_session_id = _new_gemini_session_id() if plan.fallback_reason == "session_rotation" else None
             session = self.hub.create_session(
                 "ask_text",
-                model or self.config.model,
+                _model_label(_selected_model(model, self.config.model)),
                 parent_session_id=plan.parent_session_id,
                 title=_session_title(instruction, "ask_text"),
                 conversation_id=plan.conversation_id,
@@ -236,7 +238,7 @@ class GemnessService:
             return self._run_text_session(
                 "ask_text",
                 plan.prompt,
-                model or self.config.model,
+                _selected_model(model, self.config.model),
                 parent_session_id=plan.parent_session_id,
                 existing_session_id=session.session_id,
                 cwd=plan.cwd,
@@ -252,7 +254,7 @@ class GemnessService:
         gemini_session_id = _new_gemini_session_id() if plan.fallback_reason == "session_rotation" else None
         session = self.hub.create_session(
             "ask_text",
-            model or self.config.model,
+            _model_label(_selected_model(model, self.config.model)),
             parent_session_id=plan.parent_session_id,
             title=_session_title(instruction, "ask_text"),
             conversation_id=plan.conversation_id,
@@ -273,7 +275,7 @@ class GemnessService:
                 self._run_text_session(
                     "ask_text",
                     plan.prompt,
-                    model or self.config.model,
+                    _selected_model(model, self.config.model),
                     parent_session_id=plan.parent_session_id,
                     existing_session_id=session.session_id,
                     cwd=plan.cwd,
@@ -292,7 +294,7 @@ class GemnessService:
         return self._run_text_session(
             "ask_text",
             prompt,
-            model or self.config.model,
+            _selected_model(model, self.config.model),
             parent_session_id=parent_session_id,
             title_source=instruction,
         )
@@ -301,7 +303,7 @@ class GemnessService:
         self,
         tool_name: str,
         prompt: str,
-        model: str,
+        model: str | None,
         *,
         parent_session_id: str | None = None,
         existing_session_id: str | None = None,
@@ -322,7 +324,7 @@ class GemnessService:
         except _NativeResumeRequiredError as exc:
             session = self._session(
                 tool_name,
-                model,
+                _model_label(model),
                 parent_session_id,
                 existing_session_id,
                 title,
@@ -344,7 +346,7 @@ class GemnessService:
             fallback_reason = fallback_reason or native_unavailable_reason
         session = self._session(
             tool_name,
-            model,
+            _model_label(model),
             parent_session_id,
             existing_session_id,
             title,
@@ -436,7 +438,7 @@ class GemnessService:
         tool_name: str,
         prompt: str,
         schema: dict[str, Any],
-        model: str,
+        model: str | None,
         *,
         parent_session_id: str | None = None,
         existing_session_id: str | None = None,
@@ -457,7 +459,7 @@ class GemnessService:
         except _NativeResumeRequiredError as exc:
             session = self._session(
                 tool_name,
-                model,
+                _model_label(model),
                 parent_session_id,
                 existing_session_id,
                 title,
@@ -479,7 +481,7 @@ class GemnessService:
             fallback_reason = fallback_reason or native_unavailable_reason
         session = self._session(
             tool_name,
-            model,
+            _model_label(model),
             parent_session_id,
             existing_session_id,
             title,
@@ -623,7 +625,7 @@ class GemnessService:
         parse_error: str | None,
         validation_errors: list[dict[str, Any]] | None,
         warnings: list[str] | None,
-        model: str,
+        model: str | None,
         cwd: Path | None,
     ) -> dict[str, Any]:
         session = self.hub.sessions.get(session_id)
@@ -690,7 +692,7 @@ class GemnessService:
         *,
         parse_error: str | None,
         validation_errors: list[dict[str, Any]] | None,
-        model: str,
+        model: str | None,
         cwd: Path | None,
     ) -> dict[str, Any]:
         self.hub.set_status(
@@ -752,7 +754,7 @@ class GemnessService:
         parent_session_id: str,
         original_prompt: str,
         result: GeminiRunResult,
-        model: str,
+        model: str | None,
         cwd: Path | None,
     ) -> dict[str, Any]:
         prompt = _interrupted_retry_prompt(original_prompt, result.stdout, result.interrupt_instruction or "")
@@ -772,7 +774,7 @@ class GemnessService:
         original_prompt: str,
         result: GeminiRunResult,
         schema: dict[str, Any],
-        model: str,
+        model: str | None,
         cwd: Path | None,
     ) -> dict[str, Any]:
         prompt = _interrupted_retry_prompt(original_prompt, result.stdout, result.interrupt_instruction or "")
@@ -1061,6 +1063,17 @@ def _clip_title(text: str, limit: int) -> str:
         return text
     clipped = text[:limit].rstrip(" ,.;:!?。．、，")
     return f"{clipped}..."
+
+
+def _selected_model(requested: str | None, configured: str | None) -> str | None:
+    for value in (requested, configured):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _model_label(model: str | None) -> str:
+    return model.strip() if isinstance(model, str) and model.strip() else DEFAULT_MODEL_LABEL
 
 
 def _json_prompt(prompt: str, schema: dict[str, Any]) -> str:

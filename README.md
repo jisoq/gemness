@@ -69,7 +69,7 @@ command = "uvx"
 args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
 
 [mcp_servers.gemness.env]
-GEMNESS_MODEL = "gemini-3.1-pro-preview"
+# Omit GEMNESS_MODEL to let Gemini CLI use its default model.
 ```
 
 ### macOS/Linux example
@@ -79,7 +79,7 @@ command = "uvx"
 args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
 
 [mcp_servers.gemness.env]
-GEMNESS_MODEL = "gemini-3.1-pro-preview"
+# Omit GEMNESS_MODEL to let Gemini CLI use its default model.
 ```
 
 ## Verify in Codex
@@ -153,7 +153,7 @@ Completed sessions support follow-up from the UI and the MCP `follow_up` tool. A
 ## Environment
 
 ```bash
-GEMNESS_MODEL=gemini-3.1-pro-preview
+# GEMNESS_MODEL is optional. Omit it to let Gemini CLI use its default model.
 GEMNESS_OBSERVER_ENABLED=true
 GEMNESS_OBSERVER_HOST=127.0.0.1
 GEMNESS_OBSERVER_PORT=56755

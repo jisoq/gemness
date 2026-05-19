@@ -32,6 +32,7 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert server["env"]["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(server["env"]["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
     assert server["env"]["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
+    assert "GEMNESS_MODEL" not in server["env"]
     assert "GEMNESS_WORKSPACE_ROOT" not in server["env"]
     assert "GEMNESS_ALLOWED_ROOTS" not in server["env"]
     assert "GEMNESS_COMMAND" not in server["env"]
@@ -115,6 +116,7 @@ def test_build_mcp_env_omits_local_paths_by_default() -> None:
     assert env["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(env["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
     assert env["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
+    assert "GEMNESS_MODEL" not in env
     assert "GEMNESS_WORKSPACE_ROOT" not in env
     assert "GEMNESS_ALLOWED_ROOTS" not in env
     assert "GEMNESS_COMMAND" not in env

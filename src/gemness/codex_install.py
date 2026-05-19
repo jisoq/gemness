@@ -37,7 +37,7 @@ class CodexConfigOptions:
     startup_timeout_sec: int = 60
     tool_timeout_sec: int = 300
     required: bool = False
-    model: str = "gemini-3.1-pro-preview"
+    model: str | None = None
     transcript_dir: str = str(DEFAULT_TRANSCRIPT_DIR)
 
 
@@ -77,7 +77,6 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         for name in TOOL_NAMES
     )
     env_lines = {
-        "GEMNESS_MODEL": options.model,
         "GEMNESS_OBSERVER_ENABLED": "true",
         "GEMNESS_OBSERVER_HOST": "127.0.0.1",
         "GEMNESS_OBSERVER_PORT": str(DEFAULT_OBSERVER_PORT),
@@ -91,6 +90,8 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
         "GEMNESS_GEMINI_APPROVAL_MODE": "plan",
     }
+    if options.model:
+        env_lines["GEMNESS_MODEL"] = options.model
     if options.gemini_command:
         env_lines["GEMNESS_COMMAND"] = options.gemini_command
     if options.workspace_root:
@@ -121,7 +122,6 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
     env = dict(base_env or os.environ)
     env.update(
         {
-            "GEMNESS_MODEL": options.model,
             "GEMNESS_OBSERVER_ENABLED": "true",
             "GEMNESS_OBSERVER_HOST": "127.0.0.1",
             "GEMNESS_OBSERVER_PORT": str(DEFAULT_OBSERVER_PORT),
@@ -136,6 +136,8 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_GEMINI_APPROVAL_MODE": "plan",
         }
     )
+    if options.model:
+        env["GEMNESS_MODEL"] = options.model
     if options.gemini_command:
         env["GEMNESS_COMMAND"] = options.gemini_command
     if options.workspace_root:

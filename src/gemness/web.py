@@ -563,6 +563,7 @@ INDEX_HTML = r"""<!doctype html>
       "prompt.pending_approval": "전송 승인 대기",
       "prompt.sent": "프롬프트 전송",
       "gemini.started": "Gemini 실행 시작",
+      "gemini.model_detected": "Gemini 모델 감지",
       "gemini.delta": "Gemini 응답 조각",
       "gemini.response": "Gemini 응답",
       "gemini.stderr": "Gemini 경고",
@@ -1031,7 +1032,7 @@ INDEX_HTML = r"""<!doctype html>
             direction: "system",
             title: "Observer",
             timestamp: event.ts,
-            body: `${toolLabel(payload.tool_name || event.tool_name)} run이 ${payload.model || "지정된 모델"}로 시작되었습니다.`,
+            body: `${toolLabel(payload.tool_name || event.tool_name)} run이 ${payload.model || "Gemini CLI default"}로 시작되었습니다.`,
             meta: { status: payload.status, conversation_id: payload.conversation_id, run_id: payload.run_id || payload.session_id },
             rawEvent: event
           };
@@ -1039,6 +1040,10 @@ INDEX_HTML = r"""<!doctype html>
           return turn(event, "observer", "system", "Observer", "Gemini CLI 실행 argv가 기록되었습니다.", {
             mode: payload.native_resume_used ? "resume" : payload.gemini_session_id ? "session-id" : "legacy",
             fallback: payload.fallback_used ? payload.fallback_reason || "fallback" : ""
+          });
+        case "gemini.model_detected":
+          return turn(event, "observer", "system", "Observer", `Gemini CLI가 실제 사용 모델을 보고했습니다: ${payload.model || "알 수 없음"}.`, {
+            source: payload.source || "detected"
           });
         case "conversation.native_session_rotated":
           return turn(event, "observer", "system", "Observer", `Gemini native session을 새로 시작했습니다. 사유: ${payload.reason || "알 수 없음"}.`, {}, "warn");

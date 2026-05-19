@@ -243,6 +243,8 @@ class ObserverHub:
         fallback_used: bool | None = None,
         fallback_reason: str | None = None,
         gemini_session_id: str | None = None,
+        model_requested: str | None = None,
+        model_source: str | None = None,
         phase: str | None = None,
     ) -> None:
         with self._lock:
@@ -271,9 +273,29 @@ class ObserverHub:
                 "native_resume_used": native_resume_used,
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
+                "model_requested": model_requested,
+                "model_source": model_source,
             },
             phase=phase,
         )
+
+    def set_model(self, session_id: str, model: str, *, source: str = "detected", phase: str | None = None) -> None:
+        model = model.strip()
+        if not model:
+            return
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return
+            changed = session.model != model
+            session.model = model
+            session.updated_at = utc_now()
+            if session.conversation_id and session.conversation_id in self.conversations:
+                conversation = self.conversations[session.conversation_id]
+                conversation.model = model
+                conversation.updated_at = session.updated_at
+                self._write_conversation_index()
+        self.append_event(session_id, "gemini.model_detected", "gemness", {"model": model, "source": source, "changed": changed}, phase=phase)
 
     def rotate_gemini_session(self, session_id: str, gemini_session_id: str, reason: str) -> None:
         with self._lock:
@@ -878,6 +900,10 @@ class ObserverHub:
                 session.fallback_reason = event.payload["fallback_reason"]
             if isinstance(event.payload.get("gemini_session_id"), str):
                 session.gemini_session_id = event.payload["gemini_session_id"]
+        if event.type == "gemini.model_detected":
+            model = event.payload.get("model")
+            if isinstance(model, str) and model.strip():
+                session.model = model.strip()
         if event.type == "session.title":
             title = event.payload.get("title")
             if isinstance(title, str) and title.strip():

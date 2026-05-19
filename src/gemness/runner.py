@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .config import GemnessConfig
+from .config import DEFAULT_MODEL_LABEL, GemnessConfig
 from .observer import ObserverHub
 
 GEMINI_CLI_TRUST_WORKSPACE_ENV = "GEMINI_CLI_TRUST_WORKSPACE"
@@ -86,7 +86,7 @@ class GeminiRunner(Protocol):
         self,
         prompt: str,
         *,
-        model: str,
+        model: str | None,
         output_format: str,
         session_id: str,
         hub: ObserverHub,
@@ -109,7 +109,7 @@ class GeminiCliRunner:
         self,
         prompt: str,
         *,
-        model: str,
+        model: str | None,
         output_format: str,
         session_id: str,
         hub: ObserverHub,
@@ -120,8 +120,11 @@ class GeminiCliRunner:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
     ) -> GeminiRunResult:
+        requested_model = _requested_model(model)
         command = resolve_gemini_command(self.config.gemini_command)
-        command.extend(["-m", model, "--output-format", output_format])
+        if requested_model:
+            command.extend(["-m", requested_model])
+        command.extend(["--output-format", output_format])
         if self.config.gemini_skip_trust:
             command.append("--skip-trust")
         if self.config.gemini_approval_mode:
@@ -138,6 +141,8 @@ class GeminiCliRunner:
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             gemini_session_id=gemini_session_id,
+            model_requested=requested_model,
+            model_source="explicit" if requested_model else "cli_default",
             phase=phase,
         )
         env = gemness_env(self.config)
@@ -163,7 +168,9 @@ class GeminiCliRunner:
             "running",
             "gemini.started",
             {
-                "model": model,
+                "model": requested_model or DEFAULT_MODEL_LABEL,
+                "model_requested": requested_model,
+                "model_source": "explicit" if requested_model else "cli_default",
                 "output_format": output_format,
                 "pid": process.pid,
                 "cwd": str(cwd) if cwd is not None else "",
@@ -413,6 +420,9 @@ def _record_stream_json_line(
         stats = event.get("stats")
         if isinstance(stats, dict):
             state.stats = stats
+            detected_model = _model_from_stats(stats)
+            if detected_model:
+                hub.set_model(session_id, detected_model, source="stream_stats", phase=phase)
         error = event.get("error")
         if error:
             state.error_message = json.dumps(error, ensure_ascii=False) if isinstance(error, dict) else str(error)
@@ -453,6 +463,25 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
 
 def _tail(value: str, limit: int = 4000) -> str:
     return value[-limit:]
+
+
+def _requested_model(model: str | None) -> str | None:
+    if model is None:
+        return None
+    value = str(model).strip()
+    return value or None
+
+
+def _model_from_stats(stats: dict[str, Any]) -> str | None:
+    model = stats.get("model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    models = stats.get("models")
+    if isinstance(models, dict):
+        names = sorted(str(name).strip() for name in models if str(name).strip())
+        if names:
+            return ", ".join(names)
+    return None
 
 
 def gemness_env(config: GemnessConfig, base_env: dict[str, str] | None = None) -> dict[str, str]:

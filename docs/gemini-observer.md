@@ -32,8 +32,8 @@ By default `GemnessService` starts the loopback Observer web server during MCP s
 1. create session
 2. render and redact prompt events
 3. optionally wait for approval or prompt edit
-4. run Gemini CLI with `--output-format stream-json` by default
-5. record streamed response deltas, final response, stderr, exit, and final result
+4. run Gemini CLI with `--output-format stream-json` by default and no `-m` flag unless a model was explicitly configured
+5. record streamed response deltas, detected model stats, final response, stderr, exit, and final result
 
 `follow_up`:
 
@@ -76,6 +76,8 @@ When startup preloading is disabled, `health_check` still starts the Observer be
 ## Gemini CLI Output Choice
 
 This implementation uses `--output-format stream-json` as the default canonical mode. The runner records assistant message deltas as `gemini.delta` events for the Observer UI, then synthesizes the same JSON envelope shape expected by `ask_text`, `ask_json`, and repair parsing. Set `GEMNESS_GEMINI_OUTPUT_FORMAT=json` to use final-response-only mode.
+
+By default Gemness does not set `GEMNESS_MODEL` and does not pass `-m` to Gemini CLI, allowing the CLI to select its default model path. When stream stats report a model name, Gemness records a `gemini.model_detected` event and updates the Observer session model label.
 
 For Gemini CLI headless mode, the runner defaults to `--approval-mode plan` and does not pass `--skip-trust`. It also sets `GEMINI_CLI_TRUST_WORKSPACE=true` for the Gemini child process so real observer sessions do not stop on Gemini CLI's interactive workspace trust prompt. Set `GEMNESS_GEMINI_TRUST_WORKSPACE=false` or `GEMINI_CLI_TRUST_WORKSPACE=false` only when you explicitly want to disable that workspace trust environment value. Set `GEMNESS_GEMINI_SKIP_TRUST=true` only when you explicitly want to bypass Gemini CLI trust checks in your local environment.
 

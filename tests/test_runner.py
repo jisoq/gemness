@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 
-from gemness.config import GemnessConfig
+from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
 from gemness.observer import ObserverHub
 from gemness.runner import GeminiCliRunner, _StreamJsonState, _record_stream_json_line, _stream_json_stdout, gemness_env
 
@@ -21,6 +21,7 @@ def test_config_defaults_do_not_skip_gemini_trust(monkeypatch) -> None:
     assert GemnessConfig().observer_port == 56755
     assert GemnessConfig().observer_start_on_init is True
     assert GemnessConfig().gemini_output_format == "stream-json"
+    assert GemnessConfig().model is None
 
 
 def test_gemness_env_trusts_workspace_by_default() -> None:
@@ -78,6 +79,35 @@ def test_runner_preserves_env_and_uses_cwd_without_default_skip_trust(tmp_path, 
     assert captured["cwd"] == str(tmp_path)
     assert captured["env"]["HTTPS_PROXY"] == "http://proxy.local"
     assert captured["env"]["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+
+
+def test_runner_omits_model_flag_when_model_is_not_requested(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeProcess:
+        pid = 1234
+        stdout = io.StringIO('{"response":"ok"}')
+        stderr = io.StringIO("")
+
+        def poll(self):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr("gemness.runner.subprocess.Popen", fake_popen)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    session = hub.create_session("ask_text", DEFAULT_MODEL_LABEL)
+    runner = GeminiCliRunner(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, gemini_command="fake-gemini"))
+
+    result = runner.run("hello", model=None, output_format="json", session_id=session.session_id, hub=hub, cwd=tmp_path)
+
+    assert result.status == "completed"
+    assert "-m" not in captured["command"]
+    started = next(event for event in hub.get_events(session.session_id, raw=True) if event["type"] == "gemini.started")
+    assert started["payload"]["model"] == DEFAULT_MODEL_LABEL
+    assert started["payload"]["model_source"] == "cli_default"
 
 
 def test_runner_adds_native_session_flags_as_argv_items(tmp_path, monkeypatch) -> None:
@@ -216,3 +246,21 @@ def test_stream_json_tool_use_resets_synthesized_final_response(tmp_path) -> Non
     )
 
     assert json.loads(_stream_json_stdout(state, ""))["response"] == "final answer"
+
+
+def test_stream_json_result_updates_session_with_actual_model_from_stats(tmp_path) -> None:
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    session = hub.create_session("ask_text", DEFAULT_MODEL_LABEL)
+    state = _StreamJsonState()
+
+    _record_stream_json_line(
+        '{"type":"result","status":"success","stats":{"models":{"gemini-2.5-flash":{"total_tokens":7}}}}\n',
+        state,
+        hub=hub,
+        session_id=session.session_id,
+        phase=None,
+    )
+
+    events = hub.get_events(session.session_id, raw=True)
+    assert hub.get_session(session.session_id)["model"] == "gemini-2.5-flash"
+    assert "gemini.model_detected" in [event["type"] for event in events]
