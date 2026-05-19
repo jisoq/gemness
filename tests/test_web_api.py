@@ -4,8 +4,8 @@ import json
 import re
 import shutil
 import subprocess
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from gemness.config import GemnessConfig
 from gemness.runner import GeminiRunResult
@@ -14,7 +14,7 @@ from gemness.web import INDEX_HTML
 
 
 class WebFakeRunner:
-    def run(self, prompt, *, model, output_format, session_id, hub, cwd=None, phase=None):
+    def run(self, prompt, *, model, output_format, session_id, hub, cwd=None, phase=None, **kwargs):
         hub.set_status(session_id, "running", "gemini.started", {"model": model}, role="gemness", phase=phase)
         stdout = json.dumps({"response": "ok"})
         hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout}, phase=phase)
@@ -22,27 +22,64 @@ class WebFakeRunner:
         return GeminiRunResult.completed(stdout)
 
 
-def test_observer_api_requires_token_and_exports_redacted_transcript(tmp_path) -> None:
+def test_observer_api_is_loopback_local_and_exports_redacted_transcript(tmp_path) -> None:
     config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_text("API_KEY=secret-value")
-        base_url = result["observer_url"].split("/sessions/")[0]
-        token = result["observer_url"].split("token=", 1)[1]
+        base_url = _observer_base(result["observer_url"])
 
-        try:
-            urlopen(f"{base_url}/api/sessions", timeout=2)
-        except HTTPError as exc:
-            assert exc.code == 401
-        else:
-            raise AssertionError("Expected tokenless API call to fail")
+        sessions = _get_json(f"{base_url}/api/sessions")
+        redacted = _get_json(f"{base_url}/api/sessions/{result['session_id']}/export")
+        raw = _get_json(f"{base_url}/api/sessions/{result['session_id']}/export?raw=1")
 
-        redacted = _get_json(f"{base_url}/api/sessions/{result['session_id']}/export?token={token}")
-        raw = _get_json(f"{base_url}/api/sessions/{result['session_id']}/export?token={token}&raw=1")
-
+        assert sessions["sessions"][0]["session_id"] == result["session_id"]
         assert "secret-value" not in json.dumps(redacted)
         assert "API_KEY=[REDACTED]" in json.dumps(redacted)
         assert "API_KEY=secret-value" in json.dumps(raw)
+    finally:
+        service.shutdown()
+
+
+def test_observer_api_exports_conversation_without_public_gemini_session_id(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        result = service.ask_text("hello")
+        service.follow_up(result["session_id"], "continue")
+        base_url = _observer_base(result["observer_url"])
+
+        conversations = _get_json(f"{base_url}/api/conversations")
+        conversation_id = conversations["conversations"][0]["conversation_id"]
+        exported = _get_json(f"{base_url}/api/conversations/{conversation_id}")
+        raw_exported = _get_json(f"{base_url}/api/conversations/{conversation_id}?raw=1")
+
+        assert exported["conversation"]["conversation_id"] == result["conversation_id"]
+        assert len(exported["runs"]) == 2
+        assert "current_gemini_session_id" not in exported["conversation"]
+        assert "gemini_session_id" not in exported["runs"][0]
+        assert raw_exported["conversation"]["current_gemini_session_id"].startswith("gemness_")
+    finally:
+        service.shutdown()
+
+
+def test_legacy_session_url_redirects_to_conversation_url(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        result = service.ask_text("hello")
+        base_url = _observer_base(result["observer_url"])
+        request = Request(f"{base_url}/session/{result['session_id']}", headers={"Accept": "text/html"}, method="GET")
+        opener = build_opener(_NoRedirect)
+        try:
+            opener.open(request, timeout=2)
+        except Exception as exc:
+            response = exc
+        else:
+            raise AssertionError("Expected redirect")
+
+        assert response.code == 302
+        assert f"/conversation/{result['conversation_id']}#run-{result['session_id']}" in response.headers["Location"]
     finally:
         service.shutdown()
 
@@ -61,10 +98,9 @@ def test_completed_session_approve_instruction_creates_follow_up(tmp_path) -> No
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_text("hello")
-        base_url = result["observer_url"].split("/sessions/")[0]
-        token = result["observer_url"].split("token=", 1)[1]
+        base_url = _observer_base(result["observer_url"])
         posted = _post_json(
-            f"{base_url}/api/sessions/{result['session_id']}/interventions?token={token}",
+            f"{base_url}/api/sessions/{result['session_id']}/interventions",
             {"action": "approve", "instruction": "follow this up"},
         )
 
@@ -88,12 +124,17 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "function buildConversationTranscript" in INDEX_HTML
     assert "function describeEventAsConversationTurn" in INDEX_HTML
     assert "function preferredLiveSession" in INDEX_HTML
+    assert "function shouldHonorRequestedSession" in INDEX_HTML
+    assert "function renderSessionGroup" in INDEX_HTML
+    assert "function sessionTitle" in INDEX_HTML
     assert "function renderMarkdown" in INDEX_HTML
     assert "function updateInterventionPanel" in INDEX_HTML
     assert "renderConversationTurn" in INDEX_HTML
     assert "buildReadableTranscript" in INDEX_HTML
     assert "isTerminalStatus" in INDEX_HTML
     assert "isBenignGeminiStderr" in INDEX_HTML
+    assert "conversation id" in INDEX_HTML
+    assert "run id" in INDEX_HTML
     assert "256-color support not detected" in INDEX_HTML
     assert "Ripgrep is not available. Falling back to GrepTool." in INDEX_HTML
     assert "visibleEvents(transcript?.events || []).map(renderEvent)" not in INDEX_HTML
@@ -105,23 +146,54 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "프롬프트 전체 교체" in INDEX_HTML
     assert "중단 후 이 지시로 재시도" in INDEX_HTML
     assert "Gemini -> Agents · 응답 중" in INDEX_HTML
-    assert "__GEMNESS_OBSERVER_TOKEN__" in INDEX_HTML
+    assert "Live" in INDEX_HTML
+    assert "History" in INDEX_HTML
 
 
-def test_observer_root_embeds_token_for_live_dashboard(tmp_path) -> None:
+def test_observer_ui_uses_root_api_without_token_query_and_sse_fallback() -> None:
+    assert "const api = (path) => path;" in INDEX_HTML
+    assert "encodeURIComponent(token)" not in INDEX_HTML
+    assert "__GEMNESS_OBSERVER_TOKEN__" not in INDEX_HTML
+    assert "source.onerror" in INDEX_HTML
+    assert "setInterval(() => { loadSessions().catch(console.error); }, 1500)" in INDEX_HTML
+
+
+def test_observer_ui_keeps_dashboard_url_instead_of_session_path() -> None:
+    assert "let liveMode = true;" in INDEX_HTML
+    assert "function canonicalizeDashboardUrl" in INDEX_HTML
+    assert 'history.replaceState(null, "", "/");' in INDEX_HTML
+    assert "requestedSessionId" in INDEX_HTML
+    assert "`/sessions/${currentSessionId}" not in INDEX_HTML
+
+
+def test_observer_root_serves_live_dashboard_without_token(tmp_path) -> None:
     config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_text("hello")
-        base_url = result["observer_url"].split("/sessions/")[0]
-        token = result["observer_url"].split("token=", 1)[1]
+        base_url = _observer_base(result["observer_url"])
 
         html_request = Request(f"{base_url}/", headers={"Accept": "text/html"})
         with urlopen(html_request, timeout=2) as response:
             html = response.read().decode("utf-8")
 
-        assert token in html
         assert "__GEMNESS_OBSERVER_TOKEN__" not in html
+        assert result["observer_url"] == f"{base_url}/"
+    finally:
+        service.shutdown()
+
+
+def test_observer_api_ignores_stale_url_token(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        result = service.ask_text("hello")
+        base_url = _observer_base(result["observer_url"])
+        request = Request(f"{base_url}/api/sessions?token=stale-token", headers={"Accept": "application/json"})
+        with urlopen(request, timeout=2) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        assert data["sessions"][0]["session_id"] == result["session_id"]
     finally:
         service.shutdown()
 
@@ -278,6 +350,41 @@ console.log(JSON.stringify({ picked: picked.session_id, fallback: fallback.sessi
     assert data == {"picked": "running", "fallback": "latest"}
 
 
+def test_session_list_groups_live_history_and_uses_session_title(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const liveHtml = renderSessionGroup("Live", [
+  { session_id: "live", status: "running", title: "Observer UX 정리", tool_name: "ask_text", model: "m" }
+], "");
+const historyHtml = renderSessionGroup("History", [
+  { session_id: "done", status: "completed", tool_name: "ask_json", model: "m" }
+], "");
+console.log(JSON.stringify({
+  liveHasTitle: liveHtml.includes("Observer UX 정리"),
+  liveHasGroup: liveHtml.includes("Live"),
+  historyHasFallback: historyHtml.includes("JSON 질문"),
+  historyHasGroup: historyHtml.includes("History"),
+  directTitle: sessionTitle({ title: "짧은 제목", tool_name: "ask_text" }),
+  fallbackTitle: sessionTitle({ tool_name: "review_current_diff" })
+}));
+"""
+    script_path = tmp_path / "session-list-title-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert data == {
+        "liveHasTitle": True,
+        "liveHasGroup": True,
+        "historyHasFallback": True,
+        "historyHasGroup": True,
+        "directTitle": "짧은 제목",
+        "fallbackTitle": "현재 diff 리뷰",
+    }
+
+
 def test_conversation_transcript_keeps_unsent_prompt_draft(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"
@@ -349,6 +456,16 @@ def _post_json(url: str, payload: dict):
     request = Request(url, data=body, headers={"Accept": "application/json", "Content-Type": "application/json"}, method="POST")
     with urlopen(request, timeout=2) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _observer_base(observer_url: str) -> str:
+    parsed = urlparse(observer_url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def _extract_index_script() -> str:

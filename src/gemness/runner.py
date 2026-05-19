@@ -51,6 +51,25 @@ class GeminiRunResult:
 
 
 @dataclass(slots=True)
+class NativeResumeProbe:
+    supported: bool
+    version: str | None = None
+    help_text: str = ""
+    missing: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def reason(self) -> str | None:
+        if self.supported:
+            return None
+        if self.error:
+            return self.error
+        if self.missing:
+            return "missing Gemini CLI flags/features: " + ", ".join(self.missing)
+        return "Gemini CLI native resume is not supported"
+
+
+@dataclass(slots=True)
 class _StreamJsonState:
     response_parts: list[str] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
@@ -73,6 +92,10 @@ class GeminiRunner(Protocol):
         hub: ObserverHub,
         cwd: Path | None = None,
         phase: str | None = None,
+        gemini_session_id: str | None = None,
+        native_session_mode: str = "none",
+        fallback_used: bool = False,
+        fallback_reason: str | None = None,
     ) -> GeminiRunResult:
         ...
 
@@ -80,6 +103,7 @@ class GeminiRunner(Protocol):
 class GeminiCliRunner:
     def __init__(self, config: GemnessConfig) -> None:
         self.config = config
+        self._native_probe: NativeResumeProbe | None = None
 
     def run(
         self,
@@ -91,6 +115,10 @@ class GeminiCliRunner:
         hub: ObserverHub,
         cwd: Path | None = None,
         phase: str | None = None,
+        gemini_session_id: str | None = None,
+        native_session_mode: str = "none",
+        fallback_used: bool = False,
+        fallback_reason: str | None = None,
     ) -> GeminiRunResult:
         command = resolve_gemini_command(self.config.gemini_command)
         command.extend(["-m", model, "--output-format", output_format])
@@ -98,7 +126,20 @@ class GeminiCliRunner:
             command.append("--skip-trust")
         if self.config.gemini_approval_mode:
             command.extend(["--approval-mode", self.config.gemini_approval_mode])
+        if gemini_session_id and native_session_mode == "start":
+            command.extend(["--session-id", gemini_session_id])
+        elif gemini_session_id and native_session_mode == "resume":
+            command.extend(["--resume", gemini_session_id])
         command.extend(["-p", prompt])
+        hub.record_run_command(
+            session_id,
+            command,
+            native_resume_used=native_session_mode == "resume",
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            gemini_session_id=gemini_session_id,
+            phase=phase,
+        )
         env = gemness_env(self.config)
         started = time.monotonic()
         try:
@@ -215,6 +256,53 @@ class GeminiCliRunner:
         if exit_code != 0:
             return GeminiRunResult.error("Gemini CLI exited with an error", exit_code=exit_code, stderr=stderr, stdout=stdout)
         return GeminiRunResult.completed(stdout=stdout, stderr=stderr, exit_code=exit_code or 0, stats=stream_state.stats if stream_state else {})
+
+    def probe_native_resume(self, cwd: Path | None = None) -> NativeResumeProbe:
+        if self._native_probe is not None:
+            return self._native_probe
+        command = resolve_gemini_command(self.config.gemini_command)
+        if not command:
+            self._native_probe = NativeResumeProbe(False, error="Gemini CLI command is empty")
+            return self._native_probe
+        env = gemness_env(self.config)
+        try:
+            version_completed = subprocess.run(
+                [*command, "--version"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+                env=env,
+            )
+            help_completed = subprocess.run(
+                [*command, "--help"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+                env=env,
+            )
+        except FileNotFoundError:
+            self._native_probe = NativeResumeProbe(False, error=f"Gemini CLI not found: {self.config.gemini_command}")
+            return self._native_probe
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self._native_probe = NativeResumeProbe(False, error=f"Gemini CLI capability probe failed: {exc}")
+            return self._native_probe
+        version = (version_completed.stdout or version_completed.stderr).strip() or None
+        help_text = "\n".join(part for part in [help_completed.stdout, help_completed.stderr] if part)
+        missing = _missing_native_resume_features(help_text)
+        if version_completed.returncode != 0:
+            missing.append("--version")
+        if help_completed.returncode != 0:
+            missing.append("--help")
+        self._native_probe = NativeResumeProbe(not missing, version=version, help_text=help_text, missing=missing)
+        return self._native_probe
 
 
 def _reader_thread(pipe: Any, parts: list[str], *, on_line: Callable[[str], None] | None = None) -> threading.Thread:
@@ -339,6 +427,17 @@ def _stream_json_stdout(state: _StreamJsonState | None, raw_stdout: str) -> str:
     if state.result_status == "error" and state.error_message:
         payload["error"] = state.error_message
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _missing_native_resume_features(help_text: str) -> list[str]:
+    missing = [
+        flag
+        for flag in ["--resume", "--session-id", "--list-sessions", "--output-format", "stream-json"]
+        if flag not in help_text
+    ]
+    if "-p" not in help_text and "--prompt" not in help_text:
+        missing.append("-p/--prompt")
+    return missing
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:

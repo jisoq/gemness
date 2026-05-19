@@ -23,7 +23,7 @@ flowchart LR
 
 `ObserverHub` owns session IDs, session state, events, redaction, intervention queues, JSONL transcript persistence, and the local web server. Gemini remains advisory: Codex still decides how to use the returned text or JSON.
 
-By default `GemnessService` starts the loopback Observer web server during MCP server initialization (`GEMNESS_OBSERVER_START_ON_INIT=true`). That makes the fixed dashboard URL `http://127.0.0.1:56755` usable before `ask_text`, `ask_json`, or `review_current_diff` returns a session-specific `observer_url`.
+By default `GemnessService` starts the loopback Observer web server during MCP server initialization (`GEMNESS_OBSERVER_START_ON_INIT=true`). That makes the fixed dashboard URL `http://127.0.0.1:56755` usable before `ask_text`, `ask_json`, or `review_current_diff` returns the dashboard `observer_url`. The UI lists sessions from the shared transcript directory and follows the newest running session, so users do not need to remember session IDs.
 
 ## Tool Pipeline
 
@@ -167,7 +167,7 @@ type SessionStatus =
 
 ## API
 
-The HTML UI is served from the loopback-only root URL and embeds the current local token for that browser page. All API routes still require the local token as `?token=...`, `Authorization: Bearer ...`, or `X-Observer-Token`.
+The HTML UI is served from the loopback-only root URL. API, SSE, export, and intervention routes are local loopback endpoints on that same Observer server and do not require URL tokens.
 
 - `GET /api/sessions`
 - `GET /api/sessions/<session_id>?raw=0`

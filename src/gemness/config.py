@@ -30,6 +30,13 @@ def _int_env(name: str, default: int) -> int:
     return int(value)
 
 
+def _choice_env(name: str, default: str, choices: set[str]) -> str:
+    value = os.getenv(name, default).strip().lower()
+    if value not in choices:
+        raise ValueError(f"{name} must be one of: {', '.join(sorted(choices))}")
+    return value
+
+
 def _optional_path_env(name: str) -> Path | None:
     value = os.getenv(name)
     if value is None or value.strip() == "":
@@ -67,6 +74,8 @@ class GemnessConfig:
     approval_timeout_sec: float = float(os.getenv("GEMNESS_APPROVAL_TIMEOUT_SEC", "300"))
     gemini_command: str = os.getenv("GEMNESS_COMMAND", "gemini")
     gemini_output_format: str = os.getenv("GEMNESS_GEMINI_OUTPUT_FORMAT", "stream-json")
+    gemini_native_resume: str = _choice_env("GEMNESS_GEMINI_NATIVE_RESUME", "auto", {"auto", "on", "off"})
+    gemini_native_resume_max_turns: int = _int_env("GEMNESS_GEMINI_NATIVE_RESUME_MAX_TURNS", 40)
     gemini_skip_trust: bool = _bool_env("GEMNESS_GEMINI_SKIP_TRUST", False)
     gemini_trust_workspace: bool = field(default_factory=_trust_workspace_env)
     gemini_approval_mode: str = os.getenv("GEMNESS_GEMINI_APPROVAL_MODE", "plan")

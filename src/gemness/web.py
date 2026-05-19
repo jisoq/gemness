@@ -51,15 +51,24 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
-        if path.startswith("/api/") or path == "/api/events":
-            if not self._authorized(query):
-                self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+        parts = _parts(path)
+        if len(parts) == 2 and parts[0] == "session":
+            session = self.server.hub.sessions.get(parts[1])
+            if session is not None and session.conversation_id:
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", f"/conversation/{quote(session.conversation_id)}#run-{quote(session.session_id)}")
+                self.end_headers()
                 return
-        if path == "/" or path.startswith("/sessions/"):
+            self._html(INDEX_HTML)
+            return
+        if path == "/" or path.startswith("/sessions/") or path.startswith("/conversation/"):
             self._html(INDEX_HTML)
             return
         if path == "/api/sessions":
             self._json({"sessions": self.server.hub.list_sessions()})
+            return
+        if path == "/api/conversations":
+            self._json({"conversations": self.server.hub.list_conversations()})
             return
         if path == "/api/config":
             self._json({"pause_before_send": self.server.hub.pause_before_send, "redact_raw_by_default": True})
@@ -67,7 +76,6 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/events":
             self._sse(raw=_truthy(query.get("raw", ["0"])[0]))
             return
-        parts = _parts(path)
         if len(parts) >= 3 and parts[0] == "api" and parts[1] == "sessions":
             session_id = parts[2]
             raw = _truthy(query.get("raw", ["0"])[0])
@@ -84,14 +92,26 @@ class _Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+        if len(parts) >= 3 and parts[0] == "api" and parts[1] == "conversations":
+            conversation_id = parts[2]
+            raw = _truthy(query.get("raw", ["0"])[0])
+            if len(parts) == 3:
+                self._json(self.server.hub.export_conversation(conversation_id, raw=raw))
+                return
+            if len(parts) == 4 and parts[3] == "export":
+                data = self.server.hub.export_conversation(conversation_id, raw=raw)
+                body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Disposition", f"attachment; filename=gemness-conversation-{quote(conversation_id)}.json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
-        if not self._authorized(query):
-            self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
-            return
         payload = self._read_json()
         path = parsed.path
         if path == "/api/config":
@@ -124,7 +144,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json({"error": "service unavailable"}, HTTPStatus.CONFLICT)
                     return
                 child_session_id = self.server.hub.service.start_follow_up(session_id, follow_up_text)
-                self._json({"child_session_id": child_session_id})
+                child = self.server.hub.sessions.get(child_session_id)
+                self._json({"child_session_id": child_session_id, "conversation_id": child.conversation_id if child else None})
                 return
             intervention = self.server.hub.add_intervention(session_id, action, instruction=instruction, prompt=prompt)
             self._json({"intervention": intervention.to_dict()})
@@ -132,14 +153,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def _authorized(self, query: dict[str, list[str]]) -> bool:
-        token = query.get("token", [None])[0]
-        if token is None:
-            auth = self.headers.get("Authorization", "")
-            if auth.lower().startswith("bearer "):
-                token = auth[7:].strip()
-        if token is None:
-            token = self.headers.get("X-Observer-Token")
-        return self.server.hub.validate_token(token)
+        return True
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -158,7 +172,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _html(self, html: str) -> None:
-        html = html.replace("__GEMNESS_OBSERVER_TOKEN__", self.server.hub.token)
         body = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -261,6 +274,16 @@ INDEX_HTML = r"""<!doctype html>
     h1, h2 { margin: 0 0 12px; font-size: 16px; }
     .toolbar, .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .session-list { display: grid; gap: 8px; }
+    .session-group { display: grid; gap: 8px; }
+    .session-group + .session-group { margin-top: 16px; }
+    .session-group-title {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
     .session {
       width: 100%;
       text-align: left;
@@ -268,6 +291,7 @@ INDEX_HTML = r"""<!doctype html>
       gap: 4px;
       background: var(--panel-2);
     }
+    .session-title { font-weight: 700; overflow-wrap: anywhere; }
     .session.active { outline: 2px solid var(--accent); }
     .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .badge { border-radius: 999px; padding: 2px 8px; font-size: 12px; background: var(--panel); border: 1px solid var(--line); }
@@ -489,15 +513,17 @@ INDEX_HTML = r"""<!doctype html>
     </section>
   </div>
   <script>
-    const params = new URLSearchParams(location.search);
-    const embeddedToken = "__GEMNESS_OBSERVER_TOKEN__";
-    const token = params.get("token") || embeddedToken || "";
     const explicitSessionPath = location.pathname.startsWith("/sessions/");
-    let liveMode = !explicitSessionPath;
-    let currentSessionId = explicitSessionPath ? location.pathname.split("/").pop() : "";
+    const explicitConversationPath = location.pathname.startsWith("/conversation/");
+    let requestedSessionId = explicitSessionPath ? location.pathname.split("/").filter(Boolean).pop() : "";
+    let requestedConversationId = explicitConversationPath ? location.pathname.split("/").filter(Boolean).pop() : "";
+    let liveMode = true;
+    let currentSessionId = requestedSessionId || "";
     let sessions = [];
     let transcript = null;
     let source = null;
+    let pollTimer = null;
+    if (explicitSessionPath) canonicalizeDashboardUrl();
 
     const statusLabels = {
       queued: "대기 중",
@@ -547,17 +573,47 @@ INDEX_HTML = r"""<!doctype html>
       "repair.validation_failed": "복구 검증 실패",
       "intervention.received": "개입 수신",
       "intervention.applied": "개입 적용",
+      "run.command": "실행 명령",
+      "conversation.native_session_rotated": "Gemini native session 회전",
       "session.completed": "세션 완료",
       "session.cancelled": "세션 취소",
       "session.error": "세션 오류"
     };
 
     const qs = (id) => document.getElementById(id);
-    const api = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    const api = (path) => path;
 
+    function canonicalizeDashboardUrl() {
+      if (typeof history !== "undefined" && typeof history.replaceState === "function") {
+        history.replaceState(null, "", "/");
+      }
+    }
+    function recoverFromAuthFailure() {
+      const target = location.pathname || "/";
+      try {
+        const key = `gemness-observer-auth-reload:${target}`;
+        if (window.sessionStorage?.getItem(key) === "1") return;
+        window.sessionStorage?.setItem(key, "1");
+      } catch {
+        // If storage is unavailable, a single clean reload is still the best recovery path.
+      }
+      if (typeof location.replace === "function") location.replace(target);
+    }
+    function markAuthHealthy() {
+      try {
+        window.sessionStorage?.removeItem(`gemness-observer-auth-reload:${location.pathname || "/"}`);
+      } catch {
+        // Storage may be disabled in private contexts.
+      }
+    }
     async function getJson(path) {
       const response = await fetch(api(path));
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        const message = await response.text();
+        if (response.status === 401) recoverFromAuthFailure();
+        throw new Error(message);
+      }
+      markAuthHealthy();
       return await response.json();
     }
     async function postJson(path, body) {
@@ -566,17 +622,35 @@ INDEX_HTML = r"""<!doctype html>
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body)
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        const message = await response.text();
+        if (response.status === 401) recoverFromAuthFailure();
+        throw new Error(message);
+      }
+      markAuthHealthy();
       return await response.json();
     }
     async function loadSessions() {
       const data = await getJson("/api/sessions");
       sessions = data.sessions || [];
       if (liveMode) {
+        const requested = requestedSessionId
+          ? sessions.find((session) => session.session_id === requestedSessionId)
+          : requestedConversationId
+            ? sessions.find((session) => session.conversation_id === requestedConversationId)
+            : null;
         const preferred = preferredLiveSession(sessions);
-        currentSessionId = preferred?.session_id || "";
+        currentSessionId = shouldHonorRequestedSession(requested, preferred) ? requested.session_id : preferred?.session_id || "";
+        if (sessions.length) {
+          requestedSessionId = "";
+          requestedConversationId = "";
+        }
       } else if (!currentSessionId && sessions[0]) {
         currentSessionId = sessions[0].session_id;
+      } else if (currentSessionId && !sessions.some((session) => session.session_id === currentSessionId)) {
+        liveMode = true;
+        const preferred = preferredLiveSession(sessions);
+        currentSessionId = preferred?.session_id || "";
       }
       renderSessions();
       if (currentSessionId) await loadTranscript();
@@ -584,6 +658,9 @@ INDEX_HTML = r"""<!doctype html>
     }
     function preferredLiveSession(sessionItems) {
       return (sessionItems || []).find((session) => !isTerminalStatus(session.status)) || sessionItems?.[0] || null;
+    }
+    function shouldHonorRequestedSession(requested, preferred) {
+      return !!requested && (!preferred || isTerminalStatus(preferred.status));
     }
     async function loadTranscript() {
       const raw = qs("raw").checked ? "1" : "0";
@@ -593,6 +670,17 @@ INDEX_HTML = r"""<!doctype html>
     }
     async function loadConversationBundle(baseTranscript, raw) {
       const activeSession = baseTranscript.session || {};
+      if (activeSession.conversation_id) {
+        const conversation = await getJson(`/api/conversations/${activeSession.conversation_id}?raw=${raw}`);
+        const activeRun = (conversation.runs || []).find((run) => run.session_id === activeSession.session_id) || activeSession;
+        return {
+          session: activeRun,
+          conversation: conversation.conversation,
+          runs: conversation.runs || [],
+          events: (conversation.events || []).sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || ""))),
+          related_sessions: conversation.runs || []
+        };
+      }
       const rootSessionId = activeSession.parent_session_id || activeSession.session_id;
       let rootTranscript = baseTranscript;
       if (activeSession.parent_session_id) {
@@ -614,26 +702,39 @@ INDEX_HTML = r"""<!doctype html>
       };
     }
     function renderSessions() {
-      qs("sessionList").innerHTML = sessions.map((s) => `
-        <button class="session ${s.session_id === currentSessionId ? "active" : ""}" data-session="${s.session_id}">
-          <span><strong>${escapeHtml(toolLabel(s.tool_name))}</strong> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span>
-          <span class="meta">${escapeHtml(s.model || "")}</span>
-          <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
-        </button>
-      `).join("");
+      const liveSessions = sessions.filter((session) => !isTerminalStatus(session.status));
+      const historySessions = sessions.filter((session) => isTerminalStatus(session.status));
+      qs("sessionList").innerHTML = [
+        renderSessionGroup("Live", liveSessions, "실행 중인 세션이 없습니다."),
+        renderSessionGroup("History", historySessions, "이전 세션이 없습니다.")
+      ].join("");
       document.querySelectorAll("[data-session]").forEach((button) => {
         button.onclick = async () => {
           liveMode = false;
           currentSessionId = button.dataset.session;
-          history.replaceState(null, "", `/sessions/${currentSessionId}?token=${encodeURIComponent(token)}`);
+          canonicalizeDashboardUrl();
           renderSessions();
           await loadTranscript();
         };
       });
     }
+    function renderSessionGroup(label, items, emptyText) {
+      const body = items.length ? items.map(renderSessionButton).join("") : `<p class="help">${escapeHtml(emptyText)}</p>`;
+      return `<section class="session-group"><div class="session-group-title">${escapeHtml(label)}</div>${body}</section>`;
+    }
+    function renderSessionButton(s) {
+      return `
+        <button class="session ${s.session_id === currentSessionId ? "active" : ""}" data-session="${s.session_id}">
+          <span><span class="session-title">${escapeHtml(sessionTitle(s))}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span>
+          <span class="meta">${escapeHtml(toolLabel(s.tool_name))}</span>
+          <span class="meta">${escapeHtml(s.model || "")}</span>
+          <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
+        </button>
+      `;
+    }
     function renderTranscript() {
       const session = transcript?.session || {};
-      qs("title").textContent = session.session_id ? `${toolLabel(session.tool_name)} · ${statusLabel(session.status)}` : "대화 기록";
+      qs("title").textContent = session.session_id ? `${sessionTitle(session)} · ${statusLabel(session.status)}` : "대화 기록";
       renderReview(transcript?.events || []);
       renderSessionSummary(session, transcript?.events || []);
       updateInterventionPanel(session);
@@ -645,14 +746,18 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderSessionSummary(session, events) {
       const cwd = findCwd(events);
+      const conversation = transcript?.conversation || {};
       qs("summaryGrid").innerHTML = [
+        ["제목", sessionTitle(session)],
         ["도구", toolLabel(session.tool_name)],
         ["모델", session.model || "알 수 없음"],
         ["상태", statusLabel(session.status)],
         ["시작", formatDate(session.started_at)],
         ["종료", formatDate(session.completed_at)],
         ["cwd", cwd || "기록 없음"],
-        ["observer session id", session.session_id || "없음"],
+        ["conversation id", session.conversation_id || conversation.conversation_id || "없음"],
+        ["run id", session.run_id || session.session_id || "없음"],
+        ["turn", session.turn_index || "없음"],
         ["raw 보기", qs("raw").checked ? "켜짐" : "꺼짐"]
       ].map(([label, value]) => `<span class="summary-item"><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</span>`).join("");
     }
@@ -765,6 +870,11 @@ INDEX_HTML = r"""<!doctype html>
       const raw = qs("raw").checked ? "1" : "0";
       source = new EventSource(api(`/api/events?raw=${raw}`));
       source.onmessage = async () => { await loadSessions(); };
+      source.onerror = async () => { await loadSessions().catch(console.error); };
+      if (!pollTimer) {
+        pollTimer = setInterval(() => { loadSessions().catch(console.error); }, 1500);
+        if (typeof pollTimer.unref === "function") pollTimer.unref();
+      }
     }
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -871,10 +981,17 @@ INDEX_HTML = r"""<!doctype html>
             direction: "system",
             title: "Observer",
             timestamp: event.ts,
-            body: `${toolLabel(payload.tool_name || event.tool_name)} 세션이 ${payload.model || "지정된 모델"}로 시작되었습니다.`,
-            meta: { status: payload.status, session_id: payload.session_id },
+            body: `${toolLabel(payload.tool_name || event.tool_name)} run이 ${payload.model || "지정된 모델"}로 시작되었습니다.`,
+            meta: { status: payload.status, conversation_id: payload.conversation_id, run_id: payload.run_id || payload.session_id },
             rawEvent: event
           };
+        case "run.command":
+          return turn(event, "observer", "system", "Observer", "Gemini CLI 실행 argv가 기록되었습니다.", {
+            mode: payload.native_resume_used ? "resume" : payload.gemini_session_id ? "session-id" : "legacy",
+            fallback: payload.fallback_used ? payload.fallback_reason || "fallback" : ""
+          });
+        case "conversation.native_session_rotated":
+          return turn(event, "observer", "system", "Observer", `Gemini native session을 새로 시작했습니다. 사유: ${payload.reason || "알 수 없음"}.`, {}, "warn");
         case "prompt.rendered":
           if (hasMatchingLaterPromptSent(event, index, allEvents)) return null;
           return {
@@ -1067,6 +1184,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     function statusLabel(status) { return statusLabels[status] || status || "알 수 없음"; }
     function toolLabel(tool) { return toolLabels[tool] || tool || "알 수 없는 도구"; }
+    function sessionTitle(session) { return session?.title || toolLabel(session?.tool_name); }
     function roleLabel(role) { return roleLabels[role] || role || "알 수 없음"; }
     function eventLabel(type) { return eventLabels[type] || type || "이벤트"; }
     function phaseLabel(phase) { return phase === "repair" ? "복구" : phase === "edited" ? "수정됨" : phase === "appended_instruction" ? "지시 추가됨" : phase; }
@@ -1149,6 +1267,10 @@ INDEX_HTML = r"""<!doctype html>
     qs("export").onclick = () => {
       if (!currentSessionId) return;
       const raw = qs("raw").checked ? "1" : "0";
+      if (transcript?.conversation?.conversation_id) {
+        location.href = api(`/api/conversations/${transcript.conversation.conversation_id}/export?raw=${raw}`);
+        return;
+      }
       location.href = api(`/api/sessions/${currentSessionId}/export?raw=${raw}`);
     };
     document.querySelectorAll("[data-action]").forEach((button) => {
@@ -1176,6 +1298,8 @@ INDEX_HTML = r"""<!doctype html>
     window.preferredLiveSession = preferredLiveSession;
     window.parseGeminiEnvelope = parseGeminiEnvelope;
     window.renderMarkdown = renderMarkdown;
+    window.renderSessionGroup = renderSessionGroup;
+    window.sessionTitle = sessionTitle;
     getJson("/api/config").then((config) => { qs("pause").checked = !!config.pause_before_send; }).catch(console.error);
     loadSessions().then(openEvents).catch(console.error);
   </script>

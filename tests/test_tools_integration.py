@@ -34,8 +34,23 @@ class FakeRunner:
         hub: ObserverHub,
         cwd=None,
         phase: str | None = None,
+        gemini_session_id: str | None = None,
+        native_session_mode: str = "none",
+        fallback_used: bool = False,
+        fallback_reason: str | None = None,
     ) -> GeminiRunResult:
-        self.calls.append({"prompt": prompt, "model": model, "output_format": output_format, "session_id": session_id, "cwd": cwd, "phase": phase})
+        self.calls.append({
+            "prompt": prompt,
+            "model": model,
+            "output_format": output_format,
+            "session_id": session_id,
+            "cwd": cwd,
+            "phase": phase,
+            "gemini_session_id": gemini_session_id,
+            "native_session_mode": native_session_mode,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
+        })
         hub.set_status(session_id, "running", "gemini.started", {"model": model, "output_format": output_format}, role="gemness", phase=phase)
         response = self.responses.pop(0)
         if callable(response):
@@ -73,8 +88,24 @@ def test_ask_text_happy_path(tmp_path) -> None:
         assert result["text"] == "hello"
         assert result["session_id"]
         assert result["observer_url"].startswith("http://127.0.0.1:")
+        assert service.hub.get_session(result["session_id"])["title"] == "Say hello"
         events = service.hub.get_events(result["session_id"], raw=False)
         assert "prompt.sent" in [event["type"] for event in events]
+    finally:
+        service.shutdown()
+
+
+def test_ask_text_title_uses_user_request_inside_codex_marker(tmp_path) -> None:
+    prompt = """Observer에서 사용자가 지켜보는 공개 데모입니다.
+
+Codex:
+"Gemini, Observer UX에서 Live와 History를 어떻게 나누면 좋을까?"
+
+Gemini의 답변을 한국어로 해주세요."""
+    service = make_service(tmp_path, ["hello"])
+    try:
+        result = service.ask_text(prompt)
+        assert service.hub.get_session(result["session_id"])["title"] == "Gemini, Observer UX에서 Live와 History를 어떻게 나누면..."
     finally:
         service.shutdown()
 
@@ -88,6 +119,7 @@ def test_ask_json_valid_json(tmp_path) -> None:
         assert result["repaired"] is False
         assert result["repair_attempted"] is False
         assert result["repair_succeeded"] is False
+        assert service.hub.get_session(result["session_id"])["title"] == "Return answer"
     finally:
         service.shutdown()
 
@@ -331,6 +363,65 @@ def test_completed_follow_up_creates_parent_linked_session(tmp_path) -> None:
         assert second["status"] == "completed"
         assert service.hub.get_session(second["session_id"])["parent_session_id"] == first["session_id"]
         assert "go deeper" in service.runner.calls[1]["prompt"]
+        assert service.runner.calls[0]["native_session_mode"] == "start"
+        assert service.runner.calls[1]["native_session_mode"] == "resume"
+        assert service.runner.calls[1]["gemini_session_id"] == service.runner.calls[0]["gemini_session_id"]
+        assert second["conversation_id"] == first["conversation_id"]
+    finally:
+        service.shutdown()
+
+
+def test_middle_turn_follow_up_creates_branch_conversation(tmp_path) -> None:
+    service = make_service(tmp_path, ["first", "second", "branch"])
+    try:
+        first = service.ask_text("first prompt")
+        second = service.follow_up(first["session_id"], "latest follow up")
+        branch = service.follow_up(first["session_id"], "branch from first")
+
+        first_session = service.hub.get_session(first["session_id"])
+        branch_session = service.hub.get_session(branch["session_id"])
+
+        assert second["conversation_id"] == first["conversation_id"]
+        assert branch["conversation_id"] != first["conversation_id"]
+        assert branch_session["branch_from_run_id"] == first["session_id"]
+        assert branch_session["fallback_used"] is True
+        assert branch_session["fallback_reason"] == "branch_from_past_run"
+        assert service.runner.calls[2]["native_session_mode"] == "start"
+        assert "Recent turns:" in service.runner.calls[2]["prompt"]
+        assert first_session["conversation_id"] == first["conversation_id"]
+    finally:
+        service.shutdown()
+
+
+def test_native_resume_off_uses_fallback_prompt_for_follow_up(tmp_path) -> None:
+    service = make_service(tmp_path, ["first", "second"], gemini_native_resume="off")
+    try:
+        first = service.ask_text("first prompt")
+        second = service.follow_up(first["session_id"], "go deeper")
+
+        assert second["status"] == "completed"
+        assert service.runner.calls[0]["native_session_mode"] == "none"
+        assert service.runner.calls[1]["native_session_mode"] == "none"
+        assert service.runner.calls[1]["fallback_used"] is True
+        assert service.runner.calls[1]["fallback_reason"] == "disabled_by_config"
+        assert "New user request:" in service.runner.calls[1]["prompt"]
+    finally:
+        service.shutdown()
+
+
+def test_long_session_rotation_starts_new_native_session_with_summary(tmp_path) -> None:
+    service = make_service(tmp_path, ["first", "rotated"], gemini_native_resume_max_turns=1)
+    try:
+        first = service.ask_text("first prompt")
+        rotated = service.follow_up(first["session_id"], "after rotation")
+        conversation = service.hub.get_conversation(first["conversation_id"], raw=True)
+
+        assert rotated["conversation_id"] == first["conversation_id"]
+        assert service.runner.calls[1]["native_session_mode"] == "start"
+        assert service.runner.calls[1]["fallback_used"] is True
+        assert service.runner.calls[1]["fallback_reason"] == "session_rotation"
+        assert "first prompt" in conversation["summary"]
+        assert "after rotation" in service.runner.calls[1]["prompt"]
     finally:
         service.shutdown()
 

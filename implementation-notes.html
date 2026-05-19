@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Gemness Chat Resume Implementation Notes</title>
+  <style>
+    body { font-family: system-ui, sans-serif; line-height: 1.5; max-width: 960px; margin: 40px auto; padding: 0 24px; color: #202124; }
+    h1, h2 { line-height: 1.2; }
+    h1 { font-size: 1.8rem; }
+    h2 { margin-top: 2rem; border-bottom: 1px solid #ddd; padding-bottom: 0.3rem; }
+    li { margin: 0.35rem 0; }
+    code { background: #f1f3f4; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    .meta { color: #5f6368; }
+  </style>
+</head>
+<body>
+  <h1>Gemness Chat Resume Implementation Notes</h1>
+  <p class="meta">실시간 기록 파일. 명세 해석, 의도적 편차, 트레이드오프, 미결 질문을 구현 중 갱신한다.</p>
+
+  <h2>설계 결정</h2>
+  <ul>
+    <li><code>implementation-notes.html</code>은 별도 경로가 지정되지 않았으므로 저장소 루트에 둔다.</li>
+    <li>기존 공개 API와 테스트가 <code>session_id</code>를 1회 Gemini 실행 식별자로 사용하므로, <code>session_id</code>는 하위 호환 alias로 유지하고 내부/응답에 <code>run_id</code>를 같은 값으로 추가한다.</li>
+    <li>대화방 단위 상태는 새 <code>ConversationRecord</code>와 <code>conversation-index.json</code>에 저장해, 프로세스가 중간에 죽어도 <code>conversation_id</code>와 <code>gemini_session_id</code> 매핑을 복구할 수 있게 한다.</li>
+    <li>Observer의 기존 <code>/api/sessions</code> 계열은 유지하고, 새 <code>/api/conversations</code> 계열을 추가한다. 기존 UI와 외부 사용자를 깨뜨리지 않기 위한 호환 계층이다.</li>
+    <li><code>GEMNESS_GEMINI_NATIVE_RESUME=auto</code>에서 capability probe가 실패하면 첫 실행은 기존 1회 실행 방식으로 보내고, 후속 질문은 명세의 fallback prompt로 보낸다. 첫 실행에는 이전 context가 없기 때문에 “fallback context”를 만들 대상이 없다.</li>
+    <li>long-session rotation summary는 추가 Gemini 호출을 만들지 않고 Gemness transcript에서 최근 turn의 prompt/result를 뽑아 만든 추출식 summary로 저장한다.</li>
+  </ul>
+
+  <h2>편차</h2>
+  <ul>
+    <li>명세의 conversation transcript/index는 별도 파일 이름을 지정하지 않았다. 구현에서는 <code>conversation-index.json</code>을 canonical index로 사용한다.</li>
+    <li>브라우저 검증은 프로젝트 지침의 기본 포트 <code>56755</code>가 기존 Observer 프로세스에서 이미 사용 중이라, 현재 워크트리 코드를 임시 포트에서 띄워 확인한다. 구현의 기본 포트 설정은 변경하지 않는다.</li>
+  </ul>
+
+  <h2>트레이드오프</h2>
+  <ul>
+    <li>기존 <code>session_id</code>를 즉시 제거하면 API/Observer URL/테스트 전반의 변경 폭이 커진다. 대신 <code>run_id == session_id</code>로 두어 명세의 새 모델을 얹고 점진적 이행이 가능하게 한다.</li>
+    <li>rotation summary를 LLM으로 요약하면 품질은 좋아질 수 있지만, 회전 자체가 추가 외부 호출과 실패 지점을 만들게 된다. 현재는 deterministic transcript summary를 선택해 테스트 가능성과 안정성을 우선했다.</li>
+  </ul>
+
+  <h2>미결 질문</h2>
+  <ul>
+    <li>아직 없음.</li>
+  </ul>
+</body>
+</html>

@@ -80,6 +80,79 @@ def test_runner_preserves_env_and_uses_cwd_without_default_skip_trust(tmp_path, 
     assert captured["env"]["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
 
 
+def test_runner_adds_native_session_flags_as_argv_items(tmp_path, monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        pid = 1234
+        stdout = io.StringIO('{"response":"ok"}')
+        stderr = io.StringIO("")
+
+        def poll(self):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr("gemness.runner.subprocess.Popen", fake_popen)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    session = hub.create_session("ask_text", "fake-model")
+    runner = GeminiCliRunner(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, gemini_command="fake-gemini"))
+
+    runner.run(
+        "hello",
+        model="fake-model",
+        output_format="json",
+        session_id=session.session_id,
+        hub=hub,
+        cwd=tmp_path,
+        gemini_session_id="gemness_test_session",
+        native_session_mode="start",
+    )
+
+    assert "--session-id" in captured["command"]
+    assert "gemness_test_session" in captured["command"]
+    assert captured["command"][-2:] == ["-p", "hello"]
+    assert hub.get_session(session.session_id)["command_argv"] == captured["command"]
+
+
+def test_runner_adds_resume_flag_without_shell_string(tmp_path, monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        pid = 1234
+        stdout = io.StringIO('{"response":"ok"}')
+        stderr = io.StringIO("")
+
+        def poll(self):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr("gemness.runner.subprocess.Popen", fake_popen)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    session = hub.create_session("ask_text", "fake-model")
+    runner = GeminiCliRunner(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, gemini_command="fake-gemini"))
+
+    runner.run(
+        "quote ' and newline\nsafe",
+        model="fake-model",
+        output_format="json",
+        session_id=session.session_id,
+        hub=hub,
+        cwd=tmp_path,
+        gemini_session_id="gemness_resume_session",
+        native_session_mode="resume",
+    )
+
+    assert "--resume" in captured["command"]
+    assert "gemness_resume_session" in captured["command"]
+    assert captured["command"][-1] == "quote ' and newline\nsafe"
+
+
 def test_stream_json_lines_emit_live_delta_and_synthesize_json_stdout(tmp_path) -> None:
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
     session = hub.create_session("ask_text", "fake-model")

@@ -11,7 +11,7 @@ from gemness.tools import GemnessService
 
 
 class ServerFakeRunner:
-    def run(self, prompt, *, model, output_format, session_id, hub, cwd=None, phase=None):
+    def run(self, prompt, *, model, output_format, session_id, hub, cwd=None, phase=None, **kwargs):
         hub.set_status(session_id, "running", "gemini.started", {"model": model}, role="gemness", phase=phase)
         stdout = json.dumps({"response": "server ok"})
         hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout}, phase=phase)

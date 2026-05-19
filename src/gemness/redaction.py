@@ -48,7 +48,9 @@ def redact_payload(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
-            if re.search(r"(?i)(api[_-]?key|token|secret|password|credential|private[_-]?key|client[_-]?secret)", str(key)):
+            if str(key) in {"gemini_session_id", "current_gemini_session_id"}:
+                redacted[key] = REDACTION if item not in (None, "") else item
+            elif re.search(r"(?i)(api[_-]?key|token|secret|password|credential|private[_-]?key|client[_-]?secret)", str(key)):
                 redacted[key] = REDACTION if item not in (None, "") else item
             else:
                 redacted[key] = redact_payload(item)

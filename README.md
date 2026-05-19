@@ -121,11 +121,11 @@ That root page follows the newest running Gemness session, so you can watch the 
 ```json
 {
   "session_id": "2fc7...",
-  "observer_url": "http://127.0.0.1:56755/sessions/2fc7...?token=LOCAL_TOKEN"
+  "observer_url": "http://127.0.0.1:56755/"
 }
 ```
 
-Open that URL in a browser. The UI shows:
+Open that URL in a browser. The dashboard lists sessions and automatically follows the newest running one; you do not need to copy or remember session IDs. The UI shows:
 
 - recent sessions with tool name, status, model, start time, and duration
 - transcript events for prompt, Gemini response, JSON extraction, validation, repair, and final result
@@ -143,9 +143,10 @@ Completed sessions support follow-up. A child session is created with `parent_se
 ## Security
 
 - The observer binds only to `127.0.0.1`, `localhost`, or `::1`.
-- All `/api/*`, SSE, export, and intervention endpoints require the random local token.
+- The Observer binds to loopback only and uses `http://127.0.0.1:56755/` as the single local dashboard.
+- API, SSE, export, and intervention endpoints are local loopback endpoints; they do not require a URL token.
 - Transcripts are redacted by default in the UI and API.
-- Raw transcript export requires the token and an explicit `raw=1` request.
+- Raw transcript export requires an explicit `raw=1` request.
 - Gemini is not given shell access. `review_current_diff` runs `git diff --no-color <base_ref> --` inside the MCP server and sends only the resulting diff text to Gemini.
 
 ## Environment
