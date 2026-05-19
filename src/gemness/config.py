@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_OBSERVER_PORT = 56755
+DEFAULT_TRANSCRIPT_DIR = Path.home() / ".gemness" / "transcripts"
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -68,7 +69,7 @@ class GemnessConfig:
     observer_host: str = _loopback_host(os.getenv("GEMNESS_OBSERVER_HOST", "127.0.0.1"))
     observer_port: int = _int_env("GEMNESS_OBSERVER_PORT", DEFAULT_OBSERVER_PORT)
     observer_start_on_init: bool = _bool_env("GEMNESS_OBSERVER_START_ON_INIT", True)
-    transcript_dir: Path = Path(os.getenv("GEMNESS_TRANSCRIPT_DIR", ".gemness/transcripts"))
+    transcript_dir: Path = Path(os.getenv("GEMNESS_TRANSCRIPT_DIR", str(DEFAULT_TRANSCRIPT_DIR))).expanduser()
     redact_raw_by_default: bool = _bool_env("GEMNESS_REDACT_RAW_BY_DEFAULT", True)
     pause_before_send: bool = _bool_env("GEMNESS_PAUSE_BEFORE_SEND", False)
     approval_timeout_sec: float = float(os.getenv("GEMNESS_APPROVAL_TIMEOUT_SEC", "300"))

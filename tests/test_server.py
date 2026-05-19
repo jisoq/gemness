@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from gemness.config import GemnessConfig
@@ -43,6 +44,27 @@ def test_service_can_defer_observer_until_health_check(tmp_path) -> None:
         assert service.hub.web_server_running
     finally:
         service.shutdown()
+
+
+def test_second_observer_on_same_port_reuses_existing_dashboard_url(tmp_path) -> None:
+    first = GemnessService(GemnessConfig(transcript_dir=tmp_path / "one", observer_enabled=True, observer_port=0), runner=ServerFakeRunner())
+    second = None
+    try:
+        port = urlparse(first.hub.base_url).port
+        assert port is not None
+        second = GemnessService(
+            GemnessConfig(transcript_dir=tmp_path / "two", observer_enabled=True, observer_port=port),
+            runner=ServerFakeRunner(),
+        )
+
+        assert second.hub.web_server_running is False
+        assert second.hub.base_url == f"http://127.0.0.1:{port}"
+        result = second.ask_text("hello from second")
+        assert result["observer_url"] == f"http://127.0.0.1:{port}/"
+    finally:
+        if second is not None:
+            second.shutdown()
+        first.shutdown()
 
 
 def test_server_tools_list_and_call(tmp_path) -> None:

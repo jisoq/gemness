@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import socket
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,9 +37,16 @@ class ObserverWebServer:
 
 
 class _HubHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
     def __init__(self, server_address: tuple[str, int], handler_cls: type[BaseHTTPRequestHandler], hub: ObserverHub) -> None:
         self.hub = hub
         super().__init__(server_address, handler_cls)
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class _Handler(BaseHTTPRequestHandler):

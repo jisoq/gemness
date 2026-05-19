@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import DEFAULT_OBSERVER_PORT
+from .config import DEFAULT_TRANSCRIPT_DIR
 
 
 START_MARKER = "# gemness-mcp:start"
@@ -37,7 +38,7 @@ class CodexConfigOptions:
     tool_timeout_sec: int = 300
     required: bool = False
     model: str = "gemini-3.1-pro-preview"
-    transcript_dir: str = ".gemness/transcripts"
+    transcript_dir: str = str(DEFAULT_TRANSCRIPT_DIR)
 
 
 def build_uvx_options(

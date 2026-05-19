@@ -76,6 +76,7 @@ class ObserverHub:
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
         self._web_server: Any = None
+        self._web_server_error: str | None = None
         self.service: Any = None
         self._load_conversation_index()
         self._load_existing_events()
@@ -91,7 +92,12 @@ class ObserverHub:
                 return
             from .web import ObserverWebServer
 
-            self._web_server = ObserverWebServer(self, self.config.observer_host, self.config.observer_port)
+            try:
+                self._web_server = ObserverWebServer(self, self.config.observer_host, self.config.observer_port)
+            except OSError as exc:
+                self._web_server_error = str(exc)
+                return
+            self._web_server_error = None
             self._web_server.start()
 
     @property
@@ -110,7 +116,9 @@ class ObserverHub:
     def base_url(self) -> str:
         self.start_web_server()
         if self._web_server is None:
-            return ""
+            if not self.config.observer_enabled or not self.config.observer_port:
+                return ""
+            return _observer_base_url(self.config.observer_host, self.config.observer_port)
         return self._web_server.base_url
 
     def observer_url(self, session_id: str) -> str:
@@ -907,6 +915,12 @@ def _parse_iso(value: str) -> float:
     from datetime import datetime
 
     return datetime.fromisoformat(parsed).timestamp()
+
+
+def _observer_base_url(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
 
 
 def _new_prefixed_id(prefix: str) -> str:

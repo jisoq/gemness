@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tomllib
+from pathlib import Path
+
 import pytest
 from gemness.codex_install import (
     build_codex_config,
@@ -28,6 +30,7 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert "health_check" in server["enabled_tools"]
     assert server["env"]["GEMNESS_OBSERVER_PORT"] == "56755"
     assert server["env"]["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
+    assert Path(server["env"]["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
     assert server["env"]["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
     assert "GEMNESS_WORKSPACE_ROOT" not in server["env"]
     assert "GEMNESS_ALLOWED_ROOTS" not in server["env"]
@@ -110,6 +113,7 @@ def test_build_mcp_env_omits_local_paths_by_default() -> None:
     assert env["EXISTING"] == "1"
     assert env["GEMNESS_OBSERVER_PORT"] == "56755"
     assert env["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
+    assert Path(env["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
     assert env["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
     assert "GEMNESS_WORKSPACE_ROOT" not in env
     assert "GEMNESS_ALLOWED_ROOTS" not in env
