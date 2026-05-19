@@ -49,7 +49,7 @@ If Gemini CLI is missing or not authenticated, stop and report that blocker. Do 
 
 ## 2. Bootstrap Codex
 
-From the workspace where Gemness should be allowed to operate, run:
+From any directory, run:
 
 ```powershell
 uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
@@ -74,7 +74,6 @@ The generated Codex config uses a portable launch command:
 [mcp_servers.gemness]
 command = "uvx"
 args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
-cwd = "<ABSOLUTE_PATH_TO_WORKSPACE>"
 startup_timeout_sec = 60
 tool_timeout_sec = 300
 required = false
@@ -84,16 +83,10 @@ Verify:
 
 - `command = "uvx"`.
 - `args` runs `gemness start-mcp-server`.
-- `cwd` points to the workspace where you ran bootstrap.
-- `GEMNESS_COMMAND` points to the resolved Gemini CLI command.
+- Default bootstrap does not write `cwd`.
+- Default bootstrap does not write workspace-root or allowed-root environment values.
+- Default bootstrap does not write a machine-specific `GEMNESS_COMMAND`; Gemness resolves `gemini` from `PATH`.
 - `GEMNESS_GEMINI_TRUST_WORKSPACE = "true"` is present.
-- `GEMNESS_ALLOWED_ROOTS` is narrow by default. Widen it only deliberately.
-
-To allow a broader local workspace root:
-
-```powershell
-uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex --workspace-root <ABSOLUTE_PATH_TO_WORKSPACE> --allowed-root <ABSOLUTE_PATH_TO_WORKSPACE>
-```
 
 ## 4. Final Report
 

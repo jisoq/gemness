@@ -29,7 +29,7 @@ class CodexConfigOptions:
     cwd: Path | None
     workspace_root: Path | None
     allowed_roots: tuple[Path, ...]
-    gemini_command: str
+    gemini_command: str | None
     startup_timeout_sec: int = 60
     tool_timeout_sec: int = 300
     required: bool = False
@@ -57,15 +57,13 @@ def build_uvx_options(
         args=tuple(args),
         cwd=resolved_workspace,
         workspace_root=resolved_workspace,
-        allowed_roots=resolved_allowed or ((resolved_workspace,) if resolved_workspace else ()),
-        gemini_command=gemini_command or resolve_gemini_command(),
+        allowed_roots=resolved_allowed,
+        gemini_command=gemini_command,
     )
 
 
 def build_codex_config(options: CodexConfigOptions) -> str:
     cwd_line = f"cwd = {_toml_string(options.cwd)}\n" if options.cwd else ""
-    allowed_roots = os.pathsep.join(str(root) for root in options.allowed_roots)
-    workspace_root = str(options.workspace_root) if options.workspace_root else ""
     tool_lines = "\n".join(f"  {_toml_string(name)}," for name in TOOL_NAMES)
     approval_blocks = "\n\n".join(
         (
@@ -74,6 +72,26 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         )
         for name in TOOL_NAMES
     )
+    env_lines = {
+        "GEMNESS_MODEL": options.model,
+        "GEMNESS_OBSERVER_ENABLED": "true",
+        "GEMNESS_OBSERVER_HOST": "127.0.0.1",
+        "GEMNESS_OBSERVER_PORT": "0",
+        "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
+        "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
+        "GEMNESS_PAUSE_BEFORE_SEND": "false",
+        "GEMNESS_TOOL_TIMEOUT_SEC": "120",
+        "GEMNESS_GEMINI_SKIP_TRUST": "false",
+        "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
+        "GEMNESS_GEMINI_APPROVAL_MODE": "plan",
+    }
+    if options.gemini_command:
+        env_lines["GEMNESS_COMMAND"] = options.gemini_command
+    if options.workspace_root:
+        env_lines["GEMNESS_WORKSPACE_ROOT"] = str(options.workspace_root)
+    if options.allowed_roots:
+        env_lines["GEMNESS_ALLOWED_ROOTS"] = os.pathsep.join(str(root) for root in options.allowed_roots)
+    env_body = "\n".join(f"{name} = {_toml_string(value)}" for name, value in env_lines.items())
     return f"""{START_MARKER}
 [mcp_servers.{MCP_SERVER_NAME}]
 command = {_toml_string(options.command)}
@@ -89,20 +107,7 @@ default_tools_approval_mode = "prompt"
 {approval_blocks}
 
 [mcp_servers.{MCP_SERVER_NAME}.env]
-GEMNESS_MODEL = {_toml_string(options.model)}
-GEMNESS_OBSERVER_ENABLED = "true"
-GEMNESS_OBSERVER_HOST = "127.0.0.1"
-GEMNESS_OBSERVER_PORT = "0"
-GEMNESS_TRANSCRIPT_DIR = {_toml_string(options.transcript_dir)}
-GEMNESS_REDACT_RAW_BY_DEFAULT = "true"
-GEMNESS_PAUSE_BEFORE_SEND = "false"
-GEMNESS_TOOL_TIMEOUT_SEC = "120"
-GEMNESS_COMMAND = {_toml_string(options.gemini_command)}
-GEMNESS_GEMINI_SKIP_TRUST = "false"
-GEMNESS_GEMINI_TRUST_WORKSPACE = "true"
-GEMNESS_GEMINI_APPROVAL_MODE = "plan"
-GEMNESS_WORKSPACE_ROOT = {_toml_string(workspace_root)}
-GEMNESS_ALLOWED_ROOTS = {_toml_string(allowed_roots)}
+{env_body}
 {END_MARKER}"""
 
 
@@ -118,14 +123,17 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
             "GEMNESS_PAUSE_BEFORE_SEND": "false",
             "GEMNESS_TOOL_TIMEOUT_SEC": "120",
-            "GEMNESS_COMMAND": options.gemini_command,
             "GEMNESS_GEMINI_SKIP_TRUST": "false",
             "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
             "GEMNESS_GEMINI_APPROVAL_MODE": "plan",
-            "GEMNESS_WORKSPACE_ROOT": str(options.workspace_root or ""),
-            "GEMNESS_ALLOWED_ROOTS": os.pathsep.join(str(root) for root in options.allowed_roots),
         }
     )
+    if options.gemini_command:
+        env["GEMNESS_COMMAND"] = options.gemini_command
+    if options.workspace_root:
+        env["GEMNESS_WORKSPACE_ROOT"] = str(options.workspace_root)
+    if options.allowed_roots:
+        env["GEMNESS_ALLOWED_ROOTS"] = os.pathsep.join(str(root) for root in options.allowed_roots)
     return env
 
 
@@ -177,6 +185,12 @@ def upsert_marked_block(existing: str, block: str, start_marker: str, end_marker
         start = existing.index(start_marker)
         end = existing.index(end_marker, start) + len(end_marker)
         return (existing[:start].rstrip() + "\n\n" + block + existing[end:].rstrip() + "\n").lstrip()
+    if start_marker in existing:
+        start = existing.index(start_marker)
+        existing = existing[:start].rstrip() + "\n"
+    if end_marker in existing:
+        end = existing.index(end_marker) + len(end_marker)
+        existing = (existing[: existing.index(end_marker)].rstrip() + existing[end:].rstrip() + "\n").lstrip()
     if existing.strip():
         return existing.rstrip() + "\n\n" + block + "\n"
     return block + "\n"

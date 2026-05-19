@@ -15,7 +15,7 @@ Each tool call creates a unique observer session. Tool results include `session_
 
 Gemness is designed for portable MCP installation: Codex launches it through `uvx` from a remote git source, so no machine depends on another machine's local checkout, `.venv`, or PyPI package name.
 
-From the workspace where you want Gemness to operate:
+From any directory:
 
 ```powershell
 uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
@@ -59,9 +59,6 @@ uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 - `command = "uvx"`
 - `args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]`
 - `default_tools_approval_mode = "prompt"`
-- `cwd = "<ABSOLUTE_PATH_TO_WORKSPACE>"`
-- `GEMNESS_WORKSPACE_ROOT = "<ABSOLUTE_PATH_TO_WORKSPACE>"`
-- `GEMNESS_ALLOWED_ROOTS = "<ABSOLUTE_PATH_TO_WORKSPACE>"`
 - `GEMNESS_GEMINI_SKIP_TRUST = "false"` unless you explicitly choose to bypass Gemini CLI trust checks locally
 
 ### Windows example
@@ -69,10 +66,9 @@ uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 ```toml
 command = "uvx"
 args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
-cwd = "D:\\projects\\my-workspace"
 
 [mcp_servers.gemness.env]
-GEMNESS_COMMAND = "C:\\Users\\YOU\\AppData\\Roaming\\npm\\gemini.cmd"
+GEMNESS_MODEL = "gemini-3.1-pro-preview"
 ```
 
 ### macOS/Linux example
@@ -80,10 +76,9 @@ GEMNESS_COMMAND = "C:\\Users\\YOU\\AppData\\Roaming\\npm\\gemini.cmd"
 ```toml
 command = "uvx"
 args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
-cwd = "/Users/YOU/dev/my-workspace"
 
 [mcp_servers.gemness.env]
-GEMNESS_COMMAND = "/opt/homebrew/bin/gemini"
+GEMNESS_MODEL = "gemini-3.1-pro-preview"
 ```
 
 ## Verify in Codex
@@ -158,12 +153,9 @@ GEMNESS_TRANSCRIPT_DIR=.gemness/transcripts
 GEMNESS_REDACT_RAW_BY_DEFAULT=true
 GEMNESS_PAUSE_BEFORE_SEND=false
 GEMNESS_TOOL_TIMEOUT_SEC=120
-GEMNESS_COMMAND=gemini
 GEMNESS_GEMINI_SKIP_TRUST=false
 GEMNESS_GEMINI_TRUST_WORKSPACE=true
 GEMNESS_GEMINI_APPROVAL_MODE=plan
-GEMNESS_WORKSPACE_ROOT=/absolute/path/to/repo
-GEMNESS_ALLOWED_ROOTS=/absolute/path/to/repo
 ```
 
 See [docs/gemini-observer.md](docs/gemini-observer.md) and [docs/codex-mcp-config.example.toml](docs/codex-mcp-config.example.toml).

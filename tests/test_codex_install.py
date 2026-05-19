@@ -13,9 +13,9 @@ from gemness.codex_install import (
 def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     options = build_uvx_options(
         server_source="git+https://example.test/gemness",
-        workspace_root=tmp_path,
-        allowed_roots=(tmp_path,),
-        gemini_command="gemini",
+        workspace_root=None,
+        allowed_roots=(),
+        gemini_command=None,
     )
     parsed = tomllib.loads(build_codex_config(options))
 
@@ -23,10 +23,28 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     server = parsed["mcp_servers"]["gemness"]
     assert server["command"] == "uvx"
     assert server["args"] == ["--from", "git+https://example.test/gemness", "gemness", "start-mcp-server"]
-    assert server["cwd"] == str(tmp_path.resolve())
+    assert "cwd" not in server
     assert server["required"] is False
     assert "health_check" in server["enabled_tools"]
+    assert "GEMNESS_WORKSPACE_ROOT" not in server["env"]
+    assert "GEMNESS_ALLOWED_ROOTS" not in server["env"]
+    assert "GEMNESS_COMMAND" not in server["env"]
+
+
+def test_build_uvx_config_can_pin_workspace_when_explicit(tmp_path) -> None:
+    options = build_uvx_options(
+        server_source="git+https://example.test/gemness",
+        workspace_root=tmp_path,
+        allowed_roots=(tmp_path,),
+        gemini_command="gemini",
+    )
+    parsed = tomllib.loads(build_codex_config(options))
+
+    server = parsed["mcp_servers"]["gemness"]
+    assert server["cwd"] == str(tmp_path.resolve())
+    assert server["env"]["GEMNESS_WORKSPACE_ROOT"] == str(tmp_path.resolve())
     assert server["env"]["GEMNESS_ALLOWED_ROOTS"] == str(tmp_path.resolve())
+    assert server["env"]["GEMNESS_COMMAND"] == "gemini"
 
 
 def test_build_uvx_config_requires_remote_source_when_not_git_installed(tmp_path) -> None:
@@ -75,3 +93,26 @@ def test_build_mcp_env_matches_workspace_and_allowed_roots(tmp_path) -> None:
     assert env["GEMNESS_WORKSPACE_ROOT"] == str(tmp_path.resolve())
     assert str(tmp_path.resolve()) in env["GEMNESS_ALLOWED_ROOTS"]
     assert str(other.resolve()) in env["GEMNESS_ALLOWED_ROOTS"]
+
+
+def test_build_mcp_env_omits_local_paths_by_default() -> None:
+    options = build_uvx_options(
+        server_source="git+https://example.test/gemness",
+        workspace_root=None,
+        allowed_roots=(),
+        gemini_command=None,
+    )
+    env = build_mcp_env(options, {"EXISTING": "1"})
+
+    assert env["EXISTING"] == "1"
+    assert "GEMNESS_WORKSPACE_ROOT" not in env
+    assert "GEMNESS_ALLOWED_ROOTS" not in env
+    assert "GEMNESS_COMMAND" not in env
+
+
+def test_upsert_marked_block_removes_orphan_end_marker() -> None:
+    from gemness.codex_install import END_MARKER, START_MARKER, upsert_marked_block
+
+    result = upsert_marked_block("before\n# gemness-mcp:end\n", "BLOCK", START_MARKER, END_MARKER)
+
+    assert result == "before\n\nBLOCK\n"

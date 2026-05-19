@@ -46,7 +46,7 @@ flowchart LR
 
 `review_current_diff`:
 
-1. MCP server resolves the configured workspace `cwd`
+1. MCP server resolves the requested `cwd` or the process working directory
 2. MCP server validates `base_ref`
 3. MCP server runs `git diff --no-color <base_ref> --` in the resolved `cwd`
 2. diff is size-limited
@@ -56,7 +56,7 @@ flowchart LR
 
 `health_check`:
 
-1. resolves the requested or configured workspace `cwd`
+1. resolves the requested `cwd` or process working directory
 2. reports server, Python, observer, transcript, workspace, and Gemini CLI configuration
 3. checks Gemini CLI command resolution and version without calling a model
 4. returns warnings instead of crashing when Gemini CLI is missing or unavailable
@@ -184,7 +184,7 @@ Intervention request body:
 ## Manual Test Flow
 
 1. Install in a project virtual environment with `python -m pip install -e .`.
-2. Configure Codex with `docs/codex-mcp-config.example.toml`, including `cwd`, `enabled_tools`, and `default_tools_approval_mode = "prompt"`.
+2. Configure Codex with `docs/codex-mcp-config.example.toml`, including `enabled_tools` and `default_tools_approval_mode = "prompt"`.
 3. Run `codex mcp list`.
 4. Open Codex TUI, run `/mcp`, and confirm `gemness` is active.
 5. Ask Codex: `use gemness: run health check`.

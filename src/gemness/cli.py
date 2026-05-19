@@ -13,6 +13,7 @@ from .codex_install import (
 )
 from .gemness_trigger import install as install_trigger
 from .mcp_smoke import run_smoke
+from .runner import resolve_gemini_command as resolve_gemini_command_parts
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -28,7 +29,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Remote git source for this MCP package, for example git+https://github.com/jisoq/gemness. Inferred when this CLI itself was installed from a git URL.",
     )
     bootstrap.add_argument("--python", default=None, help="Optional Python version for uvx, for example 3.11.")
-    bootstrap.add_argument("--workspace-root", default=".", help="Workspace root Gemness may operate on. Defaults to the current directory.")
+    bootstrap.add_argument("--workspace-root", default=None, help="Optional workspace root Gemness may operate on. Omitted by default for portable config.")
     bootstrap.add_argument(
         "--allowed-root",
         action="append",
@@ -68,8 +69,8 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _bootstrap_codex(args: argparse.Namespace) -> None:
-    workspace_root = Path(args.workspace_root).expanduser().resolve()
-    allowed_roots = tuple(Path(root).expanduser().resolve() for root in args.allowed_root) or (workspace_root,)
+    workspace_root = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else None
+    allowed_roots = tuple(Path(root).expanduser().resolve() for root in args.allowed_root)
     source = args.server_source
     try:
         options = build_uvx_options(
@@ -86,17 +87,18 @@ def _bootstrap_codex(args: argparse.Namespace) -> None:
     print(f"updated {config_path}")
     print(f"mcp server name: gemness")
     print(f"mcp command: {options.command} {' '.join(options.args)}")
-    print(f"workspace root: {options.workspace_root}")
-    print(f"allowed roots: {', '.join(str(root) for root in options.allowed_roots)}")
-    _check_gemini_version(options.gemini_command, workspace_root)
+    print(f"workspace root: {options.workspace_root or '(not pinned)'}")
+    print(f"allowed roots: {', '.join(str(root) for root in options.allowed_roots) or '(not pinned)'}")
+    gemini_command = options.gemini_command or "gemini"
+    _check_gemini_version(gemini_command, workspace_root or Path.cwd())
 
     if not args.skip_trigger:
-        for path in install_trigger("user", workspace_root):
+        for path in install_trigger("user", workspace_root or Path.cwd()):
             print(f"updated {path}")
 
     if not args.skip_smoke_test:
         command = [options.command, *options.args]
-        for line in run_smoke(command, timeout=args.smoke_timeout, cwd=options.cwd, env=build_mcp_env(options)):
+        for line in run_smoke(command, timeout=args.smoke_timeout, cwd=options.cwd or Path.cwd(), env=build_mcp_env(options)):
             print(line)
 
     print("restart Codex before using Gemness tools")
@@ -104,16 +106,20 @@ def _bootstrap_codex(args: argparse.Namespace) -> None:
 
 
 def _check_gemini_version(gemini_command: str, cwd: Path) -> None:
-    completed = subprocess.run(
-        [gemini_command, "--version"],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-        check=False,
-    )
+    command_parts = resolve_gemini_command_parts(gemini_command)
+    try:
+        completed = subprocess.run(
+            [*command_parts, "--version"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Gemini CLI not found on PATH: {gemini_command}") from exc
     output = (completed.stdout or completed.stderr).strip()
     if completed.returncode != 0:
         raise RuntimeError(f"Gemini CLI version check failed: {output or completed.returncode}")
