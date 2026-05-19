@@ -1,0 +1,16 @@
+global-exclude __pycache__/*
+global-exclude *.py[cod]
+global-exclude *.jsonl
+global-exclude observer-token.txt
+global-exclude *.pid
+global-exclude *.out
+global-exclude *.err
+global-exclude .env
+global-exclude .env.*
+global-exclude *.pem
+global-exclude *.key
+prune .venv
+prune .pytest_cache
+prune .gemini-mcp
+prune .codex/live-observer*
+prune src/*.egg-info

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.zip
+
+# Gemini MCP observer runtime files
+.gemini-mcp/
+.gemness/
+.codex/
+.codex/live-observer*/
+.codex/live-observer*.json
+.codex/live-observer*.pid
+.codex/live-observer*.out
+.codex/live-observer*.err
+.codex/*observer*.url
+.codex/*observer*.pid
+.codex/*observer*.out
+.codex/*observer*.err
+.codex/*observer*.py
+.codex/*observer*-transcripts/
+**/observer-token.txt
+**/*.jsonl
+
+# Local secrets
+.env
+.env.*
+*.pem
+*.key

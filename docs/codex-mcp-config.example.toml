@@ -1,0 +1,53 @@
+# Example Codex MCP configuration for Gemness / Gemness Observer.
+# Replace placeholders with your package source and workspace paths.
+
+[mcp_servers.gemness]
+command = "uvx"
+args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
+cwd = "<ABSOLUTE_PATH_TO_WORKSPACE>"
+startup_timeout_sec = 60
+tool_timeout_sec = 300
+required = false
+enabled_tools = [
+  "health_check",
+  "ask_text",
+  "ask_json",
+  "review_current_diff",
+]
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.gemness.tools."health_check"]
+approval_mode = "approve"
+
+[mcp_servers.gemness.tools."ask_text"]
+approval_mode = "approve"
+
+[mcp_servers.gemness.tools."ask_json"]
+approval_mode = "prompt"
+
+[mcp_servers.gemness.tools."review_current_diff"]
+approval_mode = "prompt"
+
+[mcp_servers.gemness.env]
+GEMNESS_MODEL = "gemini-3.1-pro-preview"
+GEMNESS_OBSERVER_ENABLED = "true"
+GEMNESS_OBSERVER_HOST = "127.0.0.1"
+GEMNESS_OBSERVER_PORT = "0"
+GEMNESS_TRANSCRIPT_DIR = ".gemness/transcripts"
+GEMNESS_REDACT_RAW_BY_DEFAULT = "true"
+GEMNESS_PAUSE_BEFORE_SEND = "false"
+GEMNESS_TOOL_TIMEOUT_SEC = "120"
+GEMNESS_COMMAND = "<ABSOLUTE_PATH_TO_GEMINI_CLI>"
+GEMNESS_GEMINI_SKIP_TRUST = "false"
+GEMNESS_GEMINI_TRUST_WORKSPACE = "true"
+GEMNESS_GEMINI_APPROVAL_MODE = "plan"
+GEMNESS_WORKSPACE_ROOT = "<ABSOLUTE_PATH_TO_WORKSPACE>"
+GEMNESS_ALLOWED_ROOTS = "<ABSOLUTE_PATH_TO_WORKSPACE>"
+
+# Windows path examples:
+# cwd = "D:\\projects\\my-workspace"
+# GEMNESS_COMMAND = "C:\\Users\\YOU\\AppData\\Roaming\\npm\\gemini.cmd"
+
+# macOS/Linux path examples:
+# cwd = "/Users/YOU/dev/my-workspace"
+# GEMNESS_COMMAND = "/opt/homebrew/bin/gemini"
