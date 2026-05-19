@@ -13,7 +13,7 @@ Each tool call creates a unique observer session. Tool results include `session_
 
 ## Quick Start
 
-Gemness is intended to be installed like Serena-style MCP servers: Codex launches it through `uvx` from a remote git source, so no machine installs from another machine's local checkout, `.venv`, or PyPI package name.
+Gemness is designed for portable MCP installation: Codex launches it through `uvx` from a remote git source, so no machine depends on another machine's local checkout, `.venv`, or PyPI package name.
 
 From the workspace where you want Gemness to operate:
 
