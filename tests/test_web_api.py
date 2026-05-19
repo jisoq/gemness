@@ -87,6 +87,7 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "원본 이벤트 보기" in INDEX_HTML
     assert "function buildConversationTranscript" in INDEX_HTML
     assert "function describeEventAsConversationTurn" in INDEX_HTML
+    assert "function preferredLiveSession" in INDEX_HTML
     assert "function renderMarkdown" in INDEX_HTML
     assert "function updateInterventionPanel" in INDEX_HTML
     assert "renderConversationTurn" in INDEX_HTML
@@ -103,6 +104,26 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "추가 지시 / follow-up 질문" in INDEX_HTML
     assert "프롬프트 전체 교체" in INDEX_HTML
     assert "중단 후 이 지시로 재시도" in INDEX_HTML
+    assert "Gemini -> Agents · 응답 중" in INDEX_HTML
+    assert "__GEMNESS_OBSERVER_TOKEN__" in INDEX_HTML
+
+
+def test_observer_root_embeds_token_for_live_dashboard(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        result = service.ask_text("hello")
+        base_url = result["observer_url"].split("/sessions/")[0]
+        token = result["observer_url"].split("token=", 1)[1]
+
+        html_request = Request(f"{base_url}/", headers={"Accept": "text/html"})
+        with urlopen(html_request, timeout=2) as response:
+            html = response.read().decode("utf-8")
+
+        assert token in html
+        assert "__GEMNESS_OBSERVER_TOKEN__" not in html
+    finally:
+        service.shutdown()
 
 
 def test_conversation_transcript_view_model_handles_core_events(tmp_path) -> None:
@@ -185,6 +206,76 @@ console.log(JSON.stringify(turns.map((turn) => ({
     assert "테스트 관점만 다시 봐줘" in turns[3]["body"]
     assert turns[4]["title"] == "Observer"
     assert "최종 요약입니다." in turns[4]["body"]
+
+
+def test_conversation_transcript_shows_latest_stream_delta_until_final_response(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const liveEvents = [
+  {
+    session_id: "s1",
+    type: "gemini.delta",
+    ts: "2026-05-19T03:04:20Z",
+    role: "gemness",
+    payload: { content: "첫", response: "첫" }
+  },
+  {
+    session_id: "s1",
+    type: "gemini.delta",
+    ts: "2026-05-19T03:04:21Z",
+    role: "gemness",
+    payload: { content: " 응답", response: "첫 응답" }
+  }
+];
+const liveTurns = buildConversationTranscript(liveEvents);
+const finalTurns = buildConversationTranscript([
+  ...liveEvents,
+  {
+    session_id: "s1",
+    type: "gemini.response",
+    ts: "2026-05-19T03:04:22Z",
+    role: "gemness",
+    payload: { response: JSON.stringify({ response: "첫 응답" }) }
+  }
+]);
+console.log(JSON.stringify({
+  live: liveTurns.map((turn) => ({ title: turn.title, body: turn.body })),
+  final: finalTurns.map((turn) => ({ title: turn.title, body: turn.body }))
+}));
+"""
+    script_path = tmp_path / "delta-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert data["live"] == [{"title": "Gemini -> Agents · 응답 중", "body": "첫 응답"}]
+    assert data["final"] == [{"title": "Gemini -> Agents", "body": "첫 응답"}]
+
+
+def test_live_session_picker_prefers_newest_non_terminal_session(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const picked = preferredLiveSession([
+  { session_id: "done", status: "completed" },
+  { session_id: "running", status: "running" },
+  { session_id: "queued", status: "queued" }
+]);
+const fallback = preferredLiveSession([
+  { session_id: "latest", status: "completed" },
+  { session_id: "older", status: "error" }
+]);
+console.log(JSON.stringify({ picked: picked.session_id, fallback: fallback.session_id }));
+"""
+    script_path = tmp_path / "live-picker-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert data == {"picked": "running", "fallback": "latest"}
 
 
 def test_conversation_transcript_keeps_unsent_prompt_draft(tmp_path) -> None:

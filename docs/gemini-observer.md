@@ -23,6 +23,8 @@ flowchart LR
 
 `ObserverHub` owns session IDs, session state, events, redaction, intervention queues, JSONL transcript persistence, and the local web server. Gemini remains advisory: Codex still decides how to use the returned text or JSON.
 
+By default `GemnessService` starts the loopback Observer web server during MCP server initialization (`GEMNESS_OBSERVER_START_ON_INIT=true`). That makes the fixed dashboard URL `http://127.0.0.1:56755` usable before `ask_text`, `ask_json`, or `review_current_diff` returns a session-specific `observer_url`.
+
 ## Tool Pipeline
 
 `ask_text`:
@@ -30,8 +32,8 @@ flowchart LR
 1. create session
 2. render and redact prompt events
 3. optionally wait for approval or prompt edit
-4. run Gemini CLI with `--output-format json`
-5. record response, stderr, exit, and final result
+4. run Gemini CLI with `--output-format stream-json` by default
+5. record streamed response deltas, final response, stderr, exit, and final result
 
 `ask_json`:
 
@@ -61,9 +63,11 @@ flowchart LR
 3. checks Gemini CLI command resolution and version without calling a model
 4. returns warnings instead of crashing when Gemini CLI is missing or unavailable
 
+When startup preloading is disabled, `health_check` still starts the Observer before reporting its URL.
+
 ## Gemini CLI Output Choice
 
-This implementation uses `--output-format json` as the default canonical mode. The goal file notes that `stream-json` can expose realtime deltas, but `ask_json` correctness depends on a stable final response for envelope parsing, JSON extraction, validation, and repair. The runner records final response events reliably and keeps the design open for a future stream-json runner.
+This implementation uses `--output-format stream-json` as the default canonical mode. The runner records assistant message deltas as `gemini.delta` events for the Observer UI, then synthesizes the same JSON envelope shape expected by `ask_text`, `ask_json`, and repair parsing. Set `GEMNESS_GEMINI_OUTPUT_FORMAT=json` to use final-response-only mode.
 
 For Gemini CLI headless mode, the runner defaults to `--approval-mode plan` and does not pass `--skip-trust`. It also sets `GEMINI_CLI_TRUST_WORKSPACE=true` for the Gemini child process so real observer sessions do not stop on Gemini CLI's interactive workspace trust prompt. Set `GEMNESS_GEMINI_TRUST_WORKSPACE=false` or `GEMINI_CLI_TRUST_WORKSPACE=false` only when you explicitly want to disable that workspace trust environment value. Set `GEMNESS_GEMINI_SKIP_TRUST=true` only when you explicitly want to bypass Gemini CLI trust checks in your local environment.
 
@@ -163,7 +167,7 @@ type SessionStatus =
 
 ## API
 
-All API routes require the local token as `?token=...`, `Authorization: Bearer ...`, or `X-Observer-Token`.
+The HTML UI is served from the loopback-only root URL and embeds the current local token for that browser page. All API routes still require the local token as `?token=...`, `Authorization: Bearer ...`, or `X-Observer-Token`.
 
 - `GET /api/sessions`
 - `GET /api/sessions/<session_id>?raw=0`
@@ -188,8 +192,8 @@ Intervention request body:
 3. Run `codex mcp list`.
 4. Open Codex TUI, run `/mcp`, and confirm `gemness` is active.
 5. Ask Codex: `use gemness: run health check`.
-6. Call `ask_text` and open the returned `observer_url`.
-7. Confirm the transcript shows prompt, response, and final result.
+6. Open `http://127.0.0.1:56755`, then call `ask_text`.
+7. Confirm the root page switches to the live session and shows prompt, streamed response, and final result.
 8. Call `ask_json` with a schema.
 9. Confirm JSON extraction, validation, and any repair result are visible.
 10. Call `review_current_diff`.
@@ -204,5 +208,5 @@ Intervention request body:
 - A headless Gemini subprocess cannot reliably receive live prompt injection after it has started.
 - Running intervention therefore uses `interrupt & retry`: terminate the process, record partial output, and run a child session.
 - Streaming can vary by Gemini CLI version and output format.
-- `ask_json` prioritizes final-response validation over streaming deltas.
+- `ask_json` displays streaming deltas but still validates the synthesized final response envelope.
 - The UI shows the prompt MCP actually sent to Gemini and Gemini output. It does not expose Codex hidden reasoning or hidden system/developer instructions.

@@ -90,6 +90,11 @@ class ObserverHub:
             self._web_server = ObserverWebServer(self, self.config.observer_host, self.config.observer_port)
             self._web_server.start()
 
+    @property
+    def web_server_running(self) -> bool:
+        with self._lock:
+            return self._web_server is not None
+
     def shutdown(self) -> None:
         with self._lock:
             web_server = self._web_server

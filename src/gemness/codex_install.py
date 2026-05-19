@@ -8,6 +8,8 @@ from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .config import DEFAULT_OBSERVER_PORT
+
 
 START_MARKER = "# gemness-mcp:start"
 END_MARKER = "# gemness-mcp:end"
@@ -76,11 +78,13 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_MODEL": options.model,
         "GEMNESS_OBSERVER_ENABLED": "true",
         "GEMNESS_OBSERVER_HOST": "127.0.0.1",
-        "GEMNESS_OBSERVER_PORT": "0",
+        "GEMNESS_OBSERVER_PORT": str(DEFAULT_OBSERVER_PORT),
+        "GEMNESS_OBSERVER_START_ON_INIT": "true",
         "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
         "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
         "GEMNESS_PAUSE_BEFORE_SEND": "false",
         "GEMNESS_TOOL_TIMEOUT_SEC": "120",
+        "GEMNESS_GEMINI_OUTPUT_FORMAT": "stream-json",
         "GEMNESS_GEMINI_SKIP_TRUST": "false",
         "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
         "GEMNESS_GEMINI_APPROVAL_MODE": "plan",
@@ -118,11 +122,13 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_MODEL": options.model,
             "GEMNESS_OBSERVER_ENABLED": "true",
             "GEMNESS_OBSERVER_HOST": "127.0.0.1",
-            "GEMNESS_OBSERVER_PORT": "0",
+            "GEMNESS_OBSERVER_PORT": str(DEFAULT_OBSERVER_PORT),
+            "GEMNESS_OBSERVER_START_ON_INIT": "true",
             "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
             "GEMNESS_PAUSE_BEFORE_SEND": "false",
             "GEMNESS_TOOL_TIMEOUT_SEC": "120",
+            "GEMNESS_GEMINI_OUTPUT_FORMAT": "stream-json",
             "GEMNESS_GEMINI_SKIP_TRUST": "false",
             "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
             "GEMNESS_GEMINI_APPROVAL_MODE": "plan",

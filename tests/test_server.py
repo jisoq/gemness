@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from urllib.request import urlopen
 
 from gemness.config import GemnessConfig
 from gemness.runner import GeminiRunResult
@@ -16,6 +17,32 @@ class ServerFakeRunner:
         hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout}, phase=phase)
         hub.append_event(session_id, "gemini.exited", "gemness", {"exit_code": 0}, phase=phase)
         return GeminiRunResult.completed(stdout)
+
+
+def test_service_starts_observer_before_first_tool_call(tmp_path) -> None:
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0), runner=ServerFakeRunner())
+    try:
+        assert service.hub.web_server_running
+        with urlopen(f"{service.hub.base_url}/", timeout=2) as response:
+            html = response.read().decode("utf-8")
+        assert "Gemness 관찰자" in html
+    finally:
+        service.shutdown()
+
+
+def test_service_can_defer_observer_until_health_check(tmp_path) -> None:
+    service = GemnessService(
+        GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, observer_start_on_init=False),
+        runner=ServerFakeRunner(),
+    )
+    try:
+        assert not service.hub.web_server_running
+        result = service.health_check(check_gemini=False)
+        assert result["observer"]["running"] is True
+        assert result["observer"]["url"].startswith("http://127.0.0.1:")
+        assert service.hub.web_server_running
+    finally:
+        service.shutdown()
 
 
 def test_server_tools_list_and_call(tmp_path) -> None:
@@ -109,5 +136,7 @@ def test_health_check_tool_returns_structured_result(tmp_path) -> None:
         assert result["gemini"]["trust_workspace"] is True
         assert any("not found" in warning for warning in result["warnings"])
         assert "token=" not in result["observer"]["url"]
+        assert result["observer"]["start_on_init"] is True
+        assert result["observer"]["running"] is True
     finally:
         service.shutdown()

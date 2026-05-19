@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -7,7 +8,7 @@ import time
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .config import GemnessConfig
 from .observer import ObserverHub
@@ -47,6 +48,18 @@ class GeminiRunResult:
             message="Session interrupted for retry",
             interrupt_instruction=instruction,
         )
+
+
+@dataclass(slots=True)
+class _StreamJsonState:
+    response_parts: list[str] = field(default_factory=list)
+    stats: dict[str, Any] = field(default_factory=dict)
+    result_status: str | None = None
+    error_message: str = ""
+
+    @property
+    def response_text(self) -> str:
+        return "".join(self.response_parts)
 
 
 class GeminiRunner(Protocol):
@@ -118,9 +131,24 @@ class GeminiCliRunner:
             role="gemness",
             phase=phase,
         )
+        stream_state = _StreamJsonState() if output_format == "stream-json" else None
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
-        stdout_thread = _reader_thread(process.stdout, stdout_parts)
+        stdout_thread = _reader_thread(
+            process.stdout,
+            stdout_parts,
+            on_line=(
+                lambda line: _record_stream_json_line(
+                    line,
+                    stream_state,
+                    hub=hub,
+                    session_id=session_id,
+                    phase=phase,
+                )
+            )
+            if stream_state is not None
+            else None,
+        )
         stderr_thread = _reader_thread(process.stderr, stderr_parts)
 
         timed_out = False
@@ -130,7 +158,8 @@ class GeminiCliRunner:
                 _terminate_process(process)
                 stdout_thread.join(timeout=1)
                 stderr_thread.join(timeout=1)
-                stdout = "".join(stdout_parts)
+                raw_stdout = "".join(stdout_parts)
+                stdout = _stream_json_stdout(stream_state, raw_stdout)
                 stderr = "".join(stderr_parts)
                 hub.append_event(
                     session_id,
@@ -154,11 +183,15 @@ class GeminiCliRunner:
 
         stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
-        stdout = "".join(stdout_parts)
+        raw_stdout = "".join(stdout_parts)
+        stdout = _stream_json_stdout(stream_state, raw_stdout)
         stderr = "".join(stderr_parts)
         exit_code = process.poll()
 
-        if stdout:
+        if stream_state is not None:
+            if stdout:
+                hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout, "streamed": True}, phase=phase)
+        elif stdout:
             hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout}, phase=phase)
         if stderr:
             hub.append_event(session_id, "gemini.stderr", "gemness", {"stderr": _tail(stderr)}, phase=phase)
@@ -172,19 +205,30 @@ class GeminiCliRunner:
 
         if timed_out:
             return GeminiRunResult.error("Gemini CLI timed out", exit_code=exit_code, stderr=stderr, stdout=stdout)
+        if stream_state is not None and stream_state.result_status == "error":
+            return GeminiRunResult.error(
+                stream_state.error_message or "Gemini CLI returned a stream error",
+                exit_code=exit_code,
+                stderr=stderr,
+                stdout=stdout,
+            )
         if exit_code != 0:
             return GeminiRunResult.error("Gemini CLI exited with an error", exit_code=exit_code, stderr=stderr, stdout=stdout)
-        return GeminiRunResult.completed(stdout=stdout, stderr=stderr, exit_code=exit_code or 0)
+        return GeminiRunResult.completed(stdout=stdout, stderr=stderr, exit_code=exit_code or 0, stats=stream_state.stats if stream_state else {})
 
 
-def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
+def _reader_thread(pipe: Any, parts: list[str], *, on_line: Callable[[str], None] | None = None) -> threading.Thread:
     def read_pipe() -> None:
         if pipe is None:
             return
         try:
-            value = pipe.read()
-            if value:
+            while True:
+                value = pipe.readline()
+                if value == "":
+                    break
                 parts.append(value)
+                if on_line is not None:
+                    on_line(value)
         finally:
             try:
                 pipe.close()
@@ -194,6 +238,107 @@ def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
     thread = threading.Thread(target=read_pipe, daemon=True)
     thread.start()
     return thread
+
+
+def _record_stream_json_line(
+    line: str,
+    state: _StreamJsonState | None,
+    *,
+    hub: ObserverHub,
+    session_id: str,
+    phase: str | None,
+) -> None:
+    if state is None:
+        return
+    stripped = line.strip()
+    if not stripped:
+        return
+    try:
+        event = json.loads(stripped)
+    except json.JSONDecodeError:
+        state.response_parts.append(line)
+        hub.append_event(
+            session_id,
+            "gemini.delta",
+            "gemness",
+            {"content": line, "response": state.response_text, "unparsed": True},
+            phase=phase,
+        )
+        return
+    if not isinstance(event, dict):
+        return
+
+    event_type = event.get("type")
+    if event_type == "message" and event.get("role") == "assistant":
+        content = str(event.get("content") or "")
+        if not content:
+            return
+        state.response_parts.append(content)
+        hub.append_event(
+            session_id,
+            "gemini.delta",
+            "gemness",
+            {"content": content, "response": state.response_text, "stream_event_type": event_type},
+            phase=phase,
+        )
+        return
+    if event_type == "tool_use":
+        state.response_parts.clear()
+        hub.append_event(
+            session_id,
+            "gemini.tool_use",
+            "gemness",
+            {
+                "tool_name": event.get("tool_name"),
+                "tool_id": event.get("tool_id"),
+                "parameters": event.get("parameters"),
+            },
+            phase=phase,
+        )
+        return
+    if event_type == "tool_result":
+        hub.append_event(
+            session_id,
+            "gemini.tool_result",
+            "gemness",
+            {
+                "tool_id": event.get("tool_id"),
+                "status": event.get("status"),
+                "output": event.get("output"),
+                "error": event.get("error"),
+            },
+            phase=phase,
+        )
+        return
+    if event_type == "error":
+        state.error_message = str(event.get("message") or event.get("error") or "Gemini CLI stream error")
+        hub.append_event(
+            session_id,
+            "gemini.stream_error",
+            "gemness",
+            {"severity": event.get("severity"), "message": state.error_message},
+            phase=phase,
+        )
+        return
+    if event_type == "result":
+        state.result_status = str(event.get("status") or "")
+        stats = event.get("stats")
+        if isinstance(stats, dict):
+            state.stats = stats
+        error = event.get("error")
+        if error:
+            state.error_message = json.dumps(error, ensure_ascii=False) if isinstance(error, dict) else str(error)
+
+
+def _stream_json_stdout(state: _StreamJsonState | None, raw_stdout: str) -> str:
+    if state is None:
+        return raw_stdout
+    payload: dict[str, Any] = {"response": state.response_text}
+    if state.stats:
+        payload["stats"] = state.stats
+    if state.result_status == "error" and state.error_message:
+        payload["error"] = state.error_message
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:

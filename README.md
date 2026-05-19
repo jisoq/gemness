@@ -44,7 +44,7 @@ The detailed route is in [INSTALL.md](INSTALL.md).
 uvx --from git+https://github.com/jisoq/gemness gemness start-mcp-server
 ```
 
-The server communicates over MCP stdio. It starts the observer web server lazily on the first Gemini tool call.
+The server communicates over MCP stdio. By default, it starts the Observer web server as soon as the MCP process starts, so `http://127.0.0.1:56755` can be open before an `ask_text` call begins.
 
 ## Connect to Codex
 
@@ -110,12 +110,18 @@ uvx --from git+https://github.com/jisoq/gemness gemness install-trigger --scope 
 
 ## Observer UI
 
-Every successful tool invocation returns an `observer_url` like:
+Keep the live Observer open at:
+
+```text
+http://127.0.0.1:56755
+```
+
+That root page follows the newest running Gemness session, so you can watch the prompt, Gemini stream events, validation, repair, and final result while the MCP tool call is still running. Every successful tool invocation also returns an `observer_url` like:
 
 ```json
 {
   "session_id": "2fc7...",
-  "observer_url": "http://127.0.0.1:PORT/sessions/2fc7...?token=LOCAL_TOKEN"
+  "observer_url": "http://127.0.0.1:56755/sessions/2fc7...?token=LOCAL_TOKEN"
 }
 ```
 
@@ -148,11 +154,13 @@ Completed sessions support follow-up. A child session is created with `parent_se
 GEMNESS_MODEL=gemini-3.1-pro-preview
 GEMNESS_OBSERVER_ENABLED=true
 GEMNESS_OBSERVER_HOST=127.0.0.1
-GEMNESS_OBSERVER_PORT=0
+GEMNESS_OBSERVER_PORT=56755
+GEMNESS_OBSERVER_START_ON_INIT=true
 GEMNESS_TRANSCRIPT_DIR=.gemness/transcripts
 GEMNESS_REDACT_RAW_BY_DEFAULT=true
 GEMNESS_PAUSE_BEFORE_SEND=false
 GEMNESS_TOOL_TIMEOUT_SEC=120
+GEMNESS_GEMINI_OUTPUT_FORMAT=stream-json
 GEMNESS_GEMINI_SKIP_TRUST=false
 GEMNESS_GEMINI_TRUST_WORKSPACE=true
 GEMNESS_GEMINI_APPROVAL_MODE=plan

@@ -110,14 +110,14 @@ WebSocket을 우선 사용하라. 구현 단순성 때문에 필요하면 SSE + 
 예상 URL 예시:
 
 ```text
-http://127.0.0.1:<port>
+http://127.0.0.1:56755
 ```
 
 MCP tool result에는 가능하면 다음 필드를 포함한다.
 
 ```json
 {
-  "observer_url": "http://127.0.0.1:<port>/sessions/<session_id>",
+  "observer_url": "http://127.0.0.1:56755/sessions/<session_id>",
   "session_id": "<uuid>"
 }
 ```
@@ -334,7 +334,7 @@ type SessionStatus =
   "status": "completed",
   "text": "...",
   "session_id": "...",
-  "observer_url": "http://127.0.0.1:PORT/sessions/SESSION_ID",
+  "observer_url": "http://127.0.0.1:56755/sessions/SESSION_ID",
   "stats": {}
 }
 ```
@@ -647,7 +647,8 @@ Gemini CLI를 실제로 호출하지 말고 fake runner를 사용한다.
 GEMNESS_MODEL=gemini-3.1-pro-preview
 GEMNESS_OBSERVER_ENABLED=true
 GEMNESS_OBSERVER_HOST=127.0.0.1
-GEMNESS_OBSERVER_PORT=0
+GEMNESS_OBSERVER_PORT=56755
+GEMNESS_OBSERVER_START_ON_INIT=true
 GEMNESS_TRANSCRIPT_DIR=.gemness/transcripts
 GEMNESS_REDACT_RAW_BY_DEFAULT=true
 ```

@@ -158,6 +158,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _html(self, html: str) -> None:
+        html = html.replace("__GEMNESS_OBSERVER_TOKEN__", self.server.hub.token)
         body = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -489,8 +490,11 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <script>
     const params = new URLSearchParams(location.search);
-    const token = params.get("token") || "";
-    let currentSessionId = location.pathname.startsWith("/sessions/") ? location.pathname.split("/").pop() : "";
+    const embeddedToken = "__GEMNESS_OBSERVER_TOKEN__";
+    const token = params.get("token") || embeddedToken || "";
+    const explicitSessionPath = location.pathname.startsWith("/sessions/");
+    let liveMode = !explicitSessionPath;
+    let currentSessionId = explicitSessionPath ? location.pathname.split("/").pop() : "";
     let sessions = [];
     let transcript = null;
     let source = null;
@@ -528,6 +532,9 @@ INDEX_HTML = r"""<!doctype html>
       "gemini.delta": "Gemini 응답 조각",
       "gemini.response": "Gemini 응답",
       "gemini.stderr": "Gemini 경고",
+      "gemini.stream_error": "Gemini 스트림 오류",
+      "gemini.tool_use": "Gemini 도구 요청",
+      "gemini.tool_result": "Gemini 도구 결과",
       "gemini.exited": "Gemini 종료",
       "json.extracted": "JSON 후보 추출",
       "json.parse_failed": "JSON 파싱 실패",
@@ -565,9 +572,18 @@ INDEX_HTML = r"""<!doctype html>
     async function loadSessions() {
       const data = await getJson("/api/sessions");
       sessions = data.sessions || [];
-      if (!currentSessionId && sessions[0]) currentSessionId = sessions[0].session_id;
+      if (liveMode) {
+        const preferred = preferredLiveSession(sessions);
+        currentSessionId = preferred?.session_id || "";
+      } else if (!currentSessionId && sessions[0]) {
+        currentSessionId = sessions[0].session_id;
+      }
       renderSessions();
       if (currentSessionId) await loadTranscript();
+      else renderTranscript();
+    }
+    function preferredLiveSession(sessionItems) {
+      return (sessionItems || []).find((session) => !isTerminalStatus(session.status)) || sessionItems?.[0] || null;
     }
     async function loadTranscript() {
       const raw = qs("raw").checked ? "1" : "0";
@@ -607,6 +623,7 @@ INDEX_HTML = r"""<!doctype html>
       `).join("");
       document.querySelectorAll("[data-session]").forEach((button) => {
         button.onclick = async () => {
+          liveMode = false;
           currentSessionId = button.dataset.session;
           history.replaceState(null, "", `/sessions/${currentSessionId}?token=${encodeURIComponent(token)}`);
           renderSessions();
@@ -893,6 +910,17 @@ INDEX_HTML = r"""<!doctype html>
             meta: { 모델: payload.model, cwd: payload.cwd, "output mode": payload.output_format, pid: payload.pid },
             rawEvent: event
           };
+        case "gemini.delta":
+          if (hasLaterGeminiOutput(event, index, allEvents)) return null;
+          return {
+            speaker: "gemini",
+            direction: "gemini_to_agents",
+            title: "Gemini -> Agents · 응답 중",
+            timestamp: event.ts,
+            body: payload.response || payload.content || "",
+            meta: { 단계: "응답 수신 중" },
+            rawEvent: event
+          };
         case "gemini.response": {
           const parsed = parseGeminiEnvelope(payload.response || "");
           const body = parsed.response ?? payload.response ?? "";
@@ -910,6 +938,12 @@ INDEX_HTML = r"""<!doctype html>
         case "gemini.stderr":
           if (isBenignGeminiStderr(event)) return null;
           return turn(event, "observer", "system", "Observer", "Gemini CLI가 표준 오류 출력에 경고나 진단 메시지를 남겼습니다.", { stderr: payload.stderr }, "warn");
+        case "gemini.stream_error":
+          return turn(event, "observer", "system", "Observer", `Gemini CLI 스트림 오류가 기록되었습니다.\n${payload.message || ""}`, { severity: payload.severity }, "error");
+        case "gemini.tool_use":
+          return turn(event, "gemini", "system", "Gemini CLI", `Gemini CLI가 도구 사용을 요청했습니다: ${payload.tool_name || "알 수 없는 도구"}`, { tool_id: payload.tool_id, parameters: payload.parameters });
+        case "gemini.tool_result":
+          return turn(event, "gemini", "system", "Gemini CLI", `Gemini CLI 도구 실행 결과가 기록되었습니다: ${payload.status || "알 수 없음"}`, { tool_id: payload.tool_id, output: payload.output, error: payload.error });
         case "gemini.exited":
           return turn(event, "gemini", "system", "Gemini CLI", "Gemini CLI 프로세스가 종료되었습니다.", { "exit code": payload.exit_code ?? "없음", 실행시간: formatDuration(payload.duration_ms) });
         case "json.extracted":
@@ -955,6 +989,13 @@ INDEX_HTML = r"""<!doctype html>
       if (!prompt) return false;
       return allEvents.slice(index + 1).some((candidate) =>
         candidate.type === "prompt.sent" && candidate.payload?.prompt === prompt
+      );
+    }
+    function hasLaterGeminiOutput(event, index, allEvents) {
+      return allEvents.slice(index + 1).some((candidate) =>
+        candidate.session_id === event.session_id &&
+        (candidate.phase || "") === (event.phase || "") &&
+        ["gemini.delta", "gemini.response"].includes(candidate.type)
       );
     }
     function turn(event, speaker, direction, title, body, meta = {}, severity = "") {
@@ -1132,6 +1173,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     window.buildConversationTranscript = buildConversationTranscript;
     window.describeEventAsConversationTurn = describeEventAsConversationTurn;
+    window.preferredLiveSession = preferredLiveSession;
     window.parseGeminiEnvelope = parseGeminiEnvelope;
     window.renderMarkdown = renderMarkdown;
     getJson("/api/config").then((config) => { qs("pause").checked = !!config.pause_before_send; }).catch(console.error);

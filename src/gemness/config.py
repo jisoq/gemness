@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DEFAULT_OBSERVER_PORT = 56755
+
 
 def _bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -57,12 +59,14 @@ class GemnessConfig:
     model: str = os.getenv("GEMNESS_MODEL", "gemini-3.1-pro-preview")
     observer_enabled: bool = _bool_env("GEMNESS_OBSERVER_ENABLED", True)
     observer_host: str = _loopback_host(os.getenv("GEMNESS_OBSERVER_HOST", "127.0.0.1"))
-    observer_port: int = _int_env("GEMNESS_OBSERVER_PORT", 0)
+    observer_port: int = _int_env("GEMNESS_OBSERVER_PORT", DEFAULT_OBSERVER_PORT)
+    observer_start_on_init: bool = _bool_env("GEMNESS_OBSERVER_START_ON_INIT", True)
     transcript_dir: Path = Path(os.getenv("GEMNESS_TRANSCRIPT_DIR", ".gemness/transcripts"))
     redact_raw_by_default: bool = _bool_env("GEMNESS_REDACT_RAW_BY_DEFAULT", True)
     pause_before_send: bool = _bool_env("GEMNESS_PAUSE_BEFORE_SEND", False)
     approval_timeout_sec: float = float(os.getenv("GEMNESS_APPROVAL_TIMEOUT_SEC", "300"))
     gemini_command: str = os.getenv("GEMNESS_COMMAND", "gemini")
+    gemini_output_format: str = os.getenv("GEMNESS_GEMINI_OUTPUT_FORMAT", "stream-json")
     gemini_skip_trust: bool = _bool_env("GEMNESS_GEMINI_SKIP_TRUST", False)
     gemini_trust_workspace: bool = field(default_factory=_trust_workspace_env)
     gemini_approval_mode: str = os.getenv("GEMNESS_GEMINI_APPROVAL_MODE", "plan")

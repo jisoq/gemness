@@ -4,15 +4,9 @@
 
 - Always answer the user in Korean unless the user explicitly requests another language.
 
-## Observer Server PID
+## Observer Server Process Management
 
-- Use this URL for browser checks: `http://127.0.0.1:56755`.
-- Do not start a new Observer server when an existing one is still running.
-- Reuse the fixed PID file `.codex/observer-server.pid` for Observer UI browser checks and real Gemini Observer sessions.
-- Before starting an Observer server, read `.codex/observer-server.pid` and verify whether that process is alive.
-- If the process is alive, reuse its existing URL from `.codex/observer-server.url` instead of creating a new server.
-- If code changes require a restart, stop only the process recorded in `.codex/observer-server.pid`, then overwrite the same PID and URL files with the restarted server.
-- Do not leave ad hoc Observer server PID files behind. Clean up temporary scripts, stale PID files, and live Observer processes when the check is finished unless the user explicitly asks to keep the server running.
+- The Observer browser port is fixed at `56755`. Always use `http://127.0.0.1:56755` for browser checks.
 
 ## Working Tree Safety
 

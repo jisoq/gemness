@@ -33,6 +33,8 @@ class GemnessService:
         self.hub.attach_service(self)
         self.runner = runner or GeminiCliRunner(self.config)
         self.diff_provider = diff_provider or self._git_diff
+        if self.config.observer_enabled and self.config.observer_start_on_init:
+            self.hub.start_web_server()
 
     def shutdown(self) -> None:
         self.hub.shutdown()
@@ -62,6 +64,7 @@ class GemnessService:
             "skip_trust": self.config.gemini_skip_trust,
             "trust_workspace": self.config.gemini_trust_workspace,
             "approval_mode": self.config.gemini_approval_mode,
+            "output_format": self.config.gemini_output_format,
             "available": command_exists(self.config.gemini_command),
         }
         if check_gemini:
@@ -78,11 +81,14 @@ class GemnessService:
             "allowed_roots": [str(root) for root in normalized_allowed_roots(self.config)],
             "error": cwd_error,
         }
+        observer_url = self.hub.base_url if self.config.observer_enabled else ""
         observer = {
             "enabled": self.config.observer_enabled,
             "host": self.config.observer_host,
             "port": self.config.observer_port,
-            "url": self.hub.base_url if self.config.observer_enabled else "",
+            "start_on_init": self.config.observer_start_on_init,
+            "running": self.hub.web_server_running,
+            "url": observer_url,
         }
         status = "error" if cwd_error else "warning" if warnings else "ok"
         return {
@@ -191,7 +197,14 @@ class GemnessService:
         except SessionCancelled as exc:
             return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "message": str(exc)}
 
-        result = self.runner.run(prompt_to_send, model=model, output_format="json", session_id=session_id, hub=self.hub, cwd=cwd)
+        result = self.runner.run(
+            prompt_to_send,
+            model=model,
+            output_format=self.config.gemini_output_format,
+            session_id=session_id,
+            hub=self.hub,
+            cwd=cwd,
+        )
         if result.status == "interrupted":
             retry_result = self._retry_text(tool_name, session_id, prompt_to_send, result, model, cwd)
             self.hub.set_status(
@@ -255,7 +268,14 @@ class GemnessService:
         except SessionCancelled as exc:
             return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "message": str(exc)}
 
-        result = self.runner.run(prompt_to_send, model=model, output_format="json", session_id=session_id, hub=self.hub, cwd=cwd)
+        result = self.runner.run(
+            prompt_to_send,
+            model=model,
+            output_format=self.config.gemini_output_format,
+            session_id=session_id,
+            hub=self.hub,
+            cwd=cwd,
+        )
         if result.status == "interrupted":
             retry_result = self._retry_json(tool_name, session_id, prompt_to_send, result, schema, model, cwd)
             self.hub.set_status(
@@ -423,7 +443,15 @@ class GemnessService:
         )
         prompt = _repair_prompt(original_prompt, schema, raw_response, parse_error, validation_errors)
         self.hub.append_event(session_id, "repair.prompt_sent", "codex_mcp", {"prompt": prompt}, phase="repair")
-        result = self.runner.run(prompt, model=model, output_format="json", session_id=session_id, hub=self.hub, cwd=cwd, phase="repair")
+        result = self.runner.run(
+            prompt,
+            model=model,
+            output_format=self.config.gemini_output_format,
+            session_id=session_id,
+            hub=self.hub,
+            cwd=cwd,
+            phase="repair",
+        )
         if result.status == "error":
             return {"status": "error", "result": result}
         if result.status in {"cancelled", "interrupted"}:
