@@ -19,6 +19,7 @@ CONSOLE_SCRIPT = "gemness"
 TOOL_NAMES = (
     "health_check",
     "ask_text",
+    "follow_up",
     "ask_json",
     "review_current_diff",
 )
@@ -70,7 +71,7 @@ def build_codex_config(options: CodexConfigOptions) -> str:
     approval_blocks = "\n\n".join(
         (
             f"[mcp_servers.{MCP_SERVER_NAME}.tools.{_toml_string(name)}]\n"
-            f"approval_mode = {_toml_string('approve' if name in {'health_check', 'ask_text'} else 'prompt')}"
+            f"approval_mode = {_toml_string('approve' if name in {'health_check', 'ask_text', 'follow_up'} else 'prompt')}"
         )
         for name in TOOL_NAMES
     )

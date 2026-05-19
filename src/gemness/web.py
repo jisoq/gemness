@@ -702,8 +702,9 @@ INDEX_HTML = r"""<!doctype html>
       };
     }
     function renderSessions() {
-      const liveSessions = sessions.filter((session) => !isTerminalStatus(session.status));
-      const historySessions = sessions.filter((session) => isTerminalStatus(session.status));
+      const conversationItems = groupSessionsByConversation(sessions);
+      const liveSessions = conversationItems.filter((session) => !isTerminalStatus(session.status));
+      const historySessions = conversationItems.filter((session) => isTerminalStatus(session.status));
       qs("sessionList").innerHTML = [
         renderSessionGroup("Live", liveSessions, "실행 중인 세션이 없습니다."),
         renderSessionGroup("History", historySessions, "이전 세션이 없습니다.")
@@ -718,15 +719,56 @@ INDEX_HTML = r"""<!doctype html>
         };
       });
     }
+    function groupSessionsByConversation(sessionItems) {
+      const groups = new Map();
+      for (const session of sessionItems || []) {
+        const key = session.conversation_id || session.session_id;
+        if (!groups.has(key)) groups.set(key, { conversation_id: session.conversation_id || "", runs: [] });
+        groups.get(key).runs.push(session);
+      }
+      return [...groups.values()]
+        .map(conversationListItem)
+        .sort((a, b) => String(b.updated_at || b.started_at || "").localeCompare(String(a.updated_at || a.started_at || "")));
+    }
+    function conversationListItem(group) {
+      const runs = [...group.runs].sort(compareSessionOrder);
+      const root = runs.find((session) => (session.turn_index || 0) === 1) || runs[0] || {};
+      const latest = runs.reduce((best, session) => newerSession(session, best), runs[0] || {});
+      const latestLive = runs.filter((session) => !isTerminalStatus(session.status)).reduce((best, session) => newerSession(session, best), null);
+      const display = latestLive || latest;
+      const turnCount = runs.reduce((count, session) => Math.max(count, Number(session.turn_index) || 0), 0) || runs.length;
+      return {
+        ...display,
+        title: root.title || display.title,
+        session_id: display.session_id,
+        conversation_id: display.conversation_id || group.conversation_id,
+        turn_count: turnCount,
+        _active: runs.some((session) => session.session_id === currentSessionId),
+        _run_session_ids: runs.map((session) => session.session_id)
+      };
+    }
+    function compareSessionOrder(a, b) {
+      const turnDiff = (Number(a.turn_index) || 0) - (Number(b.turn_index) || 0);
+      if (turnDiff) return turnDiff;
+      return String(a.started_at || "").localeCompare(String(b.started_at || ""));
+    }
+    function newerSession(candidate, current) {
+      if (!current) return candidate;
+      const byUpdated = String(candidate.updated_at || candidate.started_at || "").localeCompare(String(current.updated_at || current.started_at || ""));
+      if (byUpdated > 0) return candidate;
+      if (byUpdated < 0) return current;
+      return compareSessionOrder(candidate, current) >= 0 ? candidate : current;
+    }
     function renderSessionGroup(label, items, emptyText) {
       const body = items.length ? items.map(renderSessionButton).join("") : `<p class="help">${escapeHtml(emptyText)}</p>`;
       return `<section class="session-group"><div class="session-group-title">${escapeHtml(label)}</div>${body}</section>`;
     }
     function renderSessionButton(s) {
+      const toolMeta = s.turn_count && s.turn_count > 1 ? `${s.turn_count}턴 · ${toolLabel(s.tool_name)}` : toolLabel(s.tool_name);
       return `
-        <button class="session ${s.session_id === currentSessionId ? "active" : ""}" data-session="${s.session_id}">
+        <button class="session ${s._active || s.session_id === currentSessionId ? "active" : ""}" data-session="${s.session_id}">
           <span><span class="session-title">${escapeHtml(sessionTitle(s))}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span>
-          <span class="meta">${escapeHtml(toolLabel(s.tool_name))}</span>
+          <span class="meta">${escapeHtml(toolMeta)}</span>
           <span class="meta">${escapeHtml(s.model || "")}</span>
           <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
         </button>
@@ -1242,7 +1284,7 @@ INDEX_HTML = r"""<!doctype html>
       return `${(ms / 1000).toFixed(1)}초`;
     }
     function isTerminalStatus(status) {
-      return ["completed", "valid", "invalid", "error"].includes(status);
+      return ["completed", "valid", "invalid", "error", "cancelled"].includes(status);
     }
     function findCwd(events) {
       const started = [...events].reverse().find((event) => event.type === "gemini.started" && event.payload?.cwd);
@@ -1296,6 +1338,7 @@ INDEX_HTML = r"""<!doctype html>
     window.buildConversationTranscript = buildConversationTranscript;
     window.describeEventAsConversationTurn = describeEventAsConversationTurn;
     window.preferredLiveSession = preferredLiveSession;
+    window.groupSessionsByConversation = groupSessionsByConversation;
     window.parseGeminiEnvelope = parseGeminiEnvelope;
     window.renderMarkdown = renderMarkdown;
     window.renderSessionGroup = renderSessionGroup;

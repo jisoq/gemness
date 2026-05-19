@@ -28,6 +28,7 @@ Expected behavior:
    - Use `review_current_diff` for current git diff review.
    - Use `ask_json` when a structured JSON result is needed.
    - Use `ask_text` for general second opinion, architecture critique, debugging advice, or cross-checking.
+   - Use `follow_up` with the previous `session_id` when continuing the same Gemini conversation.
 4. Treat Gemini output as advisory, not authoritative.
 5. Verify Gemini's suggestions before applying them.
 6. Summarize what Gemini said and what was accepted, rejected, or left unverified.

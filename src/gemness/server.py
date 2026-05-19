@@ -36,6 +36,20 @@ TOOLS = [
         },
     },
     {
+        "name": "follow_up",
+        "description": "Continue a previous Gemini observer conversation from a parent session id.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["parent_session_id", "prompt"],
+            "properties": {
+                "parent_session_id": {"type": "string"},
+                "prompt": {"type": "string"},
+                "model": {"type": "string"},
+            },
+        },
+    },
+    {
         "name": "ask_json",
         "description": "Ask Gemini for JSON, validate it against a schema, and expose parse/repair events.",
         "inputSchema": {
@@ -121,6 +135,8 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
         result = service.health_check(cwd=arguments.get("cwd"), check_gemini=bool(arguments.get("check_gemini", True)))
     elif name == "ask_text":
         result = service.ask_text(str(arguments["prompt"]), model=arguments.get("model"), cwd=arguments.get("cwd"))
+    elif name == "follow_up":
+        result = service.follow_up(str(arguments["parent_session_id"]), str(arguments["prompt"]), model=arguments.get("model"))
     elif name == "ask_json":
         result = service.ask_json(str(arguments["prompt"]), arguments["schema"], model=arguments.get("model"), cwd=arguments.get("cwd"))
     elif name == "review_current_diff":

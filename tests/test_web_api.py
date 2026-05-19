@@ -125,6 +125,7 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "function describeEventAsConversationTurn" in INDEX_HTML
     assert "function preferredLiveSession" in INDEX_HTML
     assert "function shouldHonorRequestedSession" in INDEX_HTML
+    assert "function groupSessionsByConversation" in INDEX_HTML
     assert "function renderSessionGroup" in INDEX_HTML
     assert "function sessionTitle" in INDEX_HTML
     assert "function renderMarkdown" in INDEX_HTML
@@ -340,14 +341,14 @@ const fallback = preferredLiveSession([
   { session_id: "latest", status: "completed" },
   { session_id: "older", status: "error" }
 ]);
-console.log(JSON.stringify({ picked: picked.session_id, fallback: fallback.session_id }));
+console.log(JSON.stringify({ picked: picked.session_id, fallback: fallback.session_id, cancelledTerminal: isTerminalStatus("cancelled") }));
 """
     script_path = tmp_path / "live-picker-test.js"
     script_path.write_text(script, encoding="utf-8")
     completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
     data = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert data == {"picked": "running", "fallback": "latest"}
+    assert data == {"picked": "running", "fallback": "latest", "cancelledTerminal": True}
 
 
 def test_session_list_groups_live_history_and_uses_session_title(tmp_path) -> None:
@@ -355,15 +356,26 @@ def test_session_list_groups_live_history_and_uses_session_title(tmp_path) -> No
     assert node is not None, "node is required for Observer UI rendering tests"
 
     script = _extract_index_script() + r"""
-const liveHtml = renderSessionGroup("Live", [
-  { session_id: "live", status: "running", title: "Observer UX 정리", tool_name: "ask_text", model: "m" }
-], "");
-const historyHtml = renderSessionGroup("History", [
-  { session_id: "done", status: "completed", tool_name: "ask_json", model: "m" }
-], "");
+currentSessionId = "run_1";
+const grouped = groupSessionsByConversation([
+  { session_id: "run_1", conversation_id: "conv_a", status: "completed", title: "Observer UX 정리", tool_name: "ask_text", model: "m", started_at: "2026-05-19T01:00:00Z", updated_at: "2026-05-19T01:00:01Z", turn_index: 1 },
+  { session_id: "run_2", conversation_id: "conv_a", status: "completed", title: "후속 질문", tool_name: "ask_text", model: "m", started_at: "2026-05-19T01:01:00Z", updated_at: "2026-05-19T01:01:01Z", turn_index: 2 },
+  { session_id: "run_3", conversation_id: "conv_b", status: "completed", tool_name: "ask_json", model: "m", started_at: "2026-05-19T01:02:00Z", updated_at: "2026-05-19T01:02:01Z", turn_index: 1 },
+  { session_id: "run_4", conversation_id: "conv_c", status: "running", title: "실시간 확인", tool_name: "ask_text", model: "m", started_at: "2026-05-19T01:03:00Z", updated_at: "2026-05-19T01:03:01Z", turn_index: 1 }
+]);
+const liveHtml = renderSessionGroup("Live", grouped.filter((session) => !isTerminalStatus(session.status)), "");
+const historyHtml = renderSessionGroup("History", grouped.filter((session) => isTerminalStatus(session.status)), "");
+const convA = grouped.find((session) => session.conversation_id === "conv_a");
 console.log(JSON.stringify({
-  liveHasTitle: liveHtml.includes("Observer UX 정리"),
+  liveHasTitle: liveHtml.includes("실시간 확인"),
   liveHasGroup: liveHtml.includes("Live"),
+  groupedCount: grouped.length,
+  convATurnCount: convA.turn_count,
+  convAUsesLatestRun: convA.session_id === "run_2",
+  convAUsesRootTitle: sessionTitle(convA) === "Observer UX 정리",
+  historyButtonCount: (historyHtml.match(/data-session=/g) || []).length,
+  historyShowsTurns: historyHtml.includes("2턴 · 텍스트 질문"),
+  historyActiveFromAnyRun: historyHtml.includes("session active"),
   historyHasFallback: historyHtml.includes("JSON 질문"),
   historyHasGroup: historyHtml.includes("History"),
   directTitle: sessionTitle({ title: "짧은 제목", tool_name: "ask_text" }),
@@ -378,6 +390,13 @@ console.log(JSON.stringify({
     assert data == {
         "liveHasTitle": True,
         "liveHasGroup": True,
+        "groupedCount": 3,
+        "convATurnCount": 2,
+        "convAUsesLatestRun": True,
+        "convAUsesRootTitle": True,
+        "historyButtonCount": 2,
+        "historyShowsTurns": True,
+        "historyActiveFromAnyRun": True,
         "historyHasFallback": True,
         "historyHasGroup": True,
         "directTitle": "짧은 제목",

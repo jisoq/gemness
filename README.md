@@ -6,10 +6,11 @@ The server exposes:
 
 - `health_check`
 - `ask_text`
+- `follow_up`
 - `ask_json`
 - `review_current_diff`
 
-Each tool call creates a unique observer session. Tool results include `session_id` and `observer_url`, so you can open the local UI and inspect prompts, Gemini output, parse/validation events, repair attempts, review findings, and intervention history.
+Each root tool call creates a unique observer run. Use `follow_up` with a previous `session_id` to continue the same Gemini conversation; the Observer history groups those runs into one conversation entry. Tool results include `session_id`, `conversation_id`, and `observer_url`, so you can open the local UI and inspect prompts, Gemini output, parse/validation events, repair attempts, review findings, and intervention history.
 
 ## Quick Start
 
@@ -125,9 +126,9 @@ That root page follows the newest running Gemness session, so you can watch the 
 }
 ```
 
-Open that URL in a browser. The dashboard lists sessions and automatically follows the newest running one; you do not need to copy or remember session IDs. The UI shows:
+Open that URL in a browser. The dashboard lists conversations and automatically follows the newest running one; you do not need to copy or remember session IDs. The UI shows:
 
-- recent sessions with tool name, status, model, start time, and duration
+- recent conversations with tool name, status, model, start time, duration, and turn count
 - transcript events for prompt, Gemini response, JSON extraction, validation, repair, and final result
 - redacted view by default, with an explicit raw toggle
 - prompt edit, approve, cancel, interrupt-and-retry, follow-up, copy, and export controls
@@ -138,7 +139,7 @@ Set `GEMNESS_PAUSE_BEFORE_SEND=true` to pause sessions before sending prompts to
 
 During a running subprocess, the UI supports `interrupt and retry`. The current process is terminated, the partial output is recorded, and a child session is created with the original prompt, partial output, and user instruction.
 
-Completed sessions support follow-up. A child session is created with `parent_session_id` and a redacted transcript summary.
+Completed sessions support follow-up from the UI and the MCP `follow_up` tool. A child run is created with `parent_session_id`, kept under the same `conversation_id` when it extends the latest turn, and shown as the same conversation in Observer history.
 
 ## Security
 

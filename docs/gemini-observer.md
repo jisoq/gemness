@@ -6,7 +6,7 @@
 flowchart LR
   User["User"]
   Codex["Codex agent"]
-  Tools["MCP tools: health_check, ask_text, ask_json, review_current_diff"]
+  Tools["MCP tools: health_check, ask_text, follow_up, ask_json, review_current_diff"]
   Hub["ObserverHub"]
   Runner["GeminiCliRunner"]
   UI["Loopback browser UI"]
@@ -23,7 +23,7 @@ flowchart LR
 
 `ObserverHub` owns session IDs, session state, events, redaction, intervention queues, JSONL transcript persistence, and the local web server. Gemini remains advisory: Codex still decides how to use the returned text or JSON.
 
-By default `GemnessService` starts the loopback Observer web server during MCP server initialization (`GEMNESS_OBSERVER_START_ON_INIT=true`). That makes the fixed dashboard URL `http://127.0.0.1:56755` usable before `ask_text`, `ask_json`, or `review_current_diff` returns the dashboard `observer_url`. The UI lists sessions from the shared transcript directory and follows the newest running session, so users do not need to remember session IDs.
+By default `GemnessService` starts the loopback Observer web server during MCP server initialization (`GEMNESS_OBSERVER_START_ON_INIT=true`). That makes the fixed dashboard URL `http://127.0.0.1:56755` usable before `ask_text`, `follow_up`, `ask_json`, or `review_current_diff` returns the dashboard `observer_url`. The UI lists conversations from the shared transcript directory and follows the newest running session, so users do not need to remember session IDs.
 
 ## Tool Pipeline
 
@@ -34,6 +34,14 @@ By default `GemnessService` starts the loopback Observer web server during MCP s
 3. optionally wait for approval or prompt edit
 4. run Gemini CLI with `--output-format stream-json` by default
 5. record streamed response deltas, final response, stderr, exit, and final result
+
+`follow_up`:
+
+1. receive a previous `parent_session_id` and a new prompt
+2. create a new observer run under the same conversation when continuing the latest turn
+3. reuse Gemini CLI native resume when supported
+4. otherwise send a redacted recent-turn summary fallback
+5. return the new `session_id` plus the shared `conversation_id`
 
 `ask_json`:
 

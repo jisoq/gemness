@@ -208,6 +208,9 @@ class GemnessService:
         )
 
     def follow_up(self, parent_session_id: str, instruction: str, model: str | None = None) -> dict[str, Any]:
+        self.hub.refresh_from_disk()
+        if parent_session_id not in self.hub.sessions:
+            return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
         plan = self._follow_up_plan(parent_session_id, instruction)
         lock = self._conversation_lock(plan.conversation_id) if plan.conversation_id else _null_lock()
         with lock:

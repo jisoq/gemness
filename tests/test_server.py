@@ -52,6 +52,7 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         names = [tool["name"] for tool in listed["result"]["tools"]]
         assert "health_check" in names
         assert "ask_text" in names
+        assert "follow_up" in names
         assert "ask_json" in names
         assert "review_current_diff" in names
 
@@ -68,6 +69,19 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         assert result["status"] == "completed"
         assert result["text"] == "server ok"
         assert result["observer_url"].startswith("http://127.0.0.1:")
+
+        followed = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "follow_up", "arguments": {"parent_session_id": result["session_id"], "prompt": "continue"}},
+            },
+            service,
+        )
+        follow_up_result = followed["result"]["structuredContent"]
+        assert follow_up_result["status"] == "completed"
+        assert follow_up_result["conversation_id"] == result["conversation_id"]
     finally:
         service.shutdown()
 
