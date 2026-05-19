@@ -95,9 +95,9 @@ def _request(process: subprocess.Popen[bytes], message: dict[str, Any], timeout:
 
 
 def _write_message(stdin: BinaryIO, message: dict[str, Any]) -> None:
-    body = json.dumps(message, ensure_ascii=False).encode("utf-8")
-    stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     stdin.write(body)
+    stdin.write(b"\n")
     stdin.flush()
 
 
@@ -106,18 +106,13 @@ def _read_message(stdout: BinaryIO, timeout: float) -> dict[str, Any]:
 
     def read() -> None:
         try:
-            headers: dict[str, str] = {}
             while True:
                 line = stdout.readline()
                 if line == b"":
                     raise RuntimeError("MCP server closed stdout")
-                if line in {b"\r\n", b"\n"}:
-                    break
-                name, _, value = line.decode("ascii").partition(":")
-                headers[name.lower()] = value.strip()
-            length = int(headers.get("content-length", "0"))
-            body = stdout.read(length)
-            output.put(json.loads(body.decode("utf-8")))
+                if line not in {b"\r\n", b"\n"}:
+                    output.put(json.loads(line.decode("utf-8")))
+                    return
         except BaseException as exc:  # noqa: BLE001 - surface smoke-test failures directly.
             output.put(exc)
 

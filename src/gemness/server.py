@@ -91,13 +91,20 @@ def _handle_message(message: dict[str, Any], service: GemnessService) -> dict[st
         return None
     try:
         if method == "initialize":
+            params = message.get("params") or {}
             result = {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
+                "protocolVersion": params.get("protocolVersion") or "2024-11-05",
+                "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             }
         elif method == "tools/list":
             result = {"tools": TOOLS}
+        elif method == "resources/list":
+            result = {"resources": []}
+        elif method == "prompts/list":
+            result = {"prompts": []}
+        elif method == "ping":
+            result = {}
         elif method == "tools/call":
             result = _call_tool(message.get("params") or {}, service)
         else:
@@ -135,15 +142,28 @@ def _normalize_tool_name(name: Any) -> str:
 
 
 def _read_message(stdin: BinaryIO) -> dict[str, Any] | None:
-    headers: dict[str, str] = {}
     while True:
         line = stdin.readline()
         if line == b"":
             return None
         if line in {b"\r\n", b"\n"}:
-            break
+            continue
+        if line.lower().startswith(b"content-length:"):
+            return _read_content_length_message(stdin, line)
+        return json.loads(line.decode("utf-8"))
+
+
+def _read_content_length_message(stdin: BinaryIO, first_header: bytes) -> dict[str, Any] | None:
+    headers: dict[str, str] = {}
+    line = first_header
+    while True:
         name, _, value = line.decode("ascii").partition(":")
         headers[name.lower()] = value.strip()
+        line = stdin.readline()
+        if line == b"":
+            return None
+        if line in {b"\r\n", b"\n"}:
+            break
     length = int(headers.get("content-length", "0"))
     if length <= 0:
         return None
@@ -152,9 +172,9 @@ def _read_message(stdin: BinaryIO) -> dict[str, Any] | None:
 
 
 def _write_message(stdout: BinaryIO, message: dict[str, Any]) -> None:
-    body = json.dumps(message, ensure_ascii=False).encode("utf-8")
-    stdout.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     stdout.write(body)
+    stdout.write(b"\n")
     stdout.flush()
 
 

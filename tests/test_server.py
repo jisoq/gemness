@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 
 from gemness.config import GemnessConfig
 from gemness.runner import GeminiRunResult
-from gemness.server import _handle_message
+from gemness.server import _handle_message, _read_message, _write_message
 from gemness.tools import GemnessService
 
 
@@ -40,6 +41,39 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         assert result["status"] == "completed"
         assert result["text"] == "server ok"
         assert result["observer_url"].startswith("http://127.0.0.1:")
+    finally:
+        service.shutdown()
+
+
+def test_server_stdio_uses_json_lines() -> None:
+    incoming = io.BytesIO(b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n')
+
+    assert _read_message(incoming) == {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+
+    outgoing = io.BytesIO()
+    _write_message(outgoing, {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+
+    payload = outgoing.getvalue()
+    assert payload.endswith(b"\n")
+    assert b"Content-Length" not in payload
+    assert json.loads(payload.decode("utf-8"))["result"] == {"ok": True}
+
+
+def test_server_still_reads_content_length_for_legacy_smoke_clients() -> None:
+    body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+    incoming = io.BytesIO(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+
+    assert _read_message(incoming) == {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+
+
+def test_server_empty_resources_and_prompts(tmp_path) -> None:
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    try:
+        resources = _handle_message({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}, service)
+        prompts = _handle_message({"jsonrpc": "2.0", "id": 2, "method": "prompts/list"}, service)
+
+        assert resources["result"] == {"resources": []}
+        assert prompts["result"] == {"prompts": []}
     finally:
         service.shutdown()
 
