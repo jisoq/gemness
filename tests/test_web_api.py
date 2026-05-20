@@ -139,6 +139,8 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "isBenignAntigravityStderr" in INDEX_HTML
     assert "runtimeSignal" in INDEX_HTML
     assert "function runTelemetry" in INDEX_HTML
+    assert "function selectSession" in INDEX_HTML
+    assert "function bindSessionListEvents" in INDEX_HTML
     assert ".status-dot.live" in INDEX_HTML
     assert "conversation id" in INDEX_HTML
     assert "run id" in INDEX_HTML
@@ -594,6 +596,80 @@ console.log(JSON.stringify({ active, inactive }));
     data = json.loads(completed.stdout.strip().splitlines()[-1])
 
     assert data == {"active": True, "inactive": False}
+
+
+def test_session_selection_discards_stale_transcript_responses(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+(async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const elements = new Map();
+  document.getElementById = (id) => {
+    if (!elements.has(id)) elements.set(id, { id, checked: false, value: "", innerHTML: "", textContent: "", onclick: null, onchange: null });
+    return elements.get(id);
+  };
+  document.querySelectorAll = () => [];
+  const response = (payload) => ({ ok: true, json: async () => payload, text: async () => "" });
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  const oldRequest = deferred();
+  const newRequest = deferred();
+  global.fetch = async (path) => {
+    const url = String(path);
+    if (url.includes("/api/sessions/run_old")) return await oldRequest.promise;
+    if (url.includes("/api/sessions/run_new")) return await newRequest.promise;
+    return response({ sessions: [] });
+  };
+
+  const oldSelection = selectSession("run_old");
+  const loadingTitle = elements.get("title").textContent;
+  const loadingFlow = elements.get("transcriptFlow").innerHTML;
+  const newSelection = selectSession("run_new");
+  newRequest.resolve(response({
+    session: { session_id: "run_new", title: "새 세션", status: "completed", tool_name: "ask_antigravity" },
+    events: [{ type: "prompt.sent", ts: "2026-05-19T03:04:20Z", role: "codex_mcp", payload: { prompt: "새 본문" } }]
+  }));
+  await newSelection;
+  const titleAfterNew = elements.get("title").textContent;
+  const flowAfterNew = elements.get("transcriptFlow").innerHTML;
+
+  oldRequest.resolve(response({
+    session: { session_id: "run_old", title: "이전 세션", status: "completed", tool_name: "ask_antigravity" },
+    events: [{ type: "prompt.sent", ts: "2026-05-19T03:04:18Z", role: "codex_mcp", payload: { prompt: "이전 본문" } }]
+  }));
+  await oldSelection;
+  console.log(JSON.stringify({
+    loadingTitle,
+    loadingFlow,
+    titleAfterNew,
+    flowAfterNew,
+    finalTitle: elements.get("title").textContent,
+    finalFlow: elements.get("transcriptFlow").innerHTML
+  }));
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+    script_path = tmp_path / "stale-selection-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert "불러오는 중" in data["loadingTitle"]
+    assert "대화 기록을 불러오는 중입니다." in data["loadingFlow"]
+    assert data["titleAfterNew"] == "새 세션 · 완료"
+    assert "새 본문" in data["flowAfterNew"]
+    assert data["finalTitle"] == "새 세션 · 완료"
+    assert "새 본문" in data["finalFlow"]
+    assert "이전 본문" not in data["finalFlow"]
 
 
 def test_observer_ui_marks_and_restores_raw_event_details(tmp_path) -> None:

@@ -337,7 +337,7 @@ INDEX_HTML = r"""<!doctype html>
       animation: statusPulse 1.15s ease-in-out infinite;
     }
     .status-dot.completed, .status-dot.valid { color: var(--good); background: var(--good); }
-    .status-dot.stale, .status-dot.starting, .status-dot.running, .status-dot.sending, .status-dot.repairing, .status-dot.queued {
+    .status-dot.stale, .status-dot.starting, .status-dot.running, .status-dot.sending, .status-dot.repairing, .status-dot.queued, .status-dot.loading {
       color: var(--warn);
       background: var(--warn);
     }
@@ -465,6 +465,7 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12px;
     }
     .turn-body a { color: var(--accent); }
+    .loading-message { color: var(--muted); }
     .turn-meta {
       display: flex;
       flex-wrap: wrap;
@@ -549,6 +550,8 @@ INDEX_HTML = r"""<!doctype html>
     let source = null;
     let pollTimer = null;
     let refreshInFlight = null;
+    let transcriptRequestSeq = 0;
+    let loadingSessionId = "";
     if (explicitSessionPath) canonicalizeDashboardUrl();
 
     const statusLabels = {
@@ -557,6 +560,7 @@ INDEX_HTML = r"""<!doctype html>
       sending: "전송 중",
       running: "실행 중",
       repairing: "복구 중",
+      loading: "불러오는 중",
       valid: "유효함",
       invalid: "유효하지 않음",
       error: "오류",
@@ -659,10 +663,10 @@ INDEX_HTML = r"""<!doctype html>
     function refreshDashboard(options = {}) {
       if (options.automatic && hasActiveTextSelection()) return Promise.resolve();
       if (refreshInFlight) return refreshInFlight;
-      refreshInFlight = loadSessions().finally(() => { refreshInFlight = null; });
+      refreshInFlight = loadSessions(options).finally(() => { refreshInFlight = null; });
       return refreshInFlight;
     }
-    async function loadSessions() {
+    async function loadSessions(options = {}) {
       const data = await getJson("/api/sessions");
       sessions = data.sessions || [];
       if (liveMode) {
@@ -685,8 +689,12 @@ INDEX_HTML = r"""<!doctype html>
         currentSessionId = preferred?.session_id || "";
       }
       renderSessions();
-      if (currentSessionId) await loadTranscript();
-      else renderTranscript();
+      if (currentSessionId) await loadTranscript(currentSessionId, { showLoading: !options.automatic });
+      else {
+        transcript = null;
+        loadingSessionId = "";
+        renderTranscript();
+      }
     }
     function preferredLiveSession(sessionItems) {
       return (sessionItems || []).find((session) => !isTerminalStatus(session.status)) || sessionItems?.[0] || null;
@@ -694,11 +702,63 @@ INDEX_HTML = r"""<!doctype html>
     function shouldHonorRequestedSession(requested, preferred) {
       return !!requested && (!preferred || isTerminalStatus(preferred.status));
     }
-    async function loadTranscript() {
+    async function loadTranscript(targetSessionId = currentSessionId, options = {}) {
+      const targetId = targetSessionId || "";
+      if (!targetId) {
+        transcript = null;
+        loadingSessionId = "";
+        renderTranscript();
+        return false;
+      }
+      const requestSeq = ++transcriptRequestSeq;
       const raw = qs("raw").checked ? "1" : "0";
-      const baseTranscript = await getJson(`/api/sessions/${currentSessionId}?raw=${raw}`);
-      transcript = await loadConversationBundle(baseTranscript, raw);
-      renderTranscript();
+      if (options.showLoading !== false) {
+        loadingSessionId = targetId;
+        renderLoadingTranscript(targetId);
+      }
+      try {
+        const baseTranscript = await getJson(`/api/sessions/${targetId}?raw=${raw}`);
+        const nextTranscript = await loadConversationBundle(baseTranscript, raw);
+        if (!isCurrentTranscriptRequest(requestSeq, targetId)) return false;
+        transcript = nextTranscript;
+        loadingSessionId = "";
+        renderTranscript();
+        return true;
+      } catch (error) {
+        if (isCurrentTranscriptRequest(requestSeq, targetId)) {
+          loadingSessionId = "";
+          renderTranscriptError(targetId, error);
+        }
+        return false;
+      }
+    }
+    function isCurrentTranscriptRequest(requestSeq, targetSessionId) {
+      return requestSeq === transcriptRequestSeq && targetSessionId === currentSessionId;
+    }
+    function selectedSessionById(sessionId) {
+      return (sessions || []).find((session) => session.session_id === sessionId)
+        || (transcript?.related_sessions || []).find((session) => session?.session_id === sessionId)
+        || (transcript?.session?.session_id === sessionId ? transcript.session : null)
+        || null;
+    }
+    function renderLoadingTranscript(sessionId) {
+      const selected = selectedSessionById(sessionId) || {};
+      const session = { ...selected, session_id: sessionId, status: selected.status || "loading" };
+      qs("title").textContent = `${sessionTitle(session)} · ${statusLabel("loading")}`;
+      renderReview([]);
+      renderSessionSummary(session, []);
+      setInnerHtmlIfChanged("transcriptFlow", `<p class="prose loading-message">대화 기록을 불러오는 중입니다.</p>`);
+      setInnerHtmlIfChanged("debugEvents", "");
+    }
+    function renderTranscriptError(sessionId, error) {
+      const selected = selectedSessionById(sessionId) || {};
+      const session = { ...selected, session_id: sessionId, status: "error" };
+      const message = error?.message || "알 수 없는 오류";
+      qs("title").textContent = `${sessionTitle(session)} · 불러오기 실패`;
+      renderReview([]);
+      renderSessionSummary(session, []);
+      setInnerHtmlIfChanged("transcriptFlow", `<p class="prose error">대화 기록을 불러오지 못했습니다.\n${escapeHtml(message)}</p>`);
+      setInnerHtmlIfChanged("debugEvents", "");
     }
     async function loadConversationBundle(baseTranscript, raw) {
       const activeSession = baseTranscript.session || {};
@@ -741,22 +801,33 @@ INDEX_HTML = r"""<!doctype html>
         renderSessionGroup("Live", liveSessions, "실행 중인 세션이 없습니다."),
         renderSessionGroup("History", historySessions, "이전 세션이 없습니다.")
       ].join("");
-      if (!setInnerHtmlIfChanged("sessionList", html)) return;
-      document.querySelectorAll("[data-session]").forEach((button) => {
-        button.onclick = async () => {
-          liveMode = false;
-          currentSessionId = button.dataset.session;
-          canonicalizeDashboardUrl();
-          renderSessions();
-          await loadTranscript();
-        };
-      });
-      document.querySelectorAll("[data-rename-kind]").forEach((button) => {
-        button.onclick = () => renameSessionListItem(button);
-      });
-      document.querySelectorAll("[data-delete-kind]").forEach((button) => {
-        button.onclick = () => deleteSessionListItem(button);
-      });
+      setInnerHtmlIfChanged("sessionList", html);
+    }
+    function bindSessionListEvents() {
+      qs("sessionList").onclick = async (event) => {
+        const target = event.target?.closest ? event.target : event.target?.parentElement;
+        if (!target) return;
+        const renameButton = target.closest?.("[data-rename-kind]");
+        if (renameButton) {
+          await renameSessionListItem(renameButton);
+          return;
+        }
+        const deleteButton = target.closest?.("[data-delete-kind]");
+        if (deleteButton) {
+          await deleteSessionListItem(deleteButton);
+          return;
+        }
+        const sessionButton = target.closest?.("[data-session]");
+        if (sessionButton) await selectSession(sessionButton.dataset.session);
+      };
+    }
+    async function selectSession(sessionId) {
+      if (!sessionId) return false;
+      liveMode = false;
+      currentSessionId = sessionId;
+      canonicalizeDashboardUrl();
+      renderSessions();
+      return await loadTranscript(sessionId);
     }
     function groupSessionsByConversation(sessionItems) {
       const groups = new Map();
@@ -873,7 +944,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderSessionSummary(session, events) {
       const cwd = findCwd(events);
-      const conversation = transcript?.conversation || {};
+      const conversation = session?.session_id === transcript?.session?.session_id ? transcript?.conversation || {} : {};
       setInnerHtmlIfChanged("runtimeSignal", renderRuntimeSignal(session, events));
       const html = [
         ["제목", sessionTitle(session)],
@@ -1262,7 +1333,7 @@ INDEX_HTML = r"""<!doctype html>
         if (payload.stderr_bytes !== undefined) details.push(`stderr ${payload.stderr_bytes}B`);
         if (payload.last_activity_ms_ago !== undefined) details.push(`마지막 출력 ${formatDuration(payload.last_activity_ms_ago)} 전`);
       } else if (!isTerminalStatus(status)) {
-        details.push(state === "queued" ? "실행 대기 중" : "heartbeat 대기 중");
+        details.push(state === "queued" ? "실행 대기 중" : state === "loading" ? "대화 기록 로딩 중" : "heartbeat 대기 중");
       }
       if (isTerminalStatus(status)) {
         if (session?.duration_ms !== undefined && session.duration_ms !== null) details.push(`총 ${formatDuration(session.duration_ms)}`);
@@ -1430,11 +1501,11 @@ INDEX_HTML = r"""<!doctype html>
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
       return JSON.stringify(value);
     }
-    qs("refresh").onclick = loadSessions;
+    qs("refresh").onclick = () => loadSessions();
     qs("raw").onchange = async () => {
       if (qs("raw").checked && !confirm("원본 payload에는 민감한 내용이 포함될 수 있습니다. 이 로컬 토큰으로 원본을 보시겠습니까?")) qs("raw").checked = false;
       openEvents();
-      if (currentSessionId) await loadTranscript();
+      if (currentSessionId) await loadTranscript(currentSessionId);
     };
     qs("copy").onclick = async () => {
       if (!transcript) return;
@@ -1473,12 +1544,15 @@ INDEX_HTML = r"""<!doctype html>
     window.groupSessionsByConversation = groupSessionsByConversation;
     window.runTelemetry = runTelemetry;
     window.renderRuntimeSignal = renderRuntimeSignal;
+    window.loadTranscript = loadTranscript;
+    window.selectSession = selectSession;
     window.parseAntigravityEnvelope = parseAntigravityEnvelope;
     window.renderMarkdown = renderMarkdown;
     window.renderSessionGroup = renderSessionGroup;
     window.sessionTitle = sessionTitle;
     window.hasActiveTextSelection = hasActiveTextSelection;
     window.rawEventKey = rawEventKey;
+    bindSessionListEvents();
     loadSessions().then(openEvents).catch(console.error);
   </script>
 </body>
