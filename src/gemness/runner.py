@@ -2,317 +2,572 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import threading
 import time
-import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .config import DEFAULT_MODEL_LABEL, GemnessConfig
+from .config import DEFAULT_AGY_COMMAND, DEFAULT_MODEL_LABEL, GemnessConfig
 from .observer import ObserverHub
 
-GEMINI_CLI_TRUST_WORKSPACE_ENV = "GEMINI_CLI_TRUST_WORKSPACE"
+
+AUTH_REQUIRED_MARKERS = (
+    "not logged in",
+    "log in",
+    "login",
+    "sign in",
+    "signin",
+    "authenticate",
+    "authentication",
+    "authorization",
+    "authorization code",
+    "browser-based google sign-in",
+)
+
+WINPTY_ROWS = 48
+WINPTY_COLS = 160
+CAPTURE_MODE_PIPE = "pipe"
+CAPTURE_MODE_WINPTY = "winpty"
+_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_SINGLE_RE = re.compile(r"\x1b[@-Z\\-_]")
+_AGY_CONVERSATION_DIR = "~/.gemini/antigravity-cli/conversations"
 
 
 @dataclass(slots=True)
-class GeminiRunResult:
+class AgyRunResult:
     status: str
     stdout: str = ""
     stderr: str = ""
     exit_code: int | None = 0
     message: str = ""
     stats: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    raw_stdout: str = ""
     interrupt_instruction: str | None = None
 
     @classmethod
-    def completed(cls, stdout: str, stderr: str = "", exit_code: int = 0, stats: dict[str, Any] | None = None) -> "GeminiRunResult":
-        return cls(status="completed", stdout=stdout, stderr=stderr, exit_code=exit_code, stats=stats or {})
+    def completed(
+        cls,
+        stdout: str,
+        stderr: str = "",
+        exit_code: int = 0,
+        stats: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        raw_stdout: str | None = None,
+    ) -> "AgyRunResult":
+        return cls(
+            status="completed",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            stats=stats or {},
+            metadata=metadata or {},
+            raw_stdout=stdout if raw_stdout is None else raw_stdout,
+        )
 
     @classmethod
-    def error(cls, message: str, *, exit_code: int | None = None, stderr: str = "", stdout: str = "") -> "GeminiRunResult":
-        return cls(status="error", stdout=stdout, stderr=stderr, exit_code=exit_code, message=message)
+    def error(
+        cls,
+        message: str,
+        *,
+        exit_code: int | None = None,
+        stderr: str = "",
+        stdout: str = "",
+        metadata: dict[str, Any] | None = None,
+        raw_stdout: str | None = None,
+    ) -> "AgyRunResult":
+        return cls(
+            status="error",
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            message=message,
+            metadata=metadata or {},
+            raw_stdout=stdout if raw_stdout is None else raw_stdout,
+        )
 
     @classmethod
-    def cancelled(cls, stdout: str = "", stderr: str = "") -> "GeminiRunResult":
-        return cls(status="cancelled", stdout=stdout, stderr=stderr, exit_code=None, message="Session cancelled")
+    def cancelled(cls, stdout: str = "", stderr: str = "", metadata: dict[str, Any] | None = None) -> "AgyRunResult":
+        return cls(status="cancelled", stdout=stdout, stderr=stderr, exit_code=None, message="Session cancelled", metadata=metadata or {})
 
     @classmethod
-    def interrupted(cls, instruction: str, *, stdout: str = "", stderr: str = "") -> "GeminiRunResult":
+    def interrupted(
+        cls,
+        instruction: str,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> "AgyRunResult":
         return cls(
             status="interrupted",
             stdout=stdout,
             stderr=stderr,
             exit_code=None,
             message="Session interrupted for retry",
+            metadata=metadata or {},
+            raw_stdout=stdout,
             interrupt_instruction=instruction,
         )
 
 
 @dataclass(slots=True)
-class NativeResumeProbe:
-    supported: bool
+class AgyCapabilities:
+    command: list[str]
+    available: bool
+    resolved: str
     version: str | None = None
     help_text: str = ""
-    missing: list[str] = field(default_factory=list)
+    print_flag: str | None = None
+    supports_continue: bool = False
+    supports_conversation: bool = False
+    warnings: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
-    def reason(self) -> str | None:
-        if self.supported:
-            return None
-        if self.error:
-            return self.error
-        if self.missing:
-            return "missing Gemini CLI flags/features: " + ", ".join(self.missing)
-        return "Gemini CLI native resume is not supported"
+    def print_supported(self) -> bool:
+        return self.print_flag is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "available": self.available,
+            "command": self.command,
+            "resolved": self.resolved,
+            "version": self.version,
+            "print_mode": {"supported": self.print_supported, "flag": self.print_flag},
+            "conversation_flags": {
+                "continue": self.supports_continue,
+                "conversation": self.supports_conversation,
+            },
+            "warnings": self.warnings,
+            "error": self.error,
+            "streaming": False,
+        }
 
 
 @dataclass(slots=True)
-class _StreamJsonState:
-    response_parts: list[str] = field(default_factory=list)
-    stats: dict[str, Any] = field(default_factory=dict)
-    result_status: str | None = None
-    error_message: str = ""
+class AgyAuthProbe:
+    status: str
+    message: str
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr_tail: str = ""
 
-    @property
-    def response_text(self) -> str:
-        return "".join(self.response_parts)
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "message": self.message,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr_tail": self.stderr_tail,
+        }
 
 
-class GeminiRunner(Protocol):
+@dataclass(slots=True)
+class _RunningAgyCommand:
+    process: Any
+    pid: int | None
+    capture_mode: str
+    stdout_parts: list[str]
+    stderr_parts: list[str]
+    stdout_thread: threading.Thread | None
+    stderr_thread: threading.Thread | None
+    poll_fn: Callable[[], int | None]
+    terminate_fn: Callable[[], None]
+
+    def poll(self) -> int | None:
+        return self.poll_fn()
+
+    def terminate(self) -> None:
+        self.terminate_fn()
+
+    def join(self) -> None:
+        if self.stdout_thread is not None:
+            self.stdout_thread.join(timeout=1)
+        if self.stderr_thread is not None:
+            self.stderr_thread.join(timeout=1)
+
+    def stdout(self) -> str:
+        value = "".join(self.stdout_parts)
+        if self.capture_mode == CAPTURE_MODE_WINPTY:
+            return clean_console_output(value)
+        return value
+
+    def stderr(self) -> str:
+        return "".join(self.stderr_parts)
+
+
+@dataclass(slots=True)
+class _CommandCapture:
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    timed_out: bool
+    capture_mode: str
+    error: str | None = None
+
+
+class AgyRunner(Protocol):
     def run(
         self,
         prompt: str,
         *,
-        model: str | None,
-        output_format: str,
         session_id: str,
         hub: ObserverHub,
         cwd: Path | None = None,
         phase: str | None = None,
-        gemini_session_id: str | None = None,
-        native_session_mode: str = "none",
         fallback_used: bool = False,
         fallback_reason: str | None = None,
-    ) -> GeminiRunResult:
+        native_conversation_id: str | None = None,
+        use_native_continue: bool = False,
+    ) -> AgyRunResult:
         ...
 
 
-class GeminiCliRunner:
+class AgyCliRunner:
     def __init__(self, config: GemnessConfig) -> None:
         self.config = config
-        self._native_probe: NativeResumeProbe | None = None
+        self._capabilities: AgyCapabilities | None = None
 
     def run(
         self,
         prompt: str,
         *,
-        model: str | None,
-        output_format: str,
         session_id: str,
         hub: ObserverHub,
         cwd: Path | None = None,
         phase: str | None = None,
-        gemini_session_id: str | None = None,
-        native_session_mode: str = "none",
         fallback_used: bool = False,
         fallback_reason: str | None = None,
-    ) -> GeminiRunResult:
-        requested_model = _requested_model(model)
-        command = resolve_gemini_command(self.config.gemini_command)
-        if requested_model:
-            command.extend(["-m", requested_model])
-        command.extend(["--output-format", output_format])
-        if self.config.gemini_skip_trust:
-            command.append("--skip-trust")
-        if self.config.gemini_approval_mode:
-            command.extend(["--approval-mode", self.config.gemini_approval_mode])
-        if gemini_session_id and native_session_mode == "start":
-            command.extend(["--session-id", gemini_session_id])
-        elif gemini_session_id and native_session_mode == "resume":
-            command.extend(["--resume", gemini_session_id])
-        command.extend(["-p", prompt])
+        native_conversation_id: str | None = None,
+        use_native_continue: bool = False,
+    ) -> AgyRunResult:
+        capabilities = self.probe_capabilities(cwd)
+        if not capabilities.available:
+            return AgyRunResult.error(capabilities.error or f"Antigravity CLI not found: {self.config.agy_command}", exit_code=None)
+        if not capabilities.print_flag:
+            return AgyRunResult.error("Antigravity CLI print mode is not available; expected -p, --print, or --prompt.", exit_code=None)
+
+        command, native_session_mode = _build_agy_command(
+            capabilities,
+            prompt,
+            native_conversation_id=native_conversation_id,
+            use_native_continue=use_native_continue,
+        )
+        capture_mode = _resolve_capture_mode(self.config)
         hub.record_run_command(
             session_id,
             command,
-            native_resume_used=native_session_mode == "resume",
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
-            gemini_session_id=gemini_session_id,
-            model_requested=requested_model,
-            model_source="explicit" if requested_model else "cli_default",
+            agy_conversation_id=native_conversation_id,
+            native_session_mode=native_session_mode,
+            model_requested=None,
+            model_source="antigravity_cli_settings",
             phase=phase,
         )
-        env = gemness_env(self.config)
         started = time.monotonic()
+        env = gemness_env(self.config)
+        conversation_snapshot = _conversation_snapshot()
         try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=str(cwd) if cwd is not None else None,
-                env=env,
-            )
+            running = _start_agy_command(command, cwd, env, capture_mode)
         except FileNotFoundError:
-            return GeminiRunResult.error(f"Gemini CLI not found: {self.config.gemini_command}", exit_code=None)
+            return AgyRunResult.error(f"Antigravity CLI not found: {self.config.agy_command}", exit_code=None)
         except OSError as exc:
-            return GeminiRunResult.error(str(exc), exit_code=None)
+            return AgyRunResult.error(str(exc), exit_code=None)
+        except RuntimeError as exc:
+            return AgyRunResult.error(str(exc), exit_code=None)
 
+        conversation_id = _conversation_id(hub, session_id)
         hub.set_status(
             session_id,
             "running",
-            "gemini.started",
+            "antigravity.started",
             {
-                "model": requested_model or DEFAULT_MODEL_LABEL,
-                "model_requested": requested_model,
-                "model_source": "explicit" if requested_model else "cli_default",
-                "output_format": output_format,
-                "pid": process.pid,
+                "run_id": session_id,
+                "conversation_id": conversation_id,
+                "model": DEFAULT_MODEL_LABEL,
+                "model_source": "antigravity_cli_settings",
+                "print_flag": capabilities.print_flag,
+                "pid": running.pid,
                 "cwd": str(cwd) if cwd is not None else "",
-                "trust_workspace": self.config.gemini_trust_workspace,
+                "capture_mode": running.capture_mode,
+                "agy_conversation_id": native_conversation_id,
+                "native_session_mode": native_session_mode,
+                "streaming": False,
             },
             role="gemness",
             phase=phase,
         )
-        stream_state = _StreamJsonState() if output_format == "stream-json" else None
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
-        stdout_thread = _reader_thread(
-            process.stdout,
-            stdout_parts,
-            on_line=(
-                lambda line: _record_stream_json_line(
-                    line,
-                    stream_state,
-                    hub=hub,
-                    session_id=session_id,
-                    phase=phase,
-                )
-            )
-            if stream_state is not None
-            else None,
-        )
-        stderr_thread = _reader_thread(process.stderr, stderr_parts)
 
         timed_out = False
-        while process.poll() is None:
-            intervention = hub.consume_running_intervention(session_id)
-            if intervention is not None:
-                _terminate_process(process)
-                stdout_thread.join(timeout=1)
-                stderr_thread.join(timeout=1)
-                raw_stdout = "".join(stdout_parts)
-                stdout = _stream_json_stdout(stream_state, raw_stdout)
-                stderr = "".join(stderr_parts)
-                hub.append_event(
-                    session_id,
-                    "gemini.exited",
-                    "gemness",
-                    {"exit_code": process.poll(), "interrupted": intervention.action},
-                    phase=phase,
-                )
-                if intervention.action == "cancel":
-                    return GeminiRunResult.cancelled(stdout=stdout, stderr=stderr)
-                return GeminiRunResult.interrupted(
-                    intervention.instruction or "Retry with the user intervention applied.",
-                    stdout=stdout,
-                    stderr=stderr,
-                )
-            if time.monotonic() - started > self.config.tool_timeout_sec:
+        while running.poll() is None:
+            if time.monotonic() - started > self.config.agy_timeout_sec:
                 timed_out = True
-                _terminate_process(process)
+                running.terminate()
                 break
             time.sleep(0.05)
 
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
-        raw_stdout = "".join(stdout_parts)
-        stdout = _stream_json_stdout(stream_state, raw_stdout)
-        stderr = "".join(stderr_parts)
-        exit_code = process.poll()
-
-        if stream_state is not None:
-            if stdout:
-                hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout, "streamed": True}, phase=phase)
-        elif stdout:
-            hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout}, phase=phase)
-        if stderr:
-            hub.append_event(session_id, "gemini.stderr", "gemness", {"stderr": _tail(stderr)}, phase=phase)
-        hub.append_event(
-            session_id,
-            "gemini.exited",
-            "gemness",
-            {"exit_code": exit_code, "duration_ms": int((time.monotonic() - started) * 1000)},
-            phase=phase,
+        running.join()
+        raw_stdout = running.stdout()
+        stderr = running.stderr()
+        exit_code = running.poll()
+        detected_conversation_id = native_conversation_id or _detect_updated_conversation(conversation_snapshot)
+        if detected_conversation_id:
+            hub.set_agy_conversation_id(session_id, detected_conversation_id, source="native_cli", phase=phase)
+        auth_status = detect_auth_status(raw_stdout, stderr, exit_code)
+        if exit_code == 0 and not raw_stdout.strip():
+            auth_status = "unknown"
+        metadata = _metadata(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            command=command,
+            cwd=cwd,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            exit_code=exit_code,
+            auth_status=auth_status,
+            capture_mode=running.capture_mode,
+            agy_conversation_id=detected_conversation_id,
+            native_session_mode=native_session_mode,
         )
+        envelope = _response_envelope(raw_stdout, metadata)
+        if raw_stdout:
+            hub.append_event(
+                session_id,
+                "antigravity.response",
+                "gemness",
+                {"response": envelope, "stdout": raw_stdout, "metadata": metadata, "streaming": False},
+                phase=phase,
+            )
+        if stderr:
+            hub.append_event(session_id, "antigravity.stderr", "gemness", {"stderr": _tail(stderr)}, phase=phase)
+        hub.append_event(session_id, "antigravity.exited", "gemness", metadata, phase=phase)
 
         if timed_out:
-            return GeminiRunResult.error("Gemini CLI timed out", exit_code=exit_code, stderr=stderr, stdout=stdout)
-        if stream_state is not None and stream_state.result_status == "error":
-            return GeminiRunResult.error(
-                stream_state.error_message or "Gemini CLI returned a stream error",
+            return AgyRunResult.error("Antigravity CLI timed out", exit_code=exit_code, stderr=stderr, stdout=envelope, metadata=metadata, raw_stdout=raw_stdout)
+        if auth_status == "auth_required":
+            return AgyRunResult.error(
+                "Antigravity CLI authentication is required. Run `agy` once and complete Google sign-in.",
                 exit_code=exit_code,
                 stderr=stderr,
-                stdout=stdout,
+                stdout=envelope,
+                metadata=metadata,
+                raw_stdout=raw_stdout,
             )
         if exit_code != 0:
-            return GeminiRunResult.error("Gemini CLI exited with an error", exit_code=exit_code, stderr=stderr, stdout=stdout)
-        return GeminiRunResult.completed(stdout=stdout, stderr=stderr, exit_code=exit_code or 0, stats=stream_state.stats if stream_state else {})
+            return AgyRunResult.error("Antigravity CLI exited with an error", exit_code=exit_code, stderr=stderr, stdout=envelope, metadata=metadata, raw_stdout=raw_stdout)
+        if not raw_stdout.strip():
+            return AgyRunResult.error("Antigravity CLI returned no output", exit_code=exit_code, stderr=stderr, stdout=envelope, metadata=metadata, raw_stdout=raw_stdout)
+        return AgyRunResult.completed(envelope, stderr=stderr, exit_code=exit_code or 0, stats={"metadata": metadata}, metadata=metadata, raw_stdout=raw_stdout)
 
-    def probe_native_resume(self, cwd: Path | None = None) -> NativeResumeProbe:
-        if self._native_probe is not None:
-            return self._native_probe
-        command = resolve_gemini_command(self.config.gemini_command)
-        if not command:
-            self._native_probe = NativeResumeProbe(False, error="Gemini CLI command is empty")
-            return self._native_probe
-        env = gemness_env(self.config)
+    def probe_capabilities(self, cwd: Path | None = None) -> AgyCapabilities:
+        if self._capabilities is not None:
+            return self._capabilities
+        command = resolve_agy_command(self.config.agy_command)
+        resolved = command[0] if command else self.config.agy_command
+        if not _executable_exists(resolved):
+            fallback_paths = [str(path) for path in agy_fallback_paths()]
+            message = f"Antigravity CLI not found: {self.config.agy_command}"
+            if fallback_paths:
+                message += f"; checked fallback paths: {', '.join(fallback_paths)}"
+            self._capabilities = AgyCapabilities(command=command, available=False, resolved=resolved, error=message)
+            return self._capabilities
         try:
             version_completed = subprocess.run(
                 [*command, "--version"],
                 cwd=cwd,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=5,
                 check=False,
-                env=env,
+                env=gemness_env(self.config),
             )
             help_completed = subprocess.run(
                 [*command, "--help"],
                 cwd=cwd,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=5,
                 check=False,
-                env=env,
+                env=gemness_env(self.config),
             )
         except FileNotFoundError:
-            self._native_probe = NativeResumeProbe(False, error=f"Gemini CLI not found: {self.config.gemini_command}")
-            return self._native_probe
+            self._capabilities = AgyCapabilities(command=command, available=False, resolved=resolved, error=f"Antigravity CLI not found: {self.config.agy_command}")
+            return self._capabilities
         except (OSError, subprocess.TimeoutExpired) as exc:
-            self._native_probe = NativeResumeProbe(False, error=f"Gemini CLI capability probe failed: {exc}")
-            return self._native_probe
-        version = (version_completed.stdout or version_completed.stderr).strip() or None
+            self._capabilities = AgyCapabilities(command=command, available=False, resolved=resolved, error=f"Antigravity CLI capability probe failed: {exc}")
+            return self._capabilities
+
         help_text = "\n".join(part for part in [help_completed.stdout, help_completed.stderr] if part)
-        missing = _missing_native_resume_features(help_text)
+        version = (version_completed.stdout or version_completed.stderr).strip() or None
+        warnings: list[str] = []
         if version_completed.returncode != 0:
-            missing.append("--version")
+            warnings.append(f"`agy --version` failed: {(version_completed.stderr or version_completed.stdout).strip() or version_completed.returncode}")
         if help_completed.returncode != 0:
-            missing.append("--help")
-        self._native_probe = NativeResumeProbe(not missing, version=version, help_text=help_text, missing=missing)
-        return self._native_probe
+            warnings.append(f"`agy --help` failed: {(help_completed.stderr or help_completed.stdout).strip() or help_completed.returncode}")
+        print_flag = _select_print_flag(help_text)
+        if print_flag is None:
+            warnings.append("Antigravity CLI help does not advertise -p, --print, or --prompt.")
+        self._capabilities = AgyCapabilities(
+            command=command,
+            available=help_completed.returncode == 0,
+            resolved=resolved,
+            version=version,
+            help_text=help_text,
+            print_flag=print_flag,
+            supports_continue="--continue" in help_text,
+            supports_conversation="--conversation" in help_text,
+            warnings=warnings,
+            error=None if help_completed.returncode == 0 else "Antigravity CLI help check failed",
+        )
+        return self._capabilities
 
 
-def _reader_thread(pipe: Any, parts: list[str], *, on_line: Callable[[str], None] | None = None) -> threading.Thread:
+def probe_auth(command: list[str], print_flag: str | None, cwd: Path | None, config: GemnessConfig) -> AgyAuthProbe:
+    if not command:
+        return AgyAuthProbe("not_checked", "Antigravity CLI command is empty")
+    if print_flag is None:
+        return AgyAuthProbe("not_checked", "Antigravity CLI print mode is not available")
+    prompt = "Return exactly: GEMNESS_AGY_HEALTHCHECK"
+    captured = _capture_agy_command(
+        [*command, print_flag, prompt],
+        cwd=cwd,
+        env=gemness_env(config),
+        timeout=config.agy_health_timeout_sec,
+        capture_mode=_resolve_capture_mode(config),
+    )
+    if captured.error:
+        if "not found" in captured.error.lower():
+            return AgyAuthProbe("not_checked", captured.error)
+        return AgyAuthProbe("unknown", captured.error)
+    if captured.timed_out:
+        return AgyAuthProbe("unknown", "Antigravity CLI auth probe timed out")
+
+    stdout = captured.stdout.strip()
+    stderr = captured.stderr.strip()
+    auth_status = detect_auth_status(stdout, stderr, captured.exit_code)
+    if auth_status == "auth_required":
+        return AgyAuthProbe("auth_required", "Antigravity CLI requires Google sign-in.", captured.exit_code, stdout, _tail(stderr))
+    if captured.exit_code != 0:
+        return AgyAuthProbe("unknown", f"Antigravity CLI auth probe exited with {captured.exit_code}.", captured.exit_code, stdout, _tail(stderr))
+    if "GEMNESS_AGY_HEALTHCHECK" in stdout:
+        return AgyAuthProbe("authenticated", "Antigravity CLI print mode returned the expected health-check text.", captured.exit_code, stdout, _tail(stderr))
+    if not stdout:
+        return AgyAuthProbe("unknown", "Antigravity CLI print mode returned no output.", captured.exit_code, stdout, _tail(stderr))
+    return AgyAuthProbe("unknown", "Antigravity CLI print mode returned unexpected output.", captured.exit_code, stdout, _tail(stderr))
+
+
+def _capture_agy_command(
+    command: list[str],
+    *,
+    cwd: Path | None,
+    env: dict[str, str],
+    timeout: float,
+    capture_mode: str,
+) -> _CommandCapture:
+    try:
+        running = _start_agy_command(command, cwd, env, capture_mode)
+    except FileNotFoundError:
+        return _CommandCapture("", "", None, False, capture_mode, f"Antigravity CLI not found: {command[0]}")
+    except (OSError, RuntimeError) as exc:
+        return _CommandCapture("", "", None, False, capture_mode, f"Antigravity CLI auth probe failed: {exc}")
+
+    started = time.monotonic()
+    timed_out = False
+    while running.poll() is None:
+        if time.monotonic() - started > timeout:
+            timed_out = True
+            running.terminate()
+            break
+        time.sleep(0.05)
+    running.join()
+    return _CommandCapture(running.stdout(), running.stderr(), running.poll(), timed_out, running.capture_mode)
+
+
+def _start_agy_command(command: list[str], cwd: Path | None, env: dict[str, str], capture_mode: str) -> _RunningAgyCommand:
+    if capture_mode == CAPTURE_MODE_WINPTY:
+        return _start_winpty_command(command, cwd, env)
+    return _start_pipe_command(command, cwd, env)
+
+
+def _start_pipe_command(command: list[str], cwd: Path | None, env: dict[str, str]) -> _RunningAgyCommand:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+    )
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    stdout_thread = _reader_thread(process.stdout, stdout_parts)
+    stderr_thread = _reader_thread(process.stderr, stderr_parts)
+    return _RunningAgyCommand(
+        process=process,
+        pid=process.pid,
+        capture_mode=CAPTURE_MODE_PIPE,
+        stdout_parts=stdout_parts,
+        stderr_parts=stderr_parts,
+        stdout_thread=stdout_thread,
+        stderr_thread=stderr_thread,
+        poll_fn=process.poll,
+        terminate_fn=lambda: _terminate_process(process),
+    )
+
+
+def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, str]) -> _RunningAgyCommand:
+    try:
+        from winpty import PtyProcess
+    except ImportError as exc:
+        raise RuntimeError("Windows console capture requires pywinpty. Install Gemness with Windows dependencies or set GEMNESS_AGY_CAPTURE_MODE=pipe.") from exc
+
+    process = PtyProcess.spawn(
+        command,
+        cwd=str(cwd) if cwd is not None else None,
+        env=env,
+        dimensions=(WINPTY_ROWS, WINPTY_COLS),
+    )
+    stdout_parts: list[str] = []
+    stdout_thread = _winpty_reader_thread(process, stdout_parts)
+
+    def poll() -> int | None:
+        if process.isalive():
+            return None
+        try:
+            return process.exitstatus
+        except OSError:
+            return None
+
+    return _RunningAgyCommand(
+        process=process,
+        pid=getattr(process, "pid", None),
+        capture_mode=CAPTURE_MODE_WINPTY,
+        stdout_parts=stdout_parts,
+        stderr_parts=[],
+        stdout_thread=stdout_thread,
+        stderr_thread=None,
+        poll_fn=poll,
+        terminate_fn=lambda: _terminate_winpty_process(process),
+    )
+
+
+def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
     def read_pipe() -> None:
         if pipe is None:
             return
@@ -322,8 +577,6 @@ def _reader_thread(pipe: Any, parts: list[str], *, on_line: Callable[[str], None
                 if value == "":
                     break
                 parts.append(value)
-                if on_line is not None:
-                    on_line(value)
         finally:
             try:
                 pipe.close()
@@ -335,119 +588,25 @@ def _reader_thread(pipe: Any, parts: list[str], *, on_line: Callable[[str], None
     return thread
 
 
-def _record_stream_json_line(
-    line: str,
-    state: _StreamJsonState | None,
-    *,
-    hub: ObserverHub,
-    session_id: str,
-    phase: str | None,
-) -> None:
-    if state is None:
-        return
-    stripped = line.strip()
-    if not stripped:
-        return
-    try:
-        event = json.loads(stripped)
-    except json.JSONDecodeError:
-        state.response_parts.append(line)
-        hub.append_event(
-            session_id,
-            "gemini.delta",
-            "gemness",
-            {"content": line, "response": state.response_text, "unparsed": True},
-            phase=phase,
-        )
-        return
-    if not isinstance(event, dict):
-        return
+def _winpty_reader_thread(process: Any, parts: list[str]) -> threading.Thread:
+    def read_console() -> None:
+        while True:
+            try:
+                value = process.read(4096)
+            except EOFError:
+                break
+            except OSError:
+                break
+            if not value:
+                if not process.isalive():
+                    break
+                time.sleep(0.05)
+                continue
+            parts.append(value)
 
-    event_type = event.get("type")
-    if event_type == "message" and event.get("role") == "assistant":
-        content = str(event.get("content") or "")
-        if not content:
-            return
-        state.response_parts.append(content)
-        hub.append_event(
-            session_id,
-            "gemini.delta",
-            "gemness",
-            {"content": content, "response": state.response_text, "stream_event_type": event_type},
-            phase=phase,
-        )
-        return
-    if event_type == "tool_use":
-        state.response_parts.clear()
-        hub.append_event(
-            session_id,
-            "gemini.tool_use",
-            "gemness",
-            {
-                "tool_name": event.get("tool_name"),
-                "tool_id": event.get("tool_id"),
-                "parameters": event.get("parameters"),
-            },
-            phase=phase,
-        )
-        return
-    if event_type == "tool_result":
-        hub.append_event(
-            session_id,
-            "gemini.tool_result",
-            "gemness",
-            {
-                "tool_id": event.get("tool_id"),
-                "status": event.get("status"),
-                "output": event.get("output"),
-                "error": event.get("error"),
-            },
-            phase=phase,
-        )
-        return
-    if event_type == "error":
-        state.error_message = str(event.get("message") or event.get("error") or "Gemini CLI stream error")
-        hub.append_event(
-            session_id,
-            "gemini.stream_error",
-            "gemness",
-            {"severity": event.get("severity"), "message": state.error_message},
-            phase=phase,
-        )
-        return
-    if event_type == "result":
-        state.result_status = str(event.get("status") or "")
-        stats = event.get("stats")
-        if isinstance(stats, dict):
-            state.stats = stats
-            detected_model = _model_from_stats(stats)
-            if detected_model:
-                hub.set_model(session_id, detected_model, source="stream_stats", phase=phase)
-        error = event.get("error")
-        if error:
-            state.error_message = json.dumps(error, ensure_ascii=False) if isinstance(error, dict) else str(error)
-
-
-def _stream_json_stdout(state: _StreamJsonState | None, raw_stdout: str) -> str:
-    if state is None:
-        return raw_stdout
-    payload: dict[str, Any] = {"response": state.response_text}
-    if state.stats:
-        payload["stats"] = state.stats
-    if state.result_status == "error" and state.error_message:
-        payload["error"] = state.error_message
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _missing_native_resume_features(help_text: str) -> list[str]:
-    missing = [
-        flag
-        for flag in ["--resume", "--session-id", "--list-sessions", "--output-format", "stream-json"]
-        if flag not in help_text
-    ]
-    if "-p" not in help_text and "--prompt" not in help_text:
-        missing.append("-p/--prompt")
-    return missing
+    thread = threading.Thread(target=read_console, daemon=True)
+    thread.start()
+    return thread
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
@@ -461,50 +620,209 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=2)
 
 
+def _terminate_winpty_process(process: Any) -> None:
+    try:
+        if not process.isalive():
+            return
+        process.terminate(force=True)
+        process.wait()
+    except Exception:
+        try:
+            process.close()
+        except Exception:
+            pass
+
+
 def _tail(value: str, limit: int = 4000) -> str:
     return value[-limit:]
 
 
-def _requested_model(model: str | None) -> str | None:
-    if model is None:
-        return None
-    value = str(model).strip()
-    return value or None
+def clean_console_output(value: str) -> str:
+    value = _OSC_RE.sub("", value)
+    value = _ANSI_CSI_RE.sub("", value)
+    value = _ANSI_SINGLE_RE.sub("", value)
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    return value.lstrip("\n").strip()
 
 
-def _model_from_stats(stats: dict[str, Any]) -> str | None:
-    model = stats.get("model")
-    if isinstance(model, str) and model.strip():
-        return model.strip()
-    models = stats.get("models")
-    if isinstance(models, dict):
-        names = sorted(str(name).strip() for name in models if str(name).strip())
-        if names:
-            return ", ".join(names)
+def _resolve_capture_mode(config: GemnessConfig) -> str:
+    mode = config.agy_capture_mode
+    if mode == CAPTURE_MODE_PIPE:
+        return CAPTURE_MODE_PIPE
+    if mode == CAPTURE_MODE_WINPTY:
+        return CAPTURE_MODE_WINPTY
+    if os.name == "nt" and _winpty_available():
+        return CAPTURE_MODE_WINPTY
+    return CAPTURE_MODE_PIPE
+
+
+def _winpty_available() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import winpty  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _select_print_flag(help_text: str) -> str | None:
+    if re.search(r"(^|\s)-p(\s|,|$)", help_text):
+        return "-p"
+    for flag in ("--print", "--prompt"):
+        if flag in help_text:
+            return flag
     return None
 
 
+def _build_agy_command(
+    capabilities: AgyCapabilities,
+    prompt: str,
+    *,
+    native_conversation_id: str | None,
+    use_native_continue: bool,
+) -> tuple[list[str], str]:
+    command = [*capabilities.command]
+    if native_conversation_id and capabilities.supports_conversation:
+        command.extend(["--conversation", native_conversation_id])
+        native_session_mode = "conversation"
+    elif use_native_continue and capabilities.supports_continue:
+        command.append("--continue")
+        native_session_mode = "continue"
+    else:
+        native_session_mode = "new"
+    command.extend([capabilities.print_flag or "-p", prompt])
+    return command, native_session_mode
+
+
+def _response_envelope(raw_stdout: str, metadata: dict[str, Any]) -> str:
+    return json.dumps({"response": raw_stdout, "metadata": metadata}, ensure_ascii=False)
+
+
+def _metadata(
+    *,
+    session_id: str,
+    conversation_id: str | None,
+    command: list[str],
+    cwd: Path | None,
+    duration_ms: int,
+    exit_code: int | None,
+    auth_status: str,
+    capture_mode: str,
+    agy_conversation_id: str | None,
+    native_session_mode: str,
+) -> dict[str, Any]:
+    return {
+        "run_id": session_id,
+        "conversation_id": conversation_id,
+        "agy_conversation_id": agy_conversation_id,
+        "native_session_mode": native_session_mode,
+        "command": command,
+        "cwd": str(cwd) if cwd is not None else None,
+        "duration_ms": duration_ms,
+        "exit_code": exit_code,
+        "auth_status": auth_status,
+        "capture_mode": capture_mode,
+        "streaming": False,
+    }
+
+
+def _conversation_id(hub: ObserverHub, session_id: str) -> str | None:
+    session = hub.sessions.get(session_id)
+    return session.conversation_id if session is not None else None
+
+
+def _conversation_snapshot() -> dict[str, tuple[int, int]]:
+    directory = _agy_conversation_dir()
+    if not directory.exists():
+        return {}
+    snapshot: dict[str, tuple[int, int]] = {}
+    for path in directory.glob("*.pb"):
+        if not _is_uuid(path.stem):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        snapshot[path.stem] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def _detect_updated_conversation(before: dict[str, tuple[int, int]]) -> str | None:
+    directory = _agy_conversation_dir()
+    if not directory.exists():
+        return None
+    candidates: list[tuple[int, str]] = []
+    for path in directory.glob("*.pb"):
+        if not _is_uuid(path.stem):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        current = (stat.st_mtime_ns, stat.st_size)
+        if before.get(path.stem) != current:
+            candidates.append((stat.st_mtime_ns, path.stem))
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def _agy_conversation_dir() -> Path:
+    return Path(os.path.expanduser(_AGY_CONVERSATION_DIR))
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def detect_auth_status(stdout: str, stderr: str, exit_code: int | None) -> str:
+    text = f"{stdout}\n{stderr}".lower()
+    if any(marker in text for marker in AUTH_REQUIRED_MARKERS):
+        return "auth_required"
+    if exit_code == 0:
+        return "ok"
+    return "unknown"
+
+
 def gemness_env(config: GemnessConfig, base_env: dict[str, str] | None = None) -> dict[str, str]:
-    env = dict(base_env or os.environ)
-    env[GEMINI_CLI_TRUST_WORKSPACE_ENV] = "true" if config.gemini_trust_workspace else "false"
-    return env
+    return dict(base_env or os.environ)
 
 
-def resolve_gemini_command(command: str) -> list[str]:
-    resolved = shutil.which(command) or command
-    path = Path(resolved)
-    if path.name.lower() in {"gemini.cmd", "gemini.ps1", "gemini"}:
-        npm_root = path.parent
-        script = npm_root / "node_modules" / "@google" / "gemini-cli" / "bundle" / "gemini.js"
-        node = shutil.which("node")
-        if node and script.exists():
-            return [node, str(script)]
-    return [resolved]
+def agy_fallback_paths() -> list[Path]:
+    paths: list[Path] = []
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        paths.append(Path(local_app_data) / "agy" / "bin" / "agy.exe")
+    return paths
 
 
-def command_exists(command: str) -> bool:
-    parts = resolve_gemini_command(command)
-    executable = parts[0] if parts else command
+def resolve_agy_command(command: str | None = None) -> list[str]:
+    raw_command = (command or DEFAULT_AGY_COMMAND).strip() or DEFAULT_AGY_COMMAND
+    expanded = Path(raw_command).expanduser()
+    if expanded.exists():
+        return [str(expanded)]
+    resolved = shutil.which(raw_command)
+    if resolved:
+        return [resolved]
+    if raw_command == DEFAULT_AGY_COMMAND:
+        for path in agy_fallback_paths():
+            if path.exists():
+                return [str(path)]
+    return [raw_command]
+
+
+def command_exists(command: str | None = None) -> bool:
+    parts = resolve_agy_command(command)
+    executable = parts[0] if parts else command or DEFAULT_AGY_COMMAND
+    return _executable_exists(executable)
+
+
+def _executable_exists(executable: str) -> bool:
     if shutil.which(executable):
         return True
     return Path(executable).expanduser().exists()

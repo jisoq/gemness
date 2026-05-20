@@ -4,9 +4,9 @@ SERVER_NAME = "gemness"
 SERVER_VERSION = "0.1.3"
 
 TOOL_NAMES = [
-    "health_check",
-    "ask_text",
-    "follow_up",
-    "ask_json",
-    "review_current_diff",
+    "antigravity_health",
+    "ask_antigravity",
+    "follow_up_antigravity",
+    "ask_antigravity_json",
+    "review_current_diff_with_antigravity",
 ]

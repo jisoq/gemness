@@ -13,7 +13,7 @@ from .codex_install import (
 )
 from .gemness_trigger import install as install_trigger
 from .mcp_smoke import run_smoke
-from .runner import resolve_gemini_command as resolve_gemini_command_parts
+from .runner import resolve_agy_command as resolve_agy_command_parts
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> None:
         default=[],
         help="Allowed workspace root. May be repeated. Defaults to --workspace-root.",
     )
-    bootstrap.add_argument("--gemini-command", default=None, help="Gemini CLI command/path. Defaults to resolving gemini from PATH.")
+    bootstrap.add_argument("--agy-command", default=None, help="Antigravity CLI command/path. Defaults to resolving agy from PATH.")
     bootstrap.add_argument("--skip-trigger", action="store_true", help="Do not install the use-gemness trigger guidance.")
     bootstrap.add_argument("--skip-smoke-test", action="store_true", help="Write config without launching the configured MCP command.")
     bootstrap.add_argument("--smoke-timeout", type=float, default=60.0)
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> None:
     trigger.add_argument("--project-root", default=".")
 
     smoke = subparsers.add_parser("smoke-test", help="Smoke-test the MCP server over stdio.")
-    smoke.add_argument("--real", action="store_true", help="Also call ask_text and invoke Gemini.")
+    smoke.add_argument("--real", action="store_true", help="Also call ask_antigravity and invoke Antigravity CLI.")
     smoke.add_argument("--timeout", type=float, default=10.0)
     smoke.add_argument("server_command", nargs=argparse.REMAINDER, help="Server command after --.")
 
@@ -77,7 +77,7 @@ def _bootstrap_codex(args: argparse.Namespace) -> None:
             server_source=source,
             workspace_root=workspace_root,
             allowed_roots=allowed_roots,
-            gemini_command=args.gemini_command,
+            agy_command=args.agy_command,
             python=args.python,
         )
     except RuntimeError as exc:
@@ -89,8 +89,8 @@ def _bootstrap_codex(args: argparse.Namespace) -> None:
     print(f"mcp command: {options.command} {' '.join(options.args)}")
     print(f"workspace root: {options.workspace_root or '(not pinned)'}")
     print(f"allowed roots: {', '.join(str(root) for root in options.allowed_roots) or '(not pinned)'}")
-    gemini_command = options.gemini_command or "gemini"
-    _check_gemini_version(gemini_command, workspace_root or Path.cwd())
+    agy_command = options.agy_command or "agy"
+    _check_agy_version(agy_command, workspace_root or Path.cwd())
 
     if not args.skip_trigger:
         for path in install_trigger("user", workspace_root or Path.cwd()):
@@ -105,8 +105,8 @@ def _bootstrap_codex(args: argparse.Namespace) -> None:
     print("try: use gemness health check")
 
 
-def _check_gemini_version(gemini_command: str, cwd: Path) -> None:
-    command_parts = resolve_gemini_command_parts(gemini_command)
+def _check_agy_version(agy_command: str, cwd: Path) -> None:
+    command_parts = resolve_agy_command_parts(agy_command)
     try:
         completed = subprocess.run(
             [*command_parts, "--version"],
@@ -119,11 +119,11 @@ def _check_gemini_version(gemini_command: str, cwd: Path) -> None:
             check=False,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError(f"Gemini CLI not found on PATH: {gemini_command}") from exc
+        raise RuntimeError(f"Antigravity CLI not found on PATH: {agy_command}") from exc
     output = (completed.stdout or completed.stderr).strip()
     if completed.returncode != 0:
-        raise RuntimeError(f"Gemini CLI version check failed: {output or completed.returncode}")
-    print(f"gemini version: {output}")
+        raise RuntimeError(f"Antigravity CLI version check failed: {output or completed.returncode}")
+    print(f"agy version: {output}")
 
 
 def _normalize_command(command: list[str]) -> list[str]:

@@ -13,22 +13,23 @@ TRIGGER_BLOCK = f"""{START_MARKER}
 
 ## Gemness / Gemness trigger
 
-When the user says **"use gemness"** or clearly asks to use Gemness, treat it as an explicit request to consult Gemini CLI through the local Gemness MCP server.
+When the user says **"use gemness"** or clearly asks to use Gemness, treat it as an explicit request to consult Antigravity CLI (`agy`) through the local Gemness MCP server.
 
 Expected behavior:
 
 1. Prefer the MCP tools exposed by the `gemness` server.
-2. If `health_check` is available, call it first when connection status is uncertain.
+2. If `antigravity_health` is available, call it first when connection status is uncertain.
 3. Choose the tool based on the task:
-   - Use `review_current_diff` for current git diff review.
-   - Use `ask_json` when a structured JSON result is needed.
-   - Use `ask_text` for general second opinion, architecture critique, debugging advice, or cross-checking.
-   - Use `follow_up` with the previous `session_id` when continuing the same Gemini conversation.
-4. Treat Gemini output as advisory, not authoritative.
-5. Verify Gemini's suggestions before applying them.
-6. Summarize what Gemini said and what was accepted, rejected, or left unverified.
-7. If the MCP server or tool is unavailable, say that Gemness is not connected and provide the next setup step instead of silently skipping Gemini.
-8. Do not send secrets, private keys, credentials, or raw `.env` values to Gemini.
+   - Use `review_current_diff_with_antigravity` for current workspace change review.
+   - Use `ask_antigravity_json` when a structured JSON result is needed.
+   - Use `ask_antigravity` for general second opinion, architecture critique, debugging advice, or cross-checking.
+   - Use `follow_up_antigravity` with the previous `session_id` when continuing the same Gemness observer conversation.
+4. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
+5. Treat Antigravity output as advisory, not authoritative.
+6. Verify Antigravity's suggestions before applying them.
+7. Summarize what Antigravity said and what was accepted, rejected, or left unverified.
+8. If the MCP server or tool is unavailable, say that Gemness is not connected and provide the next setup step instead of silently skipping Antigravity.
+9. Do not send secrets, private keys, credentials, or raw `.env` values to Antigravity.
 
 Trigger phrases include:
 
@@ -44,26 +45,26 @@ Trigger phrases include:
 
 SKILL_CONTENT = """---
 name: gemness
-description: use gemness, gemness, Gemness로 확인, Gemini second opinion 요청 시 local gemness MCP server를 사용해 Gemini CLI에게 advisory review를 요청한다. 코드 변경 리뷰, JSON 구조화 응답, 아키텍처/디버깅 교차검증에 사용한다.
+description: use gemness, gemness, Gemness로 확인, Antigravity second opinion 요청 시 local gemness MCP server를 사용해 Antigravity CLI에게 advisory review를 요청한다. 코드 변경 리뷰, JSON 구조화 응답, 아키텍처/디버깅 교차검증에 사용한다.
 ---
 
 # Gemness Skill
 
-Use this skill when the user says `use gemness`, mentions Gemness, or asks to consult Gemini CLI through the local MCP server.
+Use this skill when the user says `use gemness`, mentions Gemness, or asks to consult Antigravity CLI through the local MCP server.
 
 ## Procedure
 
-1. If connection status is uncertain and `health_check` exists, call it first.
+1. If connection status is uncertain and `antigravity_health` exists, call it first.
 2. Select the right tool:
-   - `review_current_diff` for git diff review.
-   - `ask_json` for schema-constrained structured output.
-   - `ask_text` for general second opinion or reasoning review.
-   - `follow_up` for continuing the same Gemini observer conversation.
-3. Include only the necessary context.
+   - `review_current_diff_with_antigravity` for current workspace change review.
+   - `ask_antigravity_json` for schema-constrained structured output.
+   - `ask_antigravity` for general second opinion or reasoning review.
+   - `follow_up_antigravity` for continuing the same Gemness observer conversation.
+3. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
 4. Do not include secrets or credentials.
-5. Treat Gemini's result as advisory.
+5. Treat Antigravity's result as advisory.
 6. Verify before applying changes.
-7. Report back with what Gemness/Gemini said, what was accepted, what was rejected, and what remains uncertain.
+7. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
 
 ## Failure behavior
 

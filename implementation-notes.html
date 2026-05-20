@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>Gemness Antigravity CLI Migration Notes</title>
+  <title>Gemness Antigravity CLI Implementation Notes</title>
   <style>
     body { font-family: system-ui, sans-serif; line-height: 1.5; max-width: 960px; margin: 40px auto; padding: 0 24px; color: #202124; }
     h1, h2 { line-height: 1.2; }
@@ -14,58 +14,43 @@
   </style>
 </head>
 <body>
-  <h1>Gemness Antigravity CLI Migration Notes</h1>
-  <p class="meta">실시간 기록 파일. 2026-05-20 현재 Antigravity CLI 전환 조사 중 발견한 설계 결정, 편차, 트레이드오프, 미결 질문을 갱신한다.</p>
+  <h1>Gemness Antigravity CLI Implementation Notes</h1>
+  <p class="meta">Antigravity CLI <code>agy</code> 전용 구현 기준을 기록한다. 이 파일은 현재 제품 동작을 설명하며 과거 backend 호환 지침을 보존하지 않는다.</p>
 
-  <h2>설계 결정</h2>
+  <h2>정책</h2>
   <ul>
-    <li><code>implementation-notes.html</code>은 별도 경로가 지정되지 않았으므로 저장소 루트에 유지한다.</li>
-    <li>Antigravity IDE와 Antigravity CLI는 별도 표면으로 취급한다. 이번 조사는 <code>agy</code> 기반 Antigravity CLI 문서와 Gemini CLI 마이그레이션 문서만 기준으로 삼고, IDE 전용 기능은 구현 근거로 사용하지 않는다.</li>
-    <li>공식 문서는 SPA HTML이 아니라 <code>https://antigravity.google/assets/docs/cli/*.md</code>의 Markdown 원문에서 확인한다. 현재 확인한 핵심 문서는 <code>gcli-migration.md</code>, <code>cli-getting-started.md</code>, <code>cli-using.md</code>, <code>cli-features.md</code>, <code>cli-overview.md</code>이다.</li>
-    <li>Antigravity CLI 설치 명령은 문서상 Windows PowerShell 기준 <code>irm https://antigravity.google/cli/install.ps1 | iex</code>, 실행 명령은 <code>agy</code>로 보인다.</li>
-    <li>현재 Gemness는 사용자-facing 이름뿐 아니라 실행 환경 변수와 runner 구현 전반에서 <code>gemini</code>/<code>Gemini CLI</code>를 canonical backend로 가정한다. 마이그레이션은 단순 문자열 교체보다 CLI backend 추상화가 안전하다.</li>
-    <li>현재 MCP 서버 자체는 Codex용 MCP 서버이므로 Antigravity CLI의 MCP 설정 파일 변경은 Gemness runtime보다는 설치/문서/부트스트랩 표면의 추가 타깃으로 다룬다.</li>
-    <li>Gemness MCP를 통해 Gemini에 자문을 요청했다. 자문 결과도 정적 설정/문서 변경은 쉽지만, <code>agy</code> headless 플래그와 stream JSON 스키마 검증이 고위험 선행조건이라는 판단이었다. 이 판단은 현재 조사 결과와 일치하므로 수용한다.</li>
-    <li>Antigravity CLI 설치 스크립트는 manifest와 SHA512 검증 후 <code>%LOCALAPPDATA%\agy\bin\agy.exe</code>로 바이너리를 배치하고, 후속 setup으로 <code>agy.exe install</code>을 실행한다. 설치 후 이 경로를 우선 검증 대상으로 사용한다.</li>
-    <li><code>agy</code> 1.0.0 설치가 성공했다. 현재 터미널 PATH에는 아직 반영되지 않았지만, 직접 경로 <code>C:\Users\User\AppData\Local\agy\bin\agy.exe</code>로 실행 가능하다.</li>
-    <li>실제 <code>agy --help</code> 기준 non-interactive 실행은 <code>-p</code>/<code>--print</code>/<code>--prompt</code> 플래그를 사용한다. 대화 재개는 <code>--continue</code> 또는 <code>--conversation &lt;id&gt;</code> 형태다.</li>
+    <li>Gemness의 canonical backend는 Antigravity CLI <code>agy</code>이다.</li>
+    <li>기본 실행 명령은 <code>agy</code>이며, Windows에서는 <code>%LOCALAPPDATA%\agy\bin\agy.exe</code> fallback을 확인한다.</li>
+    <li>Gemness는 Antigravity CLI의 비대화형 print mode(<code>-p</code>, <code>--print</code>, <code>--prompt</code>)만 사용한다.</li>
+    <li>Antigravity CLI 완료 출력을 캡처하고, Gemness가 MCP 응답 envelope와 Observer event를 합성한다. Windows에서는 CLI가 stdout/stderr 대신 콘솔에 직접 쓰는 경우가 있어 <code>GEMNESS_AGY_CAPTURE_MODE=auto</code>가 <code>pywinpty</code> 캡처를 사용한다.</li>
+    <li>응답 metadata에는 <code>run_id</code>, <code>conversation_id</code>, <code>command</code>, <code>cwd</code>, <code>duration_ms</code>, <code>exit_code</code>, <code>auth_status</code>, <code>streaming=false</code>를 포함한다.</li>
+    <li>모델 선택은 Antigravity CLI 설정 또는 <code>/model</code>에서 관리한다. Gemness는 model flag를 전달하지 않는다.</li>
   </ul>
 
-  <h2>편차</h2>
+  <h2>공식 문서 근거</h2>
   <ul>
-    <li>Antigravity CLI는 Gemini CLI와 기능 대부분을 지원하지만 100% parity는 아니라고 명시되어 있다. 특히 headless 실행 플래그의 정확한 parity는 문서만으로 확정되지 않았다.</li>
-    <li>현재 Gemness runner는 <code>-p</code>, <code>--output-format stream-json</code>, <code>--approval-mode plan</code>, <code>--skip-trust</code>, <code>--session-id</code>, <code>--resume</code> 같은 Gemini CLI 플래그와 stream JSON 이벤트 형식을 직접 가정한다.</li>
-    <li>Antigravity CLI 문서는 <code>/resume</code> UI와 종료 시 출력되는 resume command를 설명하지만, 비대화형 <code>--resume</code>/<code>--session-id</code>/<code>-p</code>/<code>--output-format stream-json</code> 지원 여부를 아직 공식 문서에서 확인하지 못했다.</li>
-    <li>Antigravity CLI의 설정 경로는 <code>~/.gemini/antigravity-cli/settings.json</code>, MCP 설정은 <code>~/.gemini/antigravity-cli/mcp_config.json</code> 또는 <code>.agents/mcp_config.json</code>이다. 기존 Gemini CLI의 <code>~/.gemini/settings.json</code>/<code>.gemini/settings.json</code>과 다르다.</li>
-    <li>Antigravity CLI remote MCP 설정은 <code>url</code>/<code>httpUrl</code> 대신 <code>serverUrl</code>을 사용한다. Gemness의 현재 Codex TOML 부트스트랩과 별도 포맷이다.</li>
-    <li>로컬 PATH에서는 <code>agy</code>를 찾지 못했고, <code>C:\Users\User\AppData\Local\Programs\Antigravity\bin\antigravity.cmd</code>만 발견했다. 사용자가 IDE와 CLI를 구분하라고 했으므로 이 실행기는 CLI 호환성 검증에 사용하지 않는다.</li>
-    <li>코드 검색 결과 Gemini CLI 결합부는 <code>src/gemness/config.py</code>, <code>src/gemness/runner.py</code>, <code>src/gemness/tools.py</code>, <code>src/gemness/cli.py</code>, <code>src/gemness/codex_install.py</code>, <code>src/gemness/web.py</code>, README/INSTALL/docs/tests 전반에 분포한다.</li>
-    <li>실제 <code>agy</code> 1.0.0은 <code>--output-format</code>, <code>--resume</code>, <code>--session-id</code>, <code>--model</code>, <code>--reasoning-effort</code>를 정의하지 않은 플래그로 거부한다.</li>
-    <li><code>agy -p</code> print mode는 현재 인증이 없어 모델 응답을 받지 못했다. 로그에는 <code>You are not logged into Antigravity</code>와 <code>model=""</code>이 기록된다.</li>
-    <li><code>agy -p</code> 실행 로그에서 프로젝트 discovery가 <code>.antigravitycli</code> symlink 생성 권한 부족으로 실패했다. CLI는 계속 진행하지만 <code>workspaceDirs=[]</code>로 backend를 만들기 때문에 프로젝트 컨텍스트 누락 가능성이 있다.</li>
-    <li>사용자 화면의 <code>d3dcompiler_47.dll</code> 교체 오류는 그래픽 DLL을 건드리는 Windows GUI 설치/업데이트로 보이며, CLI 바이너리 설치 자체는 이미 완료되었다. IDE/CLI를 혼동하지 않기 위해 이 GUI 오류는 CLI 검증 blocker로 보지 않는다.</li>
+    <li>설치: <code>https://antigravity.google/docs/cli-getting-started</code></li>
+    <li>사용/설정: <code>https://antigravity.google/docs/cli-using</code></li>
+    <li>기능/플러그인: <code>https://antigravity.google/docs/cli-features</code></li>
+    <li>개요: <code>https://antigravity.google/docs/cli-overview</code></li>
+    <li>CLI MCP config 위치: <code>~/.gemini/antigravity-cli/mcp_config.json</code> 또는 <code>.agents/mcp_config.json</code></li>
+    <li>remote MCP 설정은 <code>serverUrl</code>을 사용한다.</li>
   </ul>
 
-  <h2>트레이드오프</h2>
+  <h2>실물 확인</h2>
   <ul>
-    <li>기본 명령을 즉시 <code>gemini</code>에서 <code>agy</code>로 바꾸면 기존 Gemini CLI 사용자가 깨질 수 있다. 단기적으로는 <code>GEMNESS_COMMAND</code> 또는 새 backend 설정으로 양쪽을 선택 가능하게 두고, 감지/health_check에서 backend 이름과 플래그 지원을 분리하는 편이 안전하다.</li>
-    <li>기존 환경 변수명을 모두 <code>GEMNESS_GEMINI_*</code>에서 <code>GEMNESS_ANTIGRAVITY_*</code>로 바꾸면 호환성이 크게 깨진다. 호환 alias를 유지하면서 내부 이름만 중립화하는 방식이 더 reviewable하다.</li>
-    <li>Antigravity CLI headless 플래그가 Gemini CLI와 다르면 Observer의 실시간 스트림, JSON envelope 합성, native resume 로직을 backend별 adapter로 나누어야 한다. 구현량은 늘지만 런타임 실패를 명확히 격리할 수 있다.</li>
-    <li><code>agy</code>에는 현재 stream JSON 출력 플래그가 없으므로, Antigravity backend는 초기 구현에서 실시간 token delta를 포기하고 print-mode 최종 stdout을 캡처하는 방식이 더 현실적이다. Observer에는 streaming unavailable 상태를 명시해야 한다.</li>
-    <li>Antigravity CLI MCP 설정 지원을 Gemness에 추가하면 설치 대상이 Codex와 Antigravity CLI 두 개로 늘어난다. 문서/부트스트랩 표면은 명확해지지만, IDE 설정과 CLI 설정을 혼동하지 않도록 파일명을 엄격히 분리해야 한다.</li>
-    <li>이벤트 이름을 <code>gemini.started</code> 같은 기존 명칭으로 유지하면 Observer/테스트 변경은 작지만 새 backend 의미가 흐려진다. <code>llm.started</code> 같은 중립 이벤트를 도입하면 장기적으로 깔끔하지만 transcript 하위 호환 마이그레이션이 필요하다.</li>
-    <li>Windows에서 Antigravity CLI 프로젝트 symlink 생성을 요구한다면 일반 사용자 권한에서 workspace discovery가 약해질 수 있다. 해결책은 개발자 모드/권한 안내, symlink 없이 동작하는 fallback 확인, 또는 Gemness fallback prompt에 cwd/context를 명시적으로 싣는 방식이다.</li>
+    <li><code>agy --version</code>은 현재 환경에서 <code>1.0.0</code>을 반환했다.</li>
+    <li><code>agy --help</code>는 <code>-p</code>, <code>--print</code>, <code>--prompt</code>, <code>--continue</code>, <code>--conversation</code>을 표시했다.</li>
+    <li>Gemness는 실제 Antigravity conversation ID를 감지하면 <code>agy --conversation &lt;id&gt; -p &lt;prompt&gt;</code>를 사용한다. ID가 없고 최신 대화 연속이 필요한 경우 <code>agy --continue -p &lt;prompt&gt;</code>를 사용할 수 있으며, branch/fallback에서는 짧은 summary prompt만 사용한다. 이전 프롬프트/응답/diff/file dump/log/transcript payload를 다시 전달하지 않는다.</li>
+    <li>인증 상태는 health probe에서 best effort로 확인한다. 로그인 필요 문구가 stderr/stdout에 나타나면 <code>auth_required</code>로 보고한다.</li>
   </ul>
 
-  <h2>미결 질문</h2>
+  <h2>검증 기준</h2>
   <ul>
-    <li>Antigravity CLI가 향후 공개할 수 있는 non-interactive structured output 또는 event stream 방식이 있는지 확인해야 한다. 현재 <code>agy</code> 1.0.0 help/flag parser에서는 확인되지 않는다.</li>
-    <li>Gemness MCP의 공개 명칭을 계속 "Gemness/Gemini advisory"로 유지할지, Antigravity backend를 지원하는 중립 명칭과 문구로 바꿀지 결정이 필요하다.</li>
-    <li>Gemness가 Antigravity CLI용 <code>.agents/mcp_config.json</code> 생성기를 제공해야 하는지, 아니면 Codex MCP 설치만 유지하고 문서로 수동 설정을 안내할지 결정이 필요하다.</li>
-    <li>Antigravity CLI를 설치해도 기존 <code>gemini</code> 명령과 병행 지원해야 하는지, 아니면 Gemness의 기본 backend를 <code>agy</code>로 전환해야 하는지 정책 결정이 필요하다. 현재 실물 검증으로는 병행 adapter가 더 안전하다.</li>
-    <li>사용자 요청에 따라 기본 모델은 <code>3.5 flash (high)</code>로 변경되어야 한다. 정확한 CLI model identifier와 reasoning/high 옵션 표현은 <code>agy --help</code> 및 관련 설정 출력으로 확인해야 한다.</li>
-    <li>공식 Models 문서는 reasoning model 목록에 <code>Gemini 3.5 Flash</code>를 표시하지만 <code>Gemini 3.5 Flash (high)</code>라는 표기는 별도로 보이지 않는다. 바이너리 내부에는 <code>MODEL_GOOGLE_GEMINI_RIFTRUNNER_THINKING_HIGH</code> 같은 internal enum이 보이지만 공개 설정값으로 사용할 수 있는지는 미확인이다.</li>
-    <li>인증 전에는 <code>FetchAvailableModels</code>가 실패하므로 <code>Gemini 3.5 Flash</code>의 공개 설정 identifier와 high variant 여부를 실물 API로 확정할 수 없다.</li>
+    <li>runtime argv는 <code>agy -p &lt;prompt&gt;</code> 또는 help에서 확인된 동등 print flag 형태여야 한다.</li>
+    <li>Observer event는 <code>antigravity.started</code>, <code>antigravity.response</code>, <code>antigravity.stderr</code>, <code>antigravity.exited</code>를 사용한다.</li>
+    <li>제품 문서, tests, bootstrap config에는 Antigravity CLI 설치와 <code>agy --help</code>/<code>agy -p</code> smoke test를 안내한다.</li>
+    <li>잔여 브랜드 문자열은 공식 Antigravity config path와 모델 표시명에 한정한다.</li>
   </ul>
 </body>
 </html>

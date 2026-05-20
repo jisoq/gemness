@@ -4,13 +4,12 @@ import json
 import queue
 import secrets
 import threading
-import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .config import GemnessConfig
-from .models import ConversationRecord, Intervention, ObserverEvent, SessionRecord, SessionStatus, utc_now
+from .models import ConversationRecord, ObserverEvent, SessionRecord, SessionStatus, utc_now
 from .redaction import redact_payload, redact_text
 
 
@@ -27,10 +26,6 @@ SESSION_STATUSES = {
     "cancelled",
     "completed",
 }
-
-
-class SessionCancelled(RuntimeError):
-    pass
 
 
 class EventBus:
@@ -71,10 +66,7 @@ class ObserverHub:
         self.sessions: dict[str, SessionRecord] = {}
         self.events: dict[str, list[ObserverEvent]] = {}
         self._loaded_event_ids: set[str] = set()
-        self.interventions: dict[str, list[Intervention]] = {}
-        self.pause_before_send = config.pause_before_send
         self._lock = threading.RLock()
-        self._cv = threading.Condition(self._lock)
         self._web_server: Any = None
         self._web_server_error: str | None = None
         self.service: Any = None
@@ -143,9 +135,7 @@ class ObserverHub:
         branch_from_conversation_id: str | None = None,
         branch_from_run_id: str | None = None,
         project_root: str | None = None,
-        gemini_session_id: str | None = None,
-        native_resume_enabled: bool = True,
-        native_resume_used: bool = False,
+        agy_conversation_id: str | None = None,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
     ) -> SessionRecord:
@@ -164,9 +154,7 @@ class ObserverHub:
             parent_run_id=parent_run_id,
             branch_from_run_id=branch_from_run_id,
             project_root=project_root,
-            gemini_session_id=gemini_session_id,
-            native_resume_enabled=native_resume_enabled,
-            native_resume_used=native_resume_used,
+            agy_conversation_id=agy_conversation_id,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             stream_events_path=str(self.transcript_dir / f"{run_id}.jsonl"),
@@ -178,8 +166,7 @@ class ObserverHub:
                 model=model,
                 project_root=project_root,
                 conversation_id=conversation_id,
-                gemini_session_id=gemini_session_id,
-                native_resume_enabled=native_resume_enabled,
+                agy_conversation_id=agy_conversation_id,
                 fallback_used=fallback_used,
                 fallback_reason=fallback_reason,
                 branch_from_conversation_id=branch_from_conversation_id,
@@ -187,7 +174,7 @@ class ObserverHub:
                 now=now,
             )
             session.conversation_id = conversation.conversation_id
-            session.gemini_session_id = conversation.current_gemini_session_id
+            session.agy_conversation_id = conversation.current_agy_conversation_id
             session.turn_index = self._next_turn_index(conversation.conversation_id)
             if conversation.root_run_id is None:
                 conversation.root_run_id = session.session_id
@@ -201,7 +188,6 @@ class ObserverHub:
                 conversation.fallback_mode = fallback_reason or "fallback"
             self.sessions[session.session_id] = session
             self.events.setdefault(session.session_id, [])
-            self.interventions.setdefault(session.session_id, [])
             self._write_conversation_index()
         self.append_event(
             session.session_id,
@@ -220,9 +206,7 @@ class ObserverHub:
                 "status": "queued",
                 "title": title,
                 "project_root": project_root,
-                "gemini_session_id": session.gemini_session_id,
-                "native_resume_enabled": native_resume_enabled,
-                "native_resume_used": native_resume_used,
+                "agy_conversation_id": session.agy_conversation_id,
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
                 "stream_events_path": session.stream_events_path,
@@ -239,10 +223,10 @@ class ObserverHub:
         session_id: str,
         command_argv: list[str],
         *,
-        native_resume_used: bool | None = None,
         fallback_used: bool | None = None,
         fallback_reason: str | None = None,
-        gemini_session_id: str | None = None,
+        agy_conversation_id: str | None = None,
+        native_session_mode: str | None = None,
         model_requested: str | None = None,
         model_source: str | None = None,
         phase: str | None = None,
@@ -250,16 +234,14 @@ class ObserverHub:
         with self._lock:
             session = self.sessions[session_id]
             session.command_argv = list(command_argv)
-            if native_resume_used is not None:
-                session.native_resume_used = native_resume_used
             if fallback_used is not None:
                 session.fallback_used = fallback_used
             if fallback_reason is not None:
                 session.fallback_reason = fallback_reason
-            if gemini_session_id is not None:
-                session.gemini_session_id = gemini_session_id
+            if agy_conversation_id is not None:
+                session.agy_conversation_id = agy_conversation_id
                 if session.conversation_id and session.conversation_id in self.conversations:
-                    self.conversations[session.conversation_id].current_gemini_session_id = gemini_session_id
+                    self.conversations[session.conversation_id].current_agy_conversation_id = agy_conversation_id
             session.updated_at = utc_now()
             self._write_conversation_index()
         self.append_event(
@@ -269,8 +251,8 @@ class ObserverHub:
             {
                 "run_id": session_id,
                 "command_argv": command_argv,
-                "gemini_session_id": gemini_session_id,
-                "native_resume_used": native_resume_used,
+                "agy_conversation_id": agy_conversation_id,
+                "native_session_mode": native_session_mode,
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
                 "model_requested": model_requested,
@@ -295,25 +277,49 @@ class ObserverHub:
                 conversation.model = model
                 conversation.updated_at = session.updated_at
                 self._write_conversation_index()
-        self.append_event(session_id, "gemini.model_detected", "gemness", {"model": model, "source": source, "changed": changed}, phase=phase)
+        self.append_event(session_id, "antigravity.model_detected", "gemness", {"model": model, "source": source, "changed": changed}, phase=phase)
 
-    def rotate_gemini_session(self, session_id: str, gemini_session_id: str, reason: str) -> None:
+    def set_agy_conversation_id(self, session_id: str, agy_conversation_id: str, *, source: str = "detected", phase: str | None = None) -> None:
+        agy_conversation_id = agy_conversation_id.strip()
+        if not agy_conversation_id:
+            return
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return
+            changed = session.agy_conversation_id != agy_conversation_id
+            session.agy_conversation_id = agy_conversation_id
+            session.updated_at = utc_now()
+            if session.conversation_id and session.conversation_id in self.conversations:
+                conversation = self.conversations[session.conversation_id]
+                conversation.current_agy_conversation_id = agy_conversation_id
+                conversation.updated_at = session.updated_at
+                self._write_conversation_index()
+        self.append_event(
+            session_id,
+            "conversation.agy_context_attached",
+            "gemness",
+            {"agy_conversation_id": agy_conversation_id, "source": source, "changed": changed},
+            phase=phase,
+        )
+
+    def rotate_agy_conversation(self, session_id: str, agy_conversation_id: str, reason: str) -> None:
         with self._lock:
             session = self.sessions[session_id]
-            session.gemini_session_id = gemini_session_id
+            session.agy_conversation_id = agy_conversation_id
             session.fallback_used = True
             session.fallback_reason = reason
             if session.conversation_id and session.conversation_id in self.conversations:
                 conversation = self.conversations[session.conversation_id]
-                conversation.current_gemini_session_id = gemini_session_id
+                conversation.current_agy_conversation_id = agy_conversation_id
                 conversation.fallback_mode = reason
                 conversation.updated_at = utc_now()
             self._write_conversation_index()
         self.append_event(
             session_id,
-            "conversation.native_session_rotated",
+            "conversation.agy_context_rotated",
             "system",
-            {"gemini_session_id": gemini_session_id, "reason": reason},
+            {"agy_conversation_id": agy_conversation_id, "reason": reason},
         )
 
     def append_event(
@@ -352,7 +358,6 @@ class ObserverHub:
             self._write_event(event)
             public_event = self._public_event(event, raw=False)
             self.bus.broadcast(public_event)
-            self._cv.notify_all()
             return event
 
     def set_title(self, session_id: str, title: str | None) -> None:
@@ -372,6 +377,42 @@ class ObserverHub:
                     conversation.updated_at = session.updated_at
                     self._write_conversation_index()
         self.append_event(session_id, "session.title", "system", {"title": title})
+
+    def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
+        title = _validated_title(title)
+        self.refresh_from_disk()
+        with self._lock:
+            session = self.sessions[session_id]
+            if session.title == title:
+                return self._session_dict(session, raw=False)
+            session.title = title
+            session.updated_at = utc_now()
+        self.append_event(session_id, "session.title", "system", {"title": title})
+        with self._lock:
+            return self._session_dict(self.sessions[session_id], raw=False)
+
+    def rename_conversation(self, conversation_id: str, title: str) -> dict[str, Any]:
+        title = _validated_title(title)
+        self.refresh_from_disk()
+        root_session_id: str | None = None
+        with self._lock:
+            conversation = self.conversations[conversation_id]
+            if conversation.title == title:
+                return self._conversation_dict(conversation, raw=False)
+            now = utc_now()
+            conversation.title = title
+            conversation.updated_at = now
+            runs = [session for session in self.sessions.values() if session.conversation_id == conversation_id]
+            root = _root_run(runs)
+            if root is not None:
+                root.title = title
+                root.updated_at = now
+                root_session_id = root.session_id
+            self._write_conversation_index()
+        if root_session_id is not None:
+            self.append_event(root_session_id, "session.title", "system", {"title": title, "conversation_id": conversation_id})
+        with self._lock:
+            return self._conversation_dict(self.conversations[conversation_id], raw=False)
 
     def set_status(
         self,
@@ -422,64 +463,9 @@ class ObserverHub:
             {"prompt": redact_text(prompt)},
             redacted=True,
         )
-        wait_for_approval = self.pause_before_send if force_approval is None else force_approval
-        if wait_for_approval:
-            self.set_status(
-                session_id,
-                "waiting_for_user_approval",
-                "prompt.pending_approval",
-                {"timeout_sec": self.config.approval_timeout_sec},
-            )
-            prompt = self._wait_for_prompt_approval(session_id, prompt)
-        else:
-            prompt = self._apply_available_pre_send_interventions(session_id, prompt)
         self.set_status(session_id, "sending")
         self.append_event(session_id, "prompt.sent", "codex_mcp", {"prompt": prompt})
         return prompt
-
-    def add_intervention(
-        self,
-        session_id: str,
-        action: str,
-        *,
-        instruction: str | None = None,
-        prompt: str | None = None,
-    ) -> Intervention:
-        intervention = Intervention(
-            intervention_id=str(uuid.uuid4()),
-            session_id=session_id,
-            action=action,
-            instruction=instruction,
-            prompt=prompt,
-            ts=utc_now(),
-        )
-        with self._lock:
-            if session_id not in self.sessions:
-                raise KeyError(f"Unknown session_id: {session_id}")
-            self.interventions.setdefault(session_id, []).append(intervention)
-        self.append_event(session_id, "intervention.received", "user", intervention.to_dict())
-        return intervention
-
-    def pop_intervention(self, session_id: str, actions: Iterable[str] | None = None) -> Intervention | None:
-        allowed = set(actions) if actions is not None else None
-        with self._lock:
-            items = self.interventions.setdefault(session_id, [])
-            for index, item in enumerate(items):
-                if item.status == "pending" and (allowed is None or item.action in allowed):
-                    item.status = "applied"
-                    items.pop(index)
-                    self.append_event(session_id, "intervention.applied", "system", item.to_dict())
-                    return item
-        return None
-
-    def consume_running_intervention(self, session_id: str) -> Intervention | None:
-        while True:
-            intervention = self.pop_intervention(session_id, {"cancel", "interrupt_retry", "note"})
-            if intervention is None:
-                return None
-            if intervention.action == "note":
-                continue
-            return intervention
 
     def list_sessions(self) -> list[dict[str, Any]]:
         self.refresh_from_disk()
@@ -583,11 +569,8 @@ class ObserverHub:
                 runs = [run for run in runs if (run.turn_index or 0) <= (through.turn_index or 0)]
         lines: list[str] = []
         for run in runs[-8:]:
-            events = self.get_events(run.session_id, raw=False)
-            prompt = _last_event_text(events, {"prompt.sent", "prompt.rendered"}, "prompt")
-            response = _last_final_result(events) or _last_gemini_response(events)
-            if prompt or response:
-                lines.append(f"Turn {run.turn_index or '?'}: User={_clip(prompt, 500)} | Gemini={_clip(response, 500)}")
+            title = _clip_single_line(run.title or run.tool_name or "untitled", 120)
+            lines.append(f"Turn {run.turn_index or '?'}: tool={run.tool_name}, status={run.status}, title={title}")
         return "\n".join(lines) or "(none)"
 
     def build_follow_up_prompt(self, parent_session_id: str, instruction: str) -> str:
@@ -596,81 +579,16 @@ class ObserverHub:
             parent = self.sessions.get(parent_session_id)
             conversation_id = parent.conversation_id if parent else None
             summary = self.conversations.get(conversation_id).summary if conversation_id in self.conversations else None
-            runs = [
-                session
-                for session in self.sessions.values()
-                if session.session_id == parent_session_id
-                or (conversation_id and session.conversation_id == conversation_id and (session.turn_index or 0) <= (parent.turn_index or 0))
-            ]
-            runs = sorted(runs, key=lambda item: (item.turn_index or 0, item.started_at))[-6:]
-        recent_turns: list[str] = []
-        for run in runs:
-            events = self.get_events(run.session_id, raw=False)
-            previous_prompt = _last_event_text(events, {"prompt.sent", "prompt.rendered"}, "prompt")
-            previous_response = _last_gemini_response(events)
-            final_result = _last_final_result(events)
-            if previous_prompt:
-                recent_turns.append(f"User: {_clip(previous_prompt, 1200)}")
-            if previous_response:
-                recent_turns.append(f"Gemini: {_clip(previous_response, 1200)}")
-            if final_result and final_result != previous_response:
-                recent_turns.append(f"Gemini final: {_clip(final_result, 1200)}")
-        recent = "\n".join(recent_turns) or "(none)"
-        return (
-            "You are continuing a previous Gemini advisory conversation inside Gemness.\n\n"
-            "Conversation summary:\n"
-            f"{summary or '(none)'}\n\n"
-            "Recent turns:\n"
-            f"{recent}\n\n"
-            "New user request:\n"
-            f"{instruction}"
-        )
+        summary_text = _clip(summary, 1200) if summary else "(none)"
+        if summary:
+            return f"Context summary:\n{summary_text}\n\nUser follow-up:\n{instruction}"
+        return f"User follow-up:\n{instruction}"
 
     def validate_token(self, token: str | None) -> bool:
         return bool(token) and secrets.compare_digest(token, self.token)
 
     def refresh_from_disk(self) -> None:
         self._load_existing_events()
-
-    def _wait_for_prompt_approval(self, session_id: str, prompt: str) -> str:
-        deadline = time.monotonic() + self.config.approval_timeout_sec
-        while True:
-            prompt = self._apply_available_pre_send_interventions(session_id, prompt)
-            intervention = self.pop_intervention(session_id, {"approve", "cancel"})
-            if intervention is not None:
-                if intervention.action == "approve":
-                    return prompt
-                self.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-                raise SessionCancelled("Session cancelled before send")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                self.set_status(session_id, "error", "session.error", {"message": "Approval timed out"})
-                raise SessionCancelled("Approval timed out")
-            with self._cv:
-                self._cv.wait(timeout=min(0.2, remaining))
-
-    def _apply_available_pre_send_interventions(self, session_id: str, prompt: str) -> str:
-        while True:
-            intervention = self.pop_intervention(session_id, {"edit_prompt", "add_instruction", "cancel"})
-            if intervention is None:
-                return prompt
-            if intervention.action == "cancel":
-                self.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-                raise SessionCancelled("Session cancelled before send")
-            if intervention.action == "edit_prompt" and intervention.prompt is not None:
-                prompt = intervention.prompt
-                self.append_event(session_id, "prompt.rendered", "codex_mcp", {"prompt": prompt}, phase="edited")
-                self.append_event(
-                    session_id,
-                    "prompt.redacted",
-                    "system",
-                    {"prompt": redact_text(prompt)},
-                    phase="edited",
-                    redacted=True,
-                )
-            elif intervention.action == "add_instruction" and intervention.instruction:
-                prompt = f"{prompt}\n\nUser intervention:\n{intervention.instruction}"
-                self.append_event(session_id, "prompt.rendered", "codex_mcp", {"prompt": prompt}, phase="appended_instruction")
 
     def _public_event(self, event: ObserverEvent, *, raw: bool) -> dict[str, Any]:
         data = event.to_dict()
@@ -681,18 +599,82 @@ class ObserverHub:
 
     def _session_dict(self, session: SessionRecord, *, raw: bool) -> dict[str, Any]:
         data = session.to_dict() | {"observer_url": self.observer_url(session.session_id)}
+        if session.conversation_id and session.conversation_id in self.conversations:
+            conversation_title = self.conversations[session.conversation_id].title
+            if conversation_title:
+                data["conversation_title"] = conversation_title
         if not raw and isinstance(data.get("title"), str):
             data["title"] = redact_text(data["title"])
         if not raw:
-            data.pop("gemini_session_id", None)
+            if isinstance(data.get("conversation_title"), str):
+                data["conversation_title"] = redact_text(data["conversation_title"])
+            data.pop("agy_conversation_id", None)
             if "command_argv" in data:
                 data["command_argv"] = redact_payload(data["command_argv"])
         return data
 
+    def delete_conversation(self, conversation_id: str) -> dict[str, Any]:
+        self.refresh_from_disk()
+        paths: list[Path] = []
+        deleted_event_ids: set[str] = set()
+        with self._lock:
+            conversation = self.conversations[conversation_id]
+            runs = [session for session in self.sessions.values() if session.conversation_id == conversation_id]
+            active = [session.session_id for session in runs if session.status not in FINAL_STATUSES]
+            if active:
+                raise ValueError("running conversation cannot be removed")
+            for session in runs:
+                paths.extend(self._event_paths_for_session(session))
+                deleted_event_ids.update(event.event_id for event in self.events.get(session.session_id, []))
+            for session in runs:
+                self.sessions.pop(session.session_id, None)
+                self.events.pop(session.session_id, None)
+            self._loaded_event_ids.difference_update(deleted_event_ids)
+            self.conversations.pop(conversation.conversation_id, None)
+            self._write_conversation_index()
+        _unlink_paths(paths)
+        return {"conversation_id": conversation_id, "deleted_runs": len(runs)}
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        self.refresh_from_disk()
+        paths: list[Path] = []
+        with self._lock:
+            session = self.sessions[session_id]
+            if session.status not in FINAL_STATUSES:
+                raise ValueError("running session cannot be removed")
+            if session.conversation_id:
+                conversation_id = session.conversation_id
+            else:
+                conversation_id = None
+                paths.extend(self._event_paths_for_session(session))
+                self._loaded_event_ids.difference_update(event.event_id for event in self.events.get(session_id, []))
+                self.sessions.pop(session_id, None)
+                self.events.pop(session_id, None)
+        if conversation_id:
+            result = self.delete_conversation(conversation_id)
+            return {"session_id": session_id, **result}
+        _unlink_paths(paths)
+        return {"session_id": session_id, "deleted_runs": 1}
+
+    def _event_paths_for_session(self, session: SessionRecord) -> list[Path]:
+        root = self.transcript_dir.resolve()
+        candidates = [self.transcript_dir / f"{session.session_id}.jsonl"]
+        if session.stream_events_path:
+            candidates.append(Path(session.stream_events_path))
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for candidate in candidates:
+            resolved = candidate.expanduser().resolve()
+            if not resolved.is_relative_to(root) or resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(resolved)
+        return paths
+
     def _conversation_dict(self, conversation: ConversationRecord, *, raw: bool) -> dict[str, Any]:
         data = conversation.to_dict()
         if not raw:
-            data.pop("current_gemini_session_id", None)
+            data.pop("current_agy_conversation_id", None)
             if isinstance(data.get("title"), str):
                 data["title"] = redact_text(data["title"])
             if isinstance(data.get("summary"), str):
@@ -707,8 +689,7 @@ class ObserverHub:
         model: str,
         project_root: str | None,
         conversation_id: str | None,
-        gemini_session_id: str | None,
-        native_resume_enabled: bool,
+        agy_conversation_id: str | None,
         fallback_used: bool,
         fallback_reason: str | None,
         branch_from_conversation_id: str | None,
@@ -717,12 +698,11 @@ class ObserverHub:
     ) -> ConversationRecord:
         if conversation_id and conversation_id in self.conversations:
             conversation = self.conversations[conversation_id]
-            if gemini_session_id:
-                conversation.current_gemini_session_id = gemini_session_id
-            conversation.native_resume_enabled = native_resume_enabled
+            if agy_conversation_id:
+                conversation.current_agy_conversation_id = agy_conversation_id
             return conversation
         new_conversation_id = conversation_id or _new_prefixed_id("conv")
-        native_id = gemini_session_id or _new_prefixed_id("gemness")
+        agy_id = agy_conversation_id or _new_prefixed_id("gemness")
         conversation = ConversationRecord(
             conversation_id=new_conversation_id,
             title=title,
@@ -730,9 +710,8 @@ class ObserverHub:
             updated_at=now,
             project_root=project_root,
             model=model,
-            approval_mode=self.config.gemini_approval_mode,
-            current_gemini_session_id=native_id,
-            native_resume_enabled=native_resume_enabled,
+            approval_mode="antigravity_cli_settings",
+            current_agy_conversation_id=agy_id,
             fallback_mode=fallback_reason if fallback_used and fallback_reason else "none",
             root_run_id=session.session_id,
             branch_from_conversation_id=branch_from_conversation_id,
@@ -778,9 +757,8 @@ class ObserverHub:
                     updated_at=str(raw.get("updated_at") or raw["created_at"]),
                     project_root=raw.get("project_root") if isinstance(raw.get("project_root"), str) else None,
                     model=str(raw.get("model") or ""),
-                    approval_mode=str(raw.get("approval_mode") or self.config.gemini_approval_mode),
-                    current_gemini_session_id=str(raw["current_gemini_session_id"]),
-                    native_resume_enabled=bool(raw.get("native_resume_enabled", True)),
+                    approval_mode=str(raw.get("approval_mode") or "antigravity_cli_settings"),
+                    current_agy_conversation_id=str(raw["current_agy_conversation_id"]),
                     fallback_mode=str(raw.get("fallback_mode") or "none"),
                     summary=raw.get("summary") if isinstance(raw.get("summary"), str) else None,
                     turn_count=int(raw.get("turn_count") or 0),
@@ -840,7 +818,7 @@ class ObserverHub:
             payload = event.payload
             session_id = event.session_id
             conversation_id = payload.get("conversation_id") if isinstance(payload.get("conversation_id"), str) else None
-            gemini_session_id = payload.get("gemini_session_id") if isinstance(payload.get("gemini_session_id"), str) else None
+            agy_conversation_id = payload.get("agy_conversation_id") if isinstance(payload.get("agy_conversation_id"), str) else None
             self.sessions.setdefault(
                 session_id,
                 SessionRecord(
@@ -857,16 +835,14 @@ class ObserverHub:
                     branch_from_run_id=payload.get("branch_from_run_id") if isinstance(payload.get("branch_from_run_id"), str) else None,
                     turn_index=payload.get("turn_index") if isinstance(payload.get("turn_index"), int) else None,
                     project_root=payload.get("project_root") if isinstance(payload.get("project_root"), str) else None,
-                    gemini_session_id=gemini_session_id,
-                    native_resume_enabled=bool(payload.get("native_resume_enabled", True)),
-                    native_resume_used=bool(payload.get("native_resume_used", False)),
+                    agy_conversation_id=agy_conversation_id,
                     fallback_used=bool(payload.get("fallback_used", False)),
                     fallback_reason=payload.get("fallback_reason") if isinstance(payload.get("fallback_reason"), str) else None,
                     stream_events_path=payload.get("stream_events_path") if isinstance(payload.get("stream_events_path"), str) else None,
                 ),
             )
             session = self.sessions[session_id]
-            if conversation_id and conversation_id not in self.conversations and gemini_session_id:
+            if conversation_id and conversation_id not in self.conversations and agy_conversation_id:
                 self.conversations[conversation_id] = ConversationRecord(
                     conversation_id=conversation_id,
                     title=session.title,
@@ -874,9 +850,8 @@ class ObserverHub:
                     updated_at=event.ts,
                     project_root=session.project_root,
                     model=session.model,
-                    approval_mode=str(payload.get("approval_mode") or self.config.gemini_approval_mode),
-                    current_gemini_session_id=gemini_session_id,
-                    native_resume_enabled=bool(payload.get("native_resume_enabled", True)),
+                    approval_mode=str(payload.get("approval_mode") or "antigravity_cli_settings"),
+                    current_agy_conversation_id=agy_conversation_id,
                     fallback_mode=session.fallback_reason if session.fallback_used and session.fallback_reason else "none",
                     turn_count=session.turn_index or 0,
                     root_run_id=session.session_id if not event.parent_session_id else None,
@@ -892,15 +867,17 @@ class ObserverHub:
             argv = event.payload.get("command_argv")
             if isinstance(argv, list):
                 session.command_argv = [str(item) for item in argv]
-            if "native_resume_used" in event.payload:
-                session.native_resume_used = bool(event.payload.get("native_resume_used"))
             if "fallback_used" in event.payload:
                 session.fallback_used = bool(event.payload.get("fallback_used"))
             if isinstance(event.payload.get("fallback_reason"), str):
                 session.fallback_reason = event.payload["fallback_reason"]
-            if isinstance(event.payload.get("gemini_session_id"), str):
-                session.gemini_session_id = event.payload["gemini_session_id"]
-        if event.type == "gemini.model_detected":
+            if isinstance(event.payload.get("agy_conversation_id"), str):
+                session.agy_conversation_id = event.payload["agy_conversation_id"]
+        if event.type == "conversation.agy_context_attached":
+            agy_conversation_id = event.payload.get("agy_conversation_id")
+            if isinstance(agy_conversation_id, str) and agy_conversation_id.strip():
+                session.agy_conversation_id = agy_conversation_id.strip()
+        if event.type == "antigravity.model_detected":
             model = event.payload.get("model")
             if isinstance(model, str) and model.strip():
                 session.model = model.strip()
@@ -909,6 +886,12 @@ class ObserverHub:
             if isinstance(title, str) and title.strip():
                 session.title = title.strip()
                 session.updated_at = event.ts
+                conversation_id = event.payload.get("conversation_id") if isinstance(event.payload.get("conversation_id"), str) else session.conversation_id
+                if conversation_id and conversation_id in self.conversations:
+                    conversation = self.conversations[conversation_id]
+                    if event.payload.get("conversation_id") == conversation_id or conversation.root_run_id == session.session_id:
+                        conversation.title = session.title
+                        conversation.updated_at = max(conversation.updated_at, event.ts)
         status = event.payload.get("status")
         if isinstance(status, str) and status in SESSION_STATUSES:
             session.status = status  # type: ignore[assignment]
@@ -921,6 +904,8 @@ class ObserverHub:
         if session.conversation_id and session.conversation_id in self.conversations:
             conversation = self.conversations[session.conversation_id]
             conversation.updated_at = max(conversation.updated_at, session.updated_at)
+            if session.agy_conversation_id:
+                conversation.current_agy_conversation_id = session.agy_conversation_id
             if session.turn_index is not None:
                 conversation.turn_count = max(conversation.turn_count, session.turn_index)
             if conversation.root_run_id is None or session.turn_index == 1:
@@ -949,6 +934,29 @@ def _observer_base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
+def _validated_title(title: str) -> str:
+    cleaned = " ".join(str(title or "").split())
+    if not cleaned:
+        raise ValueError("title is required")
+    if len(cleaned) > 120:
+        raise ValueError("title must be 120 characters or fewer")
+    return cleaned
+
+
+def _root_run(runs: list[SessionRecord]) -> SessionRecord | None:
+    if not runs:
+        return None
+    return min(runs, key=lambda item: (item.turn_index or 0, item.started_at))
+
+
+def _unlink_paths(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _new_prefixed_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4()}"
 
@@ -975,8 +983,8 @@ def _last_event_text(events: list[dict[str, Any]], event_types: set[str], payloa
     return ""
 
 
-def _last_gemini_response(events: list[dict[str, Any]]) -> str:
-    response = _last_event_text(events, {"gemini.response", "repair.response"}, "response")
+def _last_antigravity_response(events: list[dict[str, Any]]) -> str:
+    response = _last_event_text(events, {"antigravity.response", "repair.response"}, "response")
     if not response:
         return ""
     try:
@@ -1007,3 +1015,10 @@ def _clip(value: str, limit: int = 2400) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "\n...[truncated]"
+
+
+def _clip_single_line(value: str, limit: int) -> str:
+    text = " ".join((value or "(none)").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."

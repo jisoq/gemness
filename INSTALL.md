@@ -5,10 +5,10 @@ This is the quick-start route for installing Gemness into Codex on any local mac
 ## Contract
 
 - Configure Codex to launch the `gemness` MCP server with `uvx`.
+- Use Antigravity CLI (`agy`) as the only model backend.
 - Never use a local checkout path or a PyPI package-name fallback as the MCP package source.
 - Preserve unrelated Codex config.
 - Do not store secrets, API keys, or raw `.env` values in the MCP config.
-- Do not start a long-running standalone Observer server. Codex starts the MCP server over stdio, and the Observer UI starts lazily on the first tool call.
 - Verify the install through MCP stdio before calling it done.
 
 ## 1. Prerequisites
@@ -29,23 +29,25 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv --version
 ```
 
-Resolve Gemini CLI:
+Install Antigravity CLI from the official installer.
 
 Windows PowerShell:
 
 ```powershell
-Get-Command gemini | Select-Object -ExpandProperty Source
-gemini --version
+irm https://antigravity.google/cli/install.ps1 | iex
+agy --help
+agy -p "Return exactly: GEMNESS_AGY_HEALTHCHECK"
 ```
 
 macOS/Linux:
 
 ```bash
-command -v gemini
-gemini --version
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy --help
+agy -p "Return exactly: GEMNESS_AGY_HEALTHCHECK"
 ```
 
-If Gemini CLI is missing or not authenticated, stop and report that blocker. Do not pretend Gemness is connected.
+If `agy` is missing, Gemness on Windows also checks `%LOCALAPPDATA%\agy\bin\agy.exe`. If authentication is required, run `agy` once and complete the browser sign-in flow. Windows installs include `pywinpty` so Gemness can capture Antigravity print-mode text even when the CLI writes directly to the console instead of stdout/stderr.
 
 ## 2. Bootstrap Codex
 
@@ -64,7 +66,7 @@ The bootstrap command writes or replaces only the marked block between:
 # gemness-mcp:end
 ```
 
-It also installs the `use gemness` trigger guidance for future agent sessions and runs an MCP stdio smoke test.
+It also installs the `use gemness` trigger guidance and runs an MCP stdio smoke test.
 
 ## 3. What Bootstrap Writes
 
@@ -75,8 +77,12 @@ The generated Codex config uses a portable launch command:
 command = "uvx"
 args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
 startup_timeout_sec = 60
-tool_timeout_sec = 300
+tool_timeout_sec = 600
 required = false
+
+[mcp_servers.gemness.env]
+GEMNESS_AGY_TIMEOUT = "600"
+GEMNESS_AGY_CAPTURE_MODE = "auto"
 ```
 
 Verify:
@@ -85,17 +91,54 @@ Verify:
 - `args` runs `gemness start-mcp-server`.
 - Default bootstrap does not write `cwd`.
 - Default bootstrap does not write workspace-root or allowed-root environment values.
-- Default bootstrap does not write a machine-specific `GEMNESS_COMMAND`; Gemness resolves `gemini` from `PATH`.
-- `GEMNESS_GEMINI_TRUST_WORKSPACE = "true"` is present.
+- Default bootstrap does not write a machine-specific `GEMNESS_AGY_COMMAND`.
+- `GEMNESS_AGY_CAPTURE_MODE = "auto"` allows Windows console capture and ordinary stdout/stderr capture elsewhere.
 
-## 4. Final Report
+To pin a local CLI path explicitly:
+
+```powershell
+uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex --agy-command "$env:LOCALAPPDATA\agy\bin\agy.exe"
+```
+
+## 4. Antigravity CLI MCP Notes
+
+Codex MCP installation is the primary Gemness target. If you also configure an Antigravity CLI MCP client manually, keep that configuration separate from Codex TOML.
+
+Workspace-local Antigravity CLI MCP config:
+
+```json
+{
+  "mcpServers": {
+    "gemness": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
+    }
+  }
+}
+```
+
+Place it at `.agents/mcp_config.json` for a workspace, or at `~/.gemini/antigravity-cli/mcp_config.json` for the Antigravity CLI global config.
+
+Remote MCP examples for Antigravity CLI use `serverUrl`:
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "serverUrl": "https://example.test/mcp"
+    }
+  }
+}
+```
+
+## 5. Final Report
 
 Report these items back to the user:
 
 - Codex config path updated.
 - MCP server name: `gemness`.
 - MCP launch command, especially the `uvx --from ... gemness start-mcp-server` source.
-- Gemini CLI command and version.
+- Antigravity CLI command and version.
 - Smoke-test result.
 - Whether Codex must be restarted before `gemness` tools appear.
 - The first phrase to try after restart: `use gemness health check`.

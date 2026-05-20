@@ -1,6 +1,4 @@
-# Example Codex MCP configuration for Gemness / Gemness Observer.
-# Replace the package source if you publish from a different repository.
-
+# gemness-mcp:start
 [mcp_servers.gemness]
 command = "uvx"
 args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
@@ -8,40 +6,38 @@ startup_timeout_sec = 60
 tool_timeout_sec = 600
 required = false
 enabled_tools = [
-  "health_check",
-  "ask_text",
-  "follow_up",
-  "ask_json",
-  "review_current_diff",
+  "antigravity_health",
+  "ask_antigravity",
+  "follow_up_antigravity",
+  "ask_antigravity_json",
+  "review_current_diff_with_antigravity",
 ]
 default_tools_approval_mode = "prompt"
 
-[mcp_servers.gemness.tools."health_check"]
+[mcp_servers.gemness.tools."antigravity_health"]
 approval_mode = "approve"
 
-[mcp_servers.gemness.tools."ask_text"]
+[mcp_servers.gemness.tools."ask_antigravity"]
 approval_mode = "approve"
 
-[mcp_servers.gemness.tools."follow_up"]
+[mcp_servers.gemness.tools."follow_up_antigravity"]
 approval_mode = "approve"
 
-[mcp_servers.gemness.tools."ask_json"]
+[mcp_servers.gemness.tools."ask_antigravity_json"]
 approval_mode = "prompt"
 
-[mcp_servers.gemness.tools."review_current_diff"]
+[mcp_servers.gemness.tools."review_current_diff_with_antigravity"]
 approval_mode = "prompt"
 
 [mcp_servers.gemness.env]
-# Omit GEMNESS_MODEL to let Gemini CLI use its default model.
 GEMNESS_OBSERVER_ENABLED = "true"
 GEMNESS_OBSERVER_HOST = "127.0.0.1"
 GEMNESS_OBSERVER_PORT = "56755"
 GEMNESS_OBSERVER_START_ON_INIT = "true"
 GEMNESS_TRANSCRIPT_DIR = "~/.gemness/transcripts"
 GEMNESS_REDACT_RAW_BY_DEFAULT = "true"
-GEMNESS_PAUSE_BEFORE_SEND = "false"
-GEMNESS_TOOL_TIMEOUT_SEC = "600"
-GEMNESS_GEMINI_OUTPUT_FORMAT = "stream-json"
-GEMNESS_GEMINI_SKIP_TRUST = "false"
-GEMNESS_GEMINI_TRUST_WORKSPACE = "true"
-GEMNESS_GEMINI_APPROVAL_MODE = "plan"
+GEMNESS_AGY_TIMEOUT = "600"
+GEMNESS_AGY_CAPTURE_MODE = "auto"
+# Optional:
+# GEMNESS_AGY_COMMAND = "agy"
+# gemness-mcp:end

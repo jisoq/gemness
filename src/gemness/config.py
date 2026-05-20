@@ -6,7 +6,9 @@ from pathlib import Path
 
 DEFAULT_OBSERVER_PORT = 56755
 DEFAULT_TRANSCRIPT_DIR = Path.home() / ".gemness" / "transcripts"
-DEFAULT_MODEL_LABEL = "Gemini CLI default"
+DEFAULT_MODEL_LABEL = "Antigravity CLI default"
+DEFAULT_AGY_COMMAND = "agy"
+AGY_CAPTURE_MODES = {"auto", "pipe", "winpty"}
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -14,15 +16,6 @@ def _bool_env(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _trust_workspace_env() -> bool:
-    value = os.getenv("GEMNESS_GEMINI_TRUST_WORKSPACE")
-    if value is None:
-        value = os.getenv("GEMINI_CLI_TRUST_WORKSPACE")
-    if value is not None:
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return True
 
 
 def _int_env(name: str, default: int) -> int:
@@ -72,26 +65,18 @@ def _loopback_host(value: str) -> str:
 
 @dataclass(slots=True)
 class GemnessConfig:
-    model: str | None = field(default_factory=lambda: _optional_str_env("GEMNESS_MODEL"))
-    observer_enabled: bool = _bool_env("GEMNESS_OBSERVER_ENABLED", True)
-    observer_host: str = _loopback_host(os.getenv("GEMNESS_OBSERVER_HOST", "127.0.0.1"))
-    observer_port: int = _int_env("GEMNESS_OBSERVER_PORT", DEFAULT_OBSERVER_PORT)
-    observer_start_on_init: bool = _bool_env("GEMNESS_OBSERVER_START_ON_INIT", True)
-    transcript_dir: Path = Path(os.getenv("GEMNESS_TRANSCRIPT_DIR", str(DEFAULT_TRANSCRIPT_DIR))).expanduser()
-    redact_raw_by_default: bool = _bool_env("GEMNESS_REDACT_RAW_BY_DEFAULT", True)
-    pause_before_send: bool = _bool_env("GEMNESS_PAUSE_BEFORE_SEND", False)
-    approval_timeout_sec: float = float(os.getenv("GEMNESS_APPROVAL_TIMEOUT_SEC", "300"))
-    gemini_command: str = os.getenv("GEMNESS_COMMAND", "gemini")
-    gemini_output_format: str = os.getenv("GEMNESS_GEMINI_OUTPUT_FORMAT", "stream-json")
-    gemini_native_resume: str = _choice_env("GEMNESS_GEMINI_NATIVE_RESUME", "auto", {"auto", "on", "off"})
-    gemini_native_resume_max_turns: int = _int_env("GEMNESS_GEMINI_NATIVE_RESUME_MAX_TURNS", 40)
-    gemini_skip_trust: bool = _bool_env("GEMNESS_GEMINI_SKIP_TRUST", False)
-    gemini_trust_workspace: bool = field(default_factory=_trust_workspace_env)
-    gemini_approval_mode: str = os.getenv("GEMNESS_GEMINI_APPROVAL_MODE", "plan")
-    tool_timeout_sec: float = float(os.getenv("GEMNESS_TOOL_TIMEOUT_SEC", "600"))
-    diff_limit_bytes: int = _int_env("GEMNESS_DIFF_LIMIT_BYTES", 160_000)
-    workspace_root: Path | None = _optional_path_env("GEMNESS_WORKSPACE_ROOT")
-    allowed_roots: tuple[Path, ...] = _path_list_env("GEMNESS_ALLOWED_ROOTS")
+    observer_enabled: bool = field(default_factory=lambda: _bool_env("GEMNESS_OBSERVER_ENABLED", True))
+    observer_host: str = field(default_factory=lambda: _loopback_host(os.getenv("GEMNESS_OBSERVER_HOST", "127.0.0.1")))
+    observer_port: int = field(default_factory=lambda: _int_env("GEMNESS_OBSERVER_PORT", DEFAULT_OBSERVER_PORT))
+    observer_start_on_init: bool = field(default_factory=lambda: _bool_env("GEMNESS_OBSERVER_START_ON_INIT", True))
+    transcript_dir: Path = field(default_factory=lambda: Path(os.getenv("GEMNESS_TRANSCRIPT_DIR", str(DEFAULT_TRANSCRIPT_DIR))).expanduser())
+    redact_raw_by_default: bool = field(default_factory=lambda: _bool_env("GEMNESS_REDACT_RAW_BY_DEFAULT", True))
+    agy_command: str = field(default_factory=lambda: os.getenv("GEMNESS_AGY_COMMAND", DEFAULT_AGY_COMMAND))
+    agy_timeout_sec: float = field(default_factory=lambda: float(os.getenv("GEMNESS_AGY_TIMEOUT", "600")))
+    agy_health_timeout_sec: float = field(default_factory=lambda: float(os.getenv("GEMNESS_AGY_HEALTH_TIMEOUT", "20")))
+    agy_capture_mode: str = field(default_factory=lambda: _choice_env("GEMNESS_AGY_CAPTURE_MODE", "auto", AGY_CAPTURE_MODES))
+    workspace_root: Path | None = field(default_factory=lambda: _optional_path_env("GEMNESS_WORKSPACE_ROOT"))
+    allowed_roots: tuple[Path, ...] = field(default_factory=lambda: _path_list_env("GEMNESS_ALLOWED_ROOTS"))
 
     @classmethod
     def from_env(cls) -> "GemnessConfig":

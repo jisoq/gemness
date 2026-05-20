@@ -17,7 +17,7 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
         server_source="git+https://example.test/gemness",
         workspace_root=None,
         allowed_roots=(),
-        gemini_command=None,
+        agy_command=None,
     )
     parsed = tomllib.loads(build_codex_config(options))
 
@@ -28,16 +28,16 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert "cwd" not in server
     assert server["tool_timeout_sec"] == 600
     assert server["required"] is False
-    assert "health_check" in server["enabled_tools"]
+    assert "antigravity_health" in server["enabled_tools"]
+    assert "ask_antigravity" in server["enabled_tools"]
     assert server["env"]["GEMNESS_OBSERVER_PORT"] == "56755"
     assert server["env"]["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(server["env"]["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
-    assert server["env"]["GEMNESS_TOOL_TIMEOUT_SEC"] == "600"
-    assert server["env"]["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
-    assert "GEMNESS_MODEL" not in server["env"]
+    assert server["env"]["GEMNESS_AGY_TIMEOUT"] == "600"
+    assert server["env"]["GEMNESS_AGY_CAPTURE_MODE"] == "auto"
+    assert "GEMNESS_AGY_COMMAND" not in server["env"]
     assert "GEMNESS_WORKSPACE_ROOT" not in server["env"]
     assert "GEMNESS_ALLOWED_ROOTS" not in server["env"]
-    assert "GEMNESS_COMMAND" not in server["env"]
 
 
 def test_build_uvx_config_can_pin_workspace_when_explicit(tmp_path) -> None:
@@ -45,7 +45,7 @@ def test_build_uvx_config_can_pin_workspace_when_explicit(tmp_path) -> None:
         server_source="git+https://example.test/gemness",
         workspace_root=tmp_path,
         allowed_roots=(tmp_path,),
-        gemini_command="gemini",
+        agy_command="agy",
     )
     parsed = tomllib.loads(build_codex_config(options))
 
@@ -53,7 +53,7 @@ def test_build_uvx_config_can_pin_workspace_when_explicit(tmp_path) -> None:
     assert server["cwd"] == str(tmp_path.resolve())
     assert server["env"]["GEMNESS_WORKSPACE_ROOT"] == str(tmp_path.resolve())
     assert server["env"]["GEMNESS_ALLOWED_ROOTS"] == str(tmp_path.resolve())
-    assert server["env"]["GEMNESS_COMMAND"] == "gemini"
+    assert server["env"]["GEMNESS_AGY_COMMAND"] == "agy"
 
 
 def test_build_uvx_config_requires_remote_source_when_not_git_installed(tmp_path) -> None:
@@ -62,7 +62,7 @@ def test_build_uvx_config_requires_remote_source_when_not_git_installed(tmp_path
             server_source=None,
             workspace_root=tmp_path,
             allowed_roots=(tmp_path,),
-            gemini_command="gemini",
+            agy_command="agy",
         )
 
 
@@ -81,7 +81,7 @@ def test_build_uvx_config_allows_python_pin(tmp_path) -> None:
         server_source="git+https://example.test/gemness",
         workspace_root=tmp_path,
         allowed_roots=(tmp_path,),
-        gemini_command="gemini",
+        agy_command="agy",
         python="3.11",
     )
 
@@ -94,7 +94,7 @@ def test_build_mcp_env_matches_workspace_and_allowed_roots(tmp_path) -> None:
         server_source="git+https://example.test/gemness",
         workspace_root=tmp_path,
         allowed_roots=(tmp_path, other),
-        gemini_command="gemini",
+        agy_command="agy",
     )
     env = build_mcp_env(options, {"EXISTING": "1"})
 
@@ -102,6 +102,7 @@ def test_build_mcp_env_matches_workspace_and_allowed_roots(tmp_path) -> None:
     assert env["GEMNESS_WORKSPACE_ROOT"] == str(tmp_path.resolve())
     assert str(tmp_path.resolve()) in env["GEMNESS_ALLOWED_ROOTS"]
     assert str(other.resolve()) in env["GEMNESS_ALLOWED_ROOTS"]
+    assert env["GEMNESS_AGY_COMMAND"] == "agy"
 
 
 def test_build_mcp_env_omits_local_paths_by_default() -> None:
@@ -109,7 +110,7 @@ def test_build_mcp_env_omits_local_paths_by_default() -> None:
         server_source="git+https://example.test/gemness",
         workspace_root=None,
         allowed_roots=(),
-        gemini_command=None,
+        agy_command=None,
     )
     env = build_mcp_env(options, {"EXISTING": "1"})
 
@@ -117,12 +118,11 @@ def test_build_mcp_env_omits_local_paths_by_default() -> None:
     assert env["GEMNESS_OBSERVER_PORT"] == "56755"
     assert env["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(env["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
-    assert env["GEMNESS_TOOL_TIMEOUT_SEC"] == "600"
-    assert env["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
-    assert "GEMNESS_MODEL" not in env
+    assert env["GEMNESS_AGY_TIMEOUT"] == "600"
+    assert env["GEMNESS_AGY_CAPTURE_MODE"] == "auto"
+    assert "GEMNESS_AGY_COMMAND" not in env
     assert "GEMNESS_WORKSPACE_ROOT" not in env
     assert "GEMNESS_ALLOWED_ROOTS" not in env
-    assert "GEMNESS_COMMAND" not in env
 
 
 def test_upsert_marked_block_removes_orphan_end_marker() -> None:

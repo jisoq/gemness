@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -18,11 +17,11 @@ MCP_SERVER_NAME = "gemness"
 PACKAGE_NAME = "gemness"
 CONSOLE_SCRIPT = "gemness"
 TOOL_NAMES = (
-    "health_check",
-    "ask_text",
-    "follow_up",
-    "ask_json",
-    "review_current_diff",
+    "antigravity_health",
+    "ask_antigravity",
+    "follow_up_antigravity",
+    "ask_antigravity_json",
+    "review_current_diff_with_antigravity",
 )
 
 
@@ -33,11 +32,10 @@ class CodexConfigOptions:
     cwd: Path | None
     workspace_root: Path | None
     allowed_roots: tuple[Path, ...]
-    gemini_command: str | None
+    agy_command: str | None
     startup_timeout_sec: int = 60
     tool_timeout_sec: int = 600
     required: bool = False
-    model: str | None = None
     transcript_dir: str = str(DEFAULT_TRANSCRIPT_DIR)
 
 
@@ -46,7 +44,7 @@ def build_uvx_options(
     server_source: str | None,
     workspace_root: Path | None,
     allowed_roots: tuple[Path, ...],
-    gemini_command: str | None = None,
+    agy_command: str | None = None,
     python: str | None = None,
 ) -> CodexConfigOptions:
     source = resolve_server_source(server_source)
@@ -62,7 +60,7 @@ def build_uvx_options(
         cwd=resolved_workspace,
         workspace_root=resolved_workspace,
         allowed_roots=resolved_allowed,
-        gemini_command=gemini_command,
+        agy_command=agy_command,
     )
 
 
@@ -72,7 +70,7 @@ def build_codex_config(options: CodexConfigOptions) -> str:
     approval_blocks = "\n\n".join(
         (
             f"[mcp_servers.{MCP_SERVER_NAME}.tools.{_toml_string(name)}]\n"
-            f"approval_mode = {_toml_string('approve' if name in {'health_check', 'ask_text', 'follow_up'} else 'prompt')}"
+            f"approval_mode = {_toml_string('approve' if name in {'antigravity_health', 'ask_antigravity', 'follow_up_antigravity'} else 'prompt')}"
         )
         for name in TOOL_NAMES
     )
@@ -83,17 +81,11 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_OBSERVER_START_ON_INIT": "true",
         "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
         "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
-        "GEMNESS_PAUSE_BEFORE_SEND": "false",
-        "GEMNESS_TOOL_TIMEOUT_SEC": "600",
-        "GEMNESS_GEMINI_OUTPUT_FORMAT": "stream-json",
-        "GEMNESS_GEMINI_SKIP_TRUST": "false",
-        "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
-        "GEMNESS_GEMINI_APPROVAL_MODE": "plan",
+        "GEMNESS_AGY_TIMEOUT": "600",
+        "GEMNESS_AGY_CAPTURE_MODE": "auto",
     }
-    if options.model:
-        env_lines["GEMNESS_MODEL"] = options.model
-    if options.gemini_command:
-        env_lines["GEMNESS_COMMAND"] = options.gemini_command
+    if options.agy_command:
+        env_lines["GEMNESS_AGY_COMMAND"] = options.agy_command
     if options.workspace_root:
         env_lines["GEMNESS_WORKSPACE_ROOT"] = str(options.workspace_root)
     if options.allowed_roots:
@@ -128,18 +120,12 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_OBSERVER_START_ON_INIT": "true",
             "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
-            "GEMNESS_PAUSE_BEFORE_SEND": "false",
-            "GEMNESS_TOOL_TIMEOUT_SEC": "600",
-            "GEMNESS_GEMINI_OUTPUT_FORMAT": "stream-json",
-            "GEMNESS_GEMINI_SKIP_TRUST": "false",
-            "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
-            "GEMNESS_GEMINI_APPROVAL_MODE": "plan",
+            "GEMNESS_AGY_TIMEOUT": "600",
+            "GEMNESS_AGY_CAPTURE_MODE": "auto",
         }
     )
-    if options.model:
-        env["GEMNESS_MODEL"] = options.model
-    if options.gemini_command:
-        env["GEMNESS_COMMAND"] = options.gemini_command
+    if options.agy_command:
+        env["GEMNESS_AGY_COMMAND"] = options.agy_command
     if options.workspace_root:
         env["GEMNESS_WORKSPACE_ROOT"] = str(options.workspace_root)
     if options.allowed_roots:
@@ -204,13 +190,6 @@ def upsert_marked_block(existing: str, block: str, start_marker: str, end_marker
     if existing.strip():
         return existing.rstrip() + "\n\n" + block + "\n"
     return block + "\n"
-
-
-def resolve_gemini_command() -> str:
-    command = shutil.which("gemini")
-    if not command:
-        raise RuntimeError("Gemini CLI not found on PATH. Install/authenticate Gemini CLI first, or pass --gemini-command.")
-    return command
 
 
 def _is_remote_git_source(source: str) -> bool:

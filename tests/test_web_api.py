@@ -7,26 +7,26 @@ import subprocess
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from gemness.config import GemnessConfig
-from gemness.runner import GeminiRunResult
+from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
+from gemness.runner import AgyRunResult
 from gemness.tools import GemnessService
 from gemness.web import INDEX_HTML
 
 
 class WebFakeRunner:
-    def run(self, prompt, *, model, output_format, session_id, hub, cwd=None, phase=None, **kwargs):
-        hub.set_status(session_id, "running", "gemini.started", {"model": model}, role="gemness", phase=phase)
-        stdout = json.dumps({"response": "ok"})
-        hub.append_event(session_id, "gemini.response", "gemness", {"response": stdout}, phase=phase)
-        hub.append_event(session_id, "gemini.exited", "gemness", {"exit_code": 0}, phase=phase)
-        return GeminiRunResult.completed(stdout)
+    def run(self, prompt, *, session_id, hub, cwd=None, phase=None, **kwargs):
+        hub.set_status(session_id, "running", "antigravity.started", {"model": DEFAULT_MODEL_LABEL, "streaming": False}, role="gemness", phase=phase)
+        stdout = json.dumps({"response": "ok", "metadata": {"streaming": False, "run_id": session_id}})
+        hub.append_event(session_id, "antigravity.response", "gemness", {"response": stdout, "streaming": False}, phase=phase)
+        hub.append_event(session_id, "antigravity.exited", "gemness", {"exit_code": 0, "streaming": False}, phase=phase)
+        return AgyRunResult.completed(stdout, metadata={"streaming": False, "run_id": session_id})
 
 
 def test_observer_api_is_loopback_local_and_exports_redacted_transcript(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
-        result = service.ask_text("API_KEY=secret-value")
+        result = service.ask_antigravity("API_KEY=secret-value")
         base_url = _observer_base(result["observer_url"])
 
         sessions = _get_json(f"{base_url}/api/sessions")
@@ -41,12 +41,12 @@ def test_observer_api_is_loopback_local_and_exports_redacted_transcript(tmp_path
         service.shutdown()
 
 
-def test_observer_api_exports_conversation_without_public_gemini_session_id(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+def test_observer_api_exports_conversation_without_public_agy_conversation_id(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
-        result = service.ask_text("hello")
-        service.follow_up(result["session_id"], "continue")
+        result = service.ask_antigravity("hello")
+        service.follow_up_antigravity(result["session_id"], "continue")
         base_url = _observer_base(result["observer_url"])
 
         conversations = _get_json(f"{base_url}/api/conversations")
@@ -56,18 +56,18 @@ def test_observer_api_exports_conversation_without_public_gemini_session_id(tmp_
 
         assert exported["conversation"]["conversation_id"] == result["conversation_id"]
         assert len(exported["runs"]) == 2
-        assert "current_gemini_session_id" not in exported["conversation"]
-        assert "gemini_session_id" not in exported["runs"][0]
-        assert raw_exported["conversation"]["current_gemini_session_id"].startswith("gemness_")
+        assert "current_agy_conversation_id" not in exported["conversation"]
+        assert "agy_conversation_id" not in exported["runs"][0]
+        assert raw_exported["conversation"]["current_agy_conversation_id"].startswith("gemness_")
     finally:
         service.shutdown()
 
 
 def test_legacy_session_url_redirects_to_conversation_url(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
-        result = service.ask_text("hello")
+        result = service.ask_antigravity("hello")
         base_url = _observer_base(result["observer_url"])
         request = Request(f"{base_url}/session/{result['session_id']}", headers={"Accept": "text/html"}, method="GET")
         opener = build_opener(_NoRedirect)
@@ -87,29 +87,28 @@ def test_legacy_session_url_redirects_to_conversation_url(tmp_path) -> None:
 def test_observer_server_binds_loopback(tmp_path) -> None:
     service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0), runner=WebFakeRunner())
     try:
-        result = service.ask_text("hello")
+        result = service.ask_antigravity("hello")
         assert result["observer_url"].startswith("http://127.0.0.1:")
     finally:
         service.shutdown()
 
 
-def test_completed_session_approve_instruction_creates_follow_up(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+def test_observer_api_renames_and_deletes_conversation(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
-        result = service.ask_text("hello")
+        result = service.ask_antigravity("hello")
         base_url = _observer_base(result["observer_url"])
-        posted = _post_json(
-            f"{base_url}/api/sessions/{result['session_id']}/interventions",
-            {"action": "approve", "instruction": "follow this up"},
-        )
+        renamed = _patch_json(f"{base_url}/api/conversations/{result['conversation_id']}", {"title": "수정한 대화 이름"})
+        sessions = _get_json(f"{base_url}/api/sessions")
+        deleted = _delete_json(f"{base_url}/api/conversations/{result['conversation_id']}")
+        sessions_after_delete = _get_json(f"{base_url}/api/sessions")
 
-        assert posted["child_session_id"]
-        child = service.hub.get_session(posted["child_session_id"])
-        assert child["parent_session_id"] == result["session_id"]
-        parent_events = service.hub.get_events(result["session_id"], raw=True)
-        assert "intervention.received" in [event["type"] for event in parent_events]
-        assert "intervention.applied" in [event["type"] for event in parent_events]
+        assert renamed["conversation"]["title"] == "수정한 대화 이름"
+        assert sessions["sessions"][0]["conversation_title"] == "수정한 대화 이름"
+        assert sessions["sessions"][0]["title"] == "수정한 대화 이름"
+        assert deleted == {"conversation_id": result["conversation_id"], "deleted_runs": 1}
+        assert sessions_after_delete["sessions"] == []
     finally:
         service.shutdown()
 
@@ -117,36 +116,39 @@ def test_completed_session_approve_instruction_creates_follow_up(tmp_path) -> No
 def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> None:
     assert "세션 목록" in INDEX_HTML
     assert "대화 기록" in INDEX_HTML
-    assert "사용자 개입" in INDEX_HTML
-    assert "Agents -> Gemini" in INDEX_HTML
-    assert "Gemini -> Agents" in INDEX_HTML
+    assert "사용자 개입" not in INDEX_HTML
+    assert "Agents -> Antigravity" in INDEX_HTML
+    assert "Antigravity -> Agents" in INDEX_HTML
     assert "원본 이벤트 보기" in INDEX_HTML
+    assert "이름 변경" in INDEX_HTML
+    assert "제거" in INDEX_HTML
     assert "function buildConversationTranscript" in INDEX_HTML
     assert "function describeEventAsConversationTurn" in INDEX_HTML
     assert "function preferredLiveSession" in INDEX_HTML
     assert "function shouldHonorRequestedSession" in INDEX_HTML
     assert "function groupSessionsByConversation" in INDEX_HTML
     assert "function renderSessionGroup" in INDEX_HTML
+    assert "function renameSessionListItem" in INDEX_HTML
+    assert "function deleteSessionListItem" in INDEX_HTML
     assert "function sessionTitle" in INDEX_HTML
     assert "function renderMarkdown" in INDEX_HTML
-    assert "function updateInterventionPanel" in INDEX_HTML
+    assert "function updateInterventionPanel" not in INDEX_HTML
     assert "renderConversationTurn" in INDEX_HTML
     assert "buildReadableTranscript" in INDEX_HTML
     assert "isTerminalStatus" in INDEX_HTML
-    assert "isBenignGeminiStderr" in INDEX_HTML
+    assert "isBenignAntigravityStderr" in INDEX_HTML
     assert "conversation id" in INDEX_HTML
     assert "run id" in INDEX_HTML
     assert "256-color support not detected" in INDEX_HTML
     assert "Ripgrep is not available. Falling back to GrepTool." in INDEX_HTML
     assert "visibleEvents(transcript?.events || []).map(renderEvent)" not in INDEX_HTML
-    assert "현재 단계:" in INDEX_HTML
-    assert "전송 전" in INDEX_HTML
-    assert "실행 중" in INDEX_HTML
-    assert "완료 후" in INDEX_HTML
-    assert "추가 지시 / follow-up 질문" in INDEX_HTML
-    assert "프롬프트 전체 교체" in INDEX_HTML
-    assert "중단 후 이 지시로 재시도" in INDEX_HTML
-    assert "Gemini -> Agents · 응답 중" in INDEX_HTML
+    assert "현재 단계:" not in INDEX_HTML
+    assert "보내기 전 멈춤" not in INDEX_HTML
+    assert "추가 지시 / follow-up 질문" not in INDEX_HTML
+    assert "프롬프트 전체 교체" not in INDEX_HTML
+    assert "중단 후 이 지시로 재시도" not in INDEX_HTML
+    assert "/interventions" not in INDEX_HTML
+    assert "streaming" in INDEX_HTML
     assert "Live" in INDEX_HTML
     assert "History" in INDEX_HTML
 
@@ -156,7 +158,8 @@ def test_observer_ui_uses_root_api_without_token_query_and_sse_fallback() -> Non
     assert "encodeURIComponent(token)" not in INDEX_HTML
     assert "__GEMNESS_OBSERVER_TOKEN__" not in INDEX_HTML
     assert "source.onerror" in INDEX_HTML
-    assert "setInterval(() => { loadSessions().catch(console.error); }, 1500)" in INDEX_HTML
+    assert "refreshDashboard({automatic: true})" in INDEX_HTML
+    assert "setInterval(() => { refreshDashboard({automatic: true}).catch(console.error); }, 1500)" in INDEX_HTML
 
 
 def test_observer_ui_keeps_dashboard_url_instead_of_session_path() -> None:
@@ -168,10 +171,10 @@ def test_observer_ui_keeps_dashboard_url_instead_of_session_path() -> None:
 
 
 def test_observer_root_serves_live_dashboard_without_token(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
-        result = service.ask_text("hello")
+        result = service.ask_antigravity("hello")
         base_url = _observer_base(result["observer_url"])
 
         html_request = Request(f"{base_url}/", headers={"Accept": "text/html"})
@@ -185,10 +188,10 @@ def test_observer_root_serves_live_dashboard_without_token(tmp_path) -> None:
 
 
 def test_observer_api_ignores_stale_url_token(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, model="fake-model")
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
-        result = service.ask_text("hello")
+        result = service.ask_antigravity("hello")
         base_url = _observer_base(result["observer_url"])
         request = Request(f"{base_url}/api/sessions?token=stale-token", headers={"Accept": "application/json"})
         with urlopen(request, timeout=2) as response:
@@ -218,28 +221,22 @@ const events = [
     payload: { prompt: "현재 변경사항을 리뷰해줘." }
   },
   {
-    type: "gemini.response",
+    type: "antigravity.response",
     ts: "2026-05-19T03:04:31Z",
     role: "gemness",
     payload: { response: JSON.stringify({ response: "보안 위험은 낮지만 테스트가 부족합니다.", stats: { tokens: { total: 12 } } }) }
   },
   {
-    type: "gemini.response",
+    type: "antigravity.response",
     ts: "2026-05-19T03:04:32Z",
     role: "gemness",
     payload: { response: JSON.stringify({ response: "부분 응답", error: { message: "auth failed" }, stats: { attempts: 1 } }) }
   },
   {
-    type: "gemini.stderr",
+    type: "antigravity.stderr",
     ts: "2026-05-19T03:04:33Z",
     role: "gemness",
     payload: { stderr: "Warning: 256-color support not detected.\nRipgrep is not available. Falling back to GrepTool." }
-  },
-  {
-    type: "intervention.received",
-    ts: "2026-05-19T03:05:10Z",
-    role: "user",
-    payload: { action: "follow_up", instruction: "테스트 관점만 다시 봐줘" }
   },
   {
     type: "session.completed",
@@ -248,7 +245,7 @@ const events = [
     payload: { result: { status: "completed", text: "최종 요약입니다." } }
   }
 ];
-const turns = buildConversationTranscript(events.filter((event) => !isBenignGeminiStderr(event)));
+const turns = buildConversationTranscript(events.filter((event) => !isBenignAntigravityStderr(event)));
 console.log(JSON.stringify(turns.map((turn) => ({
   title: turn.title,
   speaker: turn.speaker,
@@ -263,68 +260,89 @@ console.log(JSON.stringify(turns.map((turn) => ({
     completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
     turns = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert [turn["title"] for turn in turns].count("Agents -> Gemini") == 1
-    assert turns[0]["title"] == "Agents -> Gemini"
-    assert turns[0]["direction"] == "agents_to_gemini"
+    assert [turn["title"] for turn in turns].count("Agents -> Antigravity") == 1
+    assert turns[0]["title"] == "Agents -> Antigravity"
+    assert turns[0]["direction"] == "agents_to_antigravity"
     assert turns[0]["body"] == "현재 변경사항을 리뷰해줘."
-    assert turns[0]["meta"]["단계"] == "Gemini에 전송됨"
-    assert turns[1]["title"] == "Gemini -> Agents"
+    assert turns[0]["meta"]["단계"] == "Antigravity에 전송됨"
+    assert turns[1]["title"] == "Antigravity -> Agents"
     assert turns[1]["body"] == "보안 위험은 낮지만 테스트가 부족합니다."
     assert turns[1]["meta"]["stats"]["tokens"]["total"] == 12
-    assert turns[2]["title"] == "Gemini -> Agents · 오류 포함"
+    assert turns[2]["title"] == "Antigravity -> Agents · 오류 포함"
     assert turns[2]["severity"] == "error"
     assert turns[2]["meta"]["error"]["message"] == "auth failed"
     assert all("256-color support" not in turn["body"] for turn in turns)
-    assert turns[3]["title"] == "사용자 개입"
-    assert "테스트 관점만 다시 봐줘" in turns[3]["body"]
-    assert turns[4]["title"] == "Observer"
-    assert "최종 요약입니다." in turns[4]["body"]
+    assert turns[3]["title"] == "Observer"
+    assert "최종 요약입니다." in turns[3]["body"]
 
 
-def test_conversation_transcript_shows_latest_stream_delta_until_final_response(tmp_path) -> None:
+def test_observer_displays_newest_conversation_turn_first(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"
 
     script = _extract_index_script() + r"""
-const liveEvents = [
+const events = [
   {
-    session_id: "s1",
-    type: "gemini.delta",
-    ts: "2026-05-19T03:04:20Z",
-    role: "gemness",
-    payload: { content: "첫", response: "첫" }
+    type: "prompt.sent",
+    ts: "2026-05-19T03:04:18Z",
+    role: "codex_mcp",
+    payload: { prompt: "처음 질문" }
   },
   {
-    session_id: "s1",
-    type: "gemini.delta",
-    ts: "2026-05-19T03:04:21Z",
+    type: "antigravity.response",
+    ts: "2026-05-19T03:04:31Z",
     role: "gemness",
-    payload: { content: " 응답", response: "첫 응답" }
+    payload: { response: JSON.stringify({ response: "중간 답변" }) }
+  },
+  {
+    type: "session.completed",
+    ts: "2026-05-19T03:05:20Z",
+    role: "system",
+    payload: { result: { status: "completed", text: "최종 요약" } }
   }
 ];
-const liveTurns = buildConversationTranscript(liveEvents);
-const finalTurns = buildConversationTranscript([
-  ...liveEvents,
-  {
-    session_id: "s1",
-    type: "gemini.response",
-    ts: "2026-05-19T03:04:22Z",
-    role: "gemness",
-    payload: { response: JSON.stringify({ response: "첫 응답" }) }
-  }
-]);
+const chronological = buildConversationTranscript(events);
+const visible = displayConversationTurns(chronological);
 console.log(JSON.stringify({
-  live: liveTurns.map((turn) => ({ title: turn.title, body: turn.body })),
-  final: finalTurns.map((turn) => ({ title: turn.title, body: turn.body }))
+  chronological: chronological.map((turn) => turn.body),
+  visible: visible.map((turn) => turn.body)
 }));
 """
-    script_path = tmp_path / "delta-test.js"
+    script_path = tmp_path / "newest-first-test.js"
     script_path.write_text(script, encoding="utf-8")
     completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
     data = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert data["live"] == [{"title": "Gemini -> Agents · 응답 중", "body": "첫 응답"}]
-    assert data["final"] == [{"title": "Gemini -> Agents", "body": "첫 응답"}]
+    assert data["chronological"][0] == "처음 질문"
+    assert data["visible"][0].startswith("최종 결과")
+    assert "최종 요약" in data["visible"][0]
+    assert data["visible"][-1] == "처음 질문"
+
+
+def test_conversation_transcript_renders_non_streaming_response_metadata(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const turns = buildConversationTranscript([
+  {
+    session_id: "s1",
+    type: "antigravity.response",
+    ts: "2026-05-19T03:04:22Z",
+    role: "gemness",
+    payload: { response: JSON.stringify({ response: "첫 응답", metadata: { streaming: false, auth_status: "ok" } }), streaming: false }
+  }
+]);
+console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.body, meta: turn.meta }))));
+"""
+    script_path = tmp_path / "response-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    turns = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert turns[0]["title"] == "Antigravity -> Agents"
+    assert turns[0]["body"] == "첫 응답"
+    assert turns[0]["meta"]["metadata"]["streaming"] is False
 
 
 def test_live_session_picker_prefers_newest_non_terminal_session(tmp_path) -> None:
@@ -358,10 +376,10 @@ def test_session_list_groups_live_history_and_uses_session_title(tmp_path) -> No
     script = _extract_index_script() + r"""
 currentSessionId = "run_1";
 const grouped = groupSessionsByConversation([
-  { session_id: "run_1", conversation_id: "conv_a", status: "completed", title: "Observer UX 정리", tool_name: "ask_text", model: "m", started_at: "2026-05-19T01:00:00Z", updated_at: "2026-05-19T01:00:01Z", turn_index: 1 },
-  { session_id: "run_2", conversation_id: "conv_a", status: "completed", title: "후속 질문", tool_name: "ask_text", model: "m", started_at: "2026-05-19T01:01:00Z", updated_at: "2026-05-19T01:01:01Z", turn_index: 2 },
-  { session_id: "run_3", conversation_id: "conv_b", status: "completed", tool_name: "ask_json", model: "m", started_at: "2026-05-19T01:02:00Z", updated_at: "2026-05-19T01:02:01Z", turn_index: 1 },
-  { session_id: "run_4", conversation_id: "conv_c", status: "running", title: "실시간 확인", tool_name: "ask_text", model: "m", started_at: "2026-05-19T01:03:00Z", updated_at: "2026-05-19T01:03:01Z", turn_index: 1 }
+  { session_id: "run_1", conversation_id: "conv_a", conversation_title: "이름 바꾼 대화", status: "completed", title: "Observer UX 정리", tool_name: "ask_antigravity", model: "m", started_at: "2026-05-19T01:00:00Z", updated_at: "2026-05-19T01:00:01Z", turn_index: 1 },
+  { session_id: "run_2", conversation_id: "conv_a", status: "completed", title: "후속 질문", tool_name: "ask_antigravity", model: "m", started_at: "2026-05-19T01:01:00Z", updated_at: "2026-05-19T01:01:01Z", turn_index: 2 },
+  { session_id: "run_3", conversation_id: "conv_b", status: "completed", tool_name: "ask_antigravity_json", model: "m", started_at: "2026-05-19T01:02:00Z", updated_at: "2026-05-19T01:02:01Z", turn_index: 1 },
+  { session_id: "run_4", conversation_id: "conv_c", status: "running", title: "실시간 확인", tool_name: "ask_antigravity", model: "m", started_at: "2026-05-19T01:03:00Z", updated_at: "2026-05-19T01:03:01Z", turn_index: 1 }
 ]);
 const liveHtml = renderSessionGroup("Live", grouped.filter((session) => !isTerminalStatus(session.status)), "");
 const historyHtml = renderSessionGroup("History", grouped.filter((session) => isTerminalStatus(session.status)), "");
@@ -372,14 +390,16 @@ console.log(JSON.stringify({
   groupedCount: grouped.length,
   convATurnCount: convA.turn_count,
   convAUsesLatestRun: convA.session_id === "run_2",
-  convAUsesRootTitle: sessionTitle(convA) === "Observer UX 정리",
+  convAUsesConversationTitle: sessionTitle(convA) === "이름 바꾼 대화",
   historyButtonCount: (historyHtml.match(/data-session=/g) || []).length,
-  historyShowsTurns: historyHtml.includes("2턴 · 텍스트 질문"),
+  historyHasRename: historyHtml.includes("이름 변경") && historyHtml.includes('data-rename-kind="conversation"'),
+  historyHasDelete: historyHtml.includes("제거") && historyHtml.includes('data-delete-kind="conversation"'),
+  historyShowsTurns: historyHtml.includes("2턴 · Antigravity 질문"),
   historyActiveFromAnyRun: historyHtml.includes("session active"),
   historyHasFallback: historyHtml.includes("JSON 질문"),
   historyHasGroup: historyHtml.includes("History"),
-  directTitle: sessionTitle({ title: "짧은 제목", tool_name: "ask_text" }),
-  fallbackTitle: sessionTitle({ tool_name: "review_current_diff" })
+  directTitle: sessionTitle({ title: "짧은 제목", tool_name: "ask_antigravity" }),
+  fallbackTitle: sessionTitle({ tool_name: "review_current_diff_with_antigravity" })
 }));
 """
     script_path = tmp_path / "session-list-title-test.js"
@@ -393,14 +413,16 @@ console.log(JSON.stringify({
         "groupedCount": 3,
         "convATurnCount": 2,
         "convAUsesLatestRun": True,
-        "convAUsesRootTitle": True,
+        "convAUsesConversationTitle": True,
         "historyButtonCount": 2,
+        "historyHasRename": True,
+        "historyHasDelete": True,
         "historyShowsTurns": True,
         "historyActiveFromAnyRun": True,
         "historyHasFallback": True,
         "historyHasGroup": True,
         "directTitle": "짧은 제목",
-        "fallbackTitle": "현재 diff 리뷰",
+        "fallbackTitle": "현재 변경 리뷰",
     }
 
 
@@ -431,7 +453,7 @@ console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.
     completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
     turns = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert turns[0]["title"] == "Agents -> Gemini"
+    assert turns[0]["title"] == "Agents -> Antigravity"
     assert turns[0]["body"] == "아직 승인 전인 초안입니다."
     assert turns[0]["meta"]["단계"] == "전송 전 초안"
 
@@ -464,15 +486,81 @@ console.log(JSON.stringify({ html }));
     assert "<script>" not in html
 
 
+def test_observer_ui_pauses_automatic_refresh_while_text_is_selected(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+window.getSelection = () => ({ isCollapsed: false, toString: () => "선택한 대화 내용" });
+const active = hasActiveTextSelection();
+window.getSelection = () => ({ isCollapsed: true, toString: () => "" });
+const inactive = hasActiveTextSelection();
+console.log(JSON.stringify({ active, inactive }));
+"""
+    script_path = tmp_path / "selection-refresh-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert data == {"active": True, "inactive": False}
+
+
+def test_observer_ui_marks_and_restores_raw_event_details(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const event = {
+  event_id: "event-1",
+  session_id: "run-1",
+  type: "prompt.sent",
+  ts: "2026-05-19T03:04:18Z",
+  role: "codex_mcp",
+  payload: { prompt: "원본 이벤트 상태 보존" }
+};
+const turnHtml = renderConversationTurn(describeEventAsConversationTurn(event));
+const debugHtml = renderRawEvent(event);
+const opened = { dataset: { rawKey: "turn:event-1" }, open: true };
+const closed = { dataset: { rawKey: "turn:event-2" }, open: false };
+document.querySelectorAll = (selector) => selector.includes("[open]") ? [opened] : [opened, closed];
+const keys = openRawEventKeys();
+opened.open = false;
+restoreRawEventKeys(keys);
+console.log(JSON.stringify({
+  turnHasKey: turnHtml.includes('data-raw-key="turn:event-1"'),
+  debugHasKey: debugHtml.includes('data-raw-key="debug:event-1"'),
+  restored: opened.open,
+  closedStayedClosed: !closed.open
+}));
+"""
+    script_path = tmp_path / "raw-details-state-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert data == {
+        "turnHasKey": True,
+        "debugHasKey": True,
+        "restored": True,
+        "closedStayedClosed": True,
+    }
+
+
 def _get_json(url: str):
     request = Request(url, headers={"Accept": "application/json"})
     with urlopen(request, timeout=2) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _post_json(url: str, payload: dict):
+def _patch_json(url: str, payload: dict):
     body = json.dumps(payload).encode("utf-8")
-    request = Request(url, data=body, headers={"Accept": "application/json", "Content-Type": "application/json"}, method="POST")
+    request = Request(url, data=body, headers={"Accept": "application/json", "Content-Type": "application/json"}, method="PATCH")
+    with urlopen(request, timeout=2) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _delete_json(url: str):
+    request = Request(url, headers={"Accept": "application/json"}, method="DELETE")
     with urlopen(request, timeout=2) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -505,7 +593,7 @@ global.confirm = () => false;
 global.EventSource = function EventSource() {};
 global.fetch = async (path) => ({
   ok: true,
-  json: async () => String(path).includes("/api/config") ? { pause_before_send: false } : { sessions: [] },
+  json: async () => ({ sessions: [] }),
   text: async () => ""
 });
 """

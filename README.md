@@ -1,16 +1,16 @@
 # Gemness Observer
 
-Local Gemness server with a browser observer UI for advisory Gemini calls.
+Gemness is a local MCP server that lets Codex consult Antigravity CLI (`agy`) and inspect each advisory run in a browser Observer UI.
 
 The server exposes:
 
-- `health_check`
-- `ask_text`
-- `follow_up`
-- `ask_json`
-- `review_current_diff`
+- `antigravity_health`
+- `ask_antigravity`
+- `follow_up_antigravity`
+- `ask_antigravity_json`
+- `review_current_diff_with_antigravity`
 
-Each root tool call creates a unique observer run. Use `follow_up` with a previous `session_id` to continue the same Gemini conversation; the Observer history groups those runs into one conversation entry. Tool results include `session_id`, `conversation_id`, and `observer_url`, so you can open the local UI and inspect prompts, Gemini output, parse/validation events, repair attempts, review findings, and intervention history.
+Each root tool call creates a Gemness run and a Gemness conversation. Gemness sends concise task instructions to `agy` and lets Antigravity inspect the workspace with its own tools when needed. Follow-up calls use native `agy --conversation <id>` when Gemness has detected the Antigravity conversation ID, otherwise they can fall back to `agy --continue` or a short summary prompt. Tool results include `run_id`, `conversation_id`, `observer_url`, and non-streaming execution metadata.
 
 ## Quick Start
 
@@ -22,13 +22,11 @@ From any directory:
 uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 ```
 
-The URL is used only by `uvx`; no PyPI token is needed.
-
 The bootstrap command:
 
 - writes the marked `[mcp_servers.gemness]` block to the user Codex config
 - installs the `use gemness` trigger guidance
-- checks the Gemini CLI version
+- checks `agy --version`
 - smoke-tests the configured MCP stdio command
 
 Then restart Codex and ask:
@@ -39,74 +37,50 @@ use gemness health check
 
 The detailed route is in [INSTALL.md](INSTALL.md).
 
+## Antigravity CLI
+
+Install Antigravity CLI from the official docs:
+
+```powershell
+irm https://antigravity.google/cli/install.ps1 | iex
+```
+
+Smoke-test the CLI:
+
+```powershell
+agy --help
+agy -p "Return exactly: GEMNESS_AGY_HEALTHCHECK"
+```
+
+On Windows, Gemness resolves `agy` from `PATH` first and then checks `%LOCALAPPDATA%\agy\bin\agy.exe`. Antigravity CLI can write print-mode responses directly to the console instead of stdout/stderr on Windows; Gemness uses `pywinpty` automatically there so MCP tools can capture the final text. Set `GEMNESS_AGY_CAPTURE_MODE=pipe` only when you need to force ordinary stdout/stderr capture.
+
+Model selection belongs to Antigravity CLI, not Gemness runtime flags. Use Antigravity CLI settings or the `/model` command. A target such as `Gemini 3.5 Flash` is a user-facing Antigravity model preference, not a Gemness `--model` argument.
+
 ## Run
 
 ```powershell
 uvx --from git+https://github.com/jisoq/gemness gemness start-mcp-server
 ```
 
-The server communicates over MCP stdio. By default, it starts the Observer web server as soon as the MCP process starts, so `http://127.0.0.1:56755` can be open before an `ask_text` call begins.
+The server communicates over MCP stdio. By default, it starts the Observer web server as soon as the MCP process starts, so `http://127.0.0.1:56755` can be open before an `ask_antigravity` call begins.
 
-## Connect to Codex
-
-1. Bootstrap the Codex config with `uvx`:
+## Connect To Codex
 
 ```powershell
 uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 ```
 
-2. Restart Codex. The generated MCP config uses:
+The generated MCP config uses:
 
 - `command = "uvx"`
 - `args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]`
 - `default_tools_approval_mode = "prompt"`
-- `GEMNESS_GEMINI_SKIP_TRUST = "false"` unless you explicitly choose to bypass Gemini CLI trust checks locally
+- `GEMNESS_AGY_TIMEOUT = "600"`
 
-### Windows example
-
-```toml
-command = "uvx"
-args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
-
-[mcp_servers.gemness.env]
-# Omit GEMNESS_MODEL to let Gemini CLI use its default model.
-```
-
-### macOS/Linux example
-
-```toml
-command = "uvx"
-args = ["--from", "git+https://github.com/jisoq/gemness", "gemness", "start-mcp-server"]
-
-[mcp_servers.gemness.env]
-# Omit GEMNESS_MODEL to let Gemini CLI use its default model.
-```
-
-## Verify in Codex
+To use a specific CLI path:
 
 ```powershell
-codex mcp list
-```
-
-Then open Codex TUI, run `/mcp`, and confirm `gemness` is active. In a Codex chat, ask:
-
-```text
-use gemness: run health check
-```
-
-For a live Gemini second opinion:
-
-```text
-use gemness: give me a second opinion on this architecture
-use gemness: review current diff
-```
-
-To install or refresh the `use gemness` trigger guidance:
-
-```powershell
-uvx --from git+https://github.com/jisoq/gemness gemness install-trigger --scope project
-uvx --from git+https://github.com/jisoq/gemness gemness install-trigger --scope user
-uvx --from git+https://github.com/jisoq/gemness gemness install-trigger --scope both
+uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex --agy-command "$env:LOCALAPPDATA\agy\bin\agy.exe"
 ```
 
 ## Observer UI
@@ -117,62 +91,41 @@ Keep the live Observer open at:
 http://127.0.0.1:56755
 ```
 
-That root page follows the newest running Gemness session, so you can watch the prompt, Gemini stream events, validation, repair, and final result while the MCP tool call is still running. Every successful tool invocation also returns an `observer_url` like:
+The dashboard lists conversations and follows the newest running one. It shows prompts, final Antigravity output, stderr diagnostics, JSON extraction, validation, repair attempts, and review findings. You can rename or remove completed local conversation records from the session list. Antigravity output is captured after process completion; metadata is marked with `streaming=false`.
 
-```json
-{
-  "session_id": "2fc7...",
-  "observer_url": "http://127.0.0.1:56755/"
-}
-```
+## Conversation Management
 
-Open that URL in a browser. The dashboard lists conversations and automatically follows the newest running one; you do not need to copy or remember session IDs. The UI shows:
-
-- recent conversations with tool name, status, model, start time, duration, and turn count
-- transcript events for prompt, Gemini response, JSON extraction, validation, repair, and final result
-- redacted view by default, with an explicit raw toggle
-- prompt edit, approve, cancel, interrupt-and-retry, follow-up, copy, and export controls
-
-## Interventions
-
-Set `GEMNESS_PAUSE_BEFORE_SEND=true` to pause sessions before sending prompts to Gemini. While queued or waiting for approval, the UI can edit the prompt, append an instruction, approve, or cancel.
-
-During a running subprocess, the UI supports `interrupt and retry`. The current process is terminated, the partial output is recorded, and a child session is created with the original prompt, partial output, and user instruction.
-
-Completed sessions support follow-up from the UI and the MCP `follow_up` tool. A child run is created with `parent_session_id`, kept under the same `conversation_id` when it extends the latest turn, and shown as the same conversation in Observer history.
+Use the MCP `follow_up_antigravity` tool to continue a completed run. The Observer UI itself is read-mostly: it does not edit queued prompts, interrupt running subprocesses, or create follow-up runs. Session-list actions are limited to local transcript housekeeping such as renaming and removing completed records.
 
 ## Security
 
 - The observer binds only to `127.0.0.1`, `localhost`, or `::1`.
-- The Observer binds to loopback only and uses `http://127.0.0.1:56755/` as the single local dashboard.
-- API, SSE, export, and intervention endpoints are local loopback endpoints; they do not require a URL token.
+- API, SSE, export, rename, and delete endpoints are local loopback endpoints.
 - Transcripts are redacted by default in the UI and API.
 - Raw transcript export requires an explicit `raw=1` request.
-- Gemini is not given shell access. `review_current_diff` runs `git diff --no-color <base_ref> --` inside the MCP server and sends only the resulting diff text to Gemini.
+- Gemness should not be used as a bulk context courier. Do not paste diffs, file dumps, logs, or transcript payloads into prompts when Antigravity can inspect the workspace itself.
+- `review_current_diff_with_antigravity` does not embed a Gemness-generated diff. It starts `agy` in the requested workspace and asks Antigravity CLI to inspect the repository changes itself. Do not use it on workspaces containing secrets you would not want the local Antigravity CLI to inspect.
 
 ## Environment
 
 ```bash
-# GEMNESS_MODEL is optional. Omit it to let Gemini CLI use its default model.
+GEMNESS_AGY_COMMAND=agy
+GEMNESS_AGY_TIMEOUT=600
+GEMNESS_AGY_HEALTH_TIMEOUT=20
+GEMNESS_AGY_CAPTURE_MODE=auto
 GEMNESS_OBSERVER_ENABLED=true
 GEMNESS_OBSERVER_HOST=127.0.0.1
 GEMNESS_OBSERVER_PORT=56755
 GEMNESS_OBSERVER_START_ON_INIT=true
 GEMNESS_TRANSCRIPT_DIR=~/.gemness/transcripts
 GEMNESS_REDACT_RAW_BY_DEFAULT=true
-GEMNESS_PAUSE_BEFORE_SEND=false
-GEMNESS_TOOL_TIMEOUT_SEC=600
-GEMNESS_GEMINI_OUTPUT_FORMAT=stream-json
-GEMNESS_GEMINI_SKIP_TRUST=false
-GEMNESS_GEMINI_TRUST_WORKSPACE=true
-GEMNESS_GEMINI_APPROVAL_MODE=plan
 ```
 
-See [docs/gemini-observer.md](docs/gemini-observer.md) and [docs/codex-mcp-config.example.toml](docs/codex-mcp-config.example.toml).
+See [docs/antigravity-observer.md](docs/antigravity-observer.md) and [docs/codex-mcp-config.example.toml](docs/codex-mcp-config.example.toml).
 
 ## Tests
 
 ```powershell
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD="1"
-uv run python -m pytest -q -p no:cacheprovider
+python -m pytest -q -p no:cacheprovider
 ```

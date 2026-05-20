@@ -11,6 +11,6 @@ global-exclude *.pem
 global-exclude *.key
 prune .venv
 prune .pytest_cache
-prune .gemini-mcp
+prune .agy-mcp
 prune .codex/live-observer*
 prune src/*.egg-info
