@@ -21,6 +21,7 @@ def test_config_defaults_do_not_skip_gemini_trust(monkeypatch) -> None:
     assert GemnessConfig().observer_port == 56755
     assert GemnessConfig().observer_start_on_init is True
     assert GemnessConfig().gemini_output_format == "stream-json"
+    assert GemnessConfig().tool_timeout_sec == 600
     assert GemnessConfig().model is None
 
 

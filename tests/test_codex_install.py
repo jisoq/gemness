@@ -26,11 +26,13 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert server["command"] == "uvx"
     assert server["args"] == ["--from", "git+https://example.test/gemness", "gemness", "start-mcp-server"]
     assert "cwd" not in server
+    assert server["tool_timeout_sec"] == 600
     assert server["required"] is False
     assert "health_check" in server["enabled_tools"]
     assert server["env"]["GEMNESS_OBSERVER_PORT"] == "56755"
     assert server["env"]["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(server["env"]["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
+    assert server["env"]["GEMNESS_TOOL_TIMEOUT_SEC"] == "600"
     assert server["env"]["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
     assert "GEMNESS_MODEL" not in server["env"]
     assert "GEMNESS_WORKSPACE_ROOT" not in server["env"]
@@ -115,6 +117,7 @@ def test_build_mcp_env_omits_local_paths_by_default() -> None:
     assert env["GEMNESS_OBSERVER_PORT"] == "56755"
     assert env["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(env["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
+    assert env["GEMNESS_TOOL_TIMEOUT_SEC"] == "600"
     assert env["GEMNESS_GEMINI_OUTPUT_FORMAT"] == "stream-json"
     assert "GEMNESS_MODEL" not in env
     assert "GEMNESS_WORKSPACE_ROOT" not in env

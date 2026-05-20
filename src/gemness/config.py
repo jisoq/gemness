@@ -88,7 +88,7 @@ class GemnessConfig:
     gemini_skip_trust: bool = _bool_env("GEMNESS_GEMINI_SKIP_TRUST", False)
     gemini_trust_workspace: bool = field(default_factory=_trust_workspace_env)
     gemini_approval_mode: str = os.getenv("GEMNESS_GEMINI_APPROVAL_MODE", "plan")
-    tool_timeout_sec: float = float(os.getenv("GEMNESS_TOOL_TIMEOUT_SEC", "120"))
+    tool_timeout_sec: float = float(os.getenv("GEMNESS_TOOL_TIMEOUT_SEC", "600"))
     diff_limit_bytes: int = _int_env("GEMNESS_DIFF_LIMIT_BYTES", 160_000)
     workspace_root: Path | None = _optional_path_env("GEMNESS_WORKSPACE_ROOT")
     allowed_roots: tuple[Path, ...] = _path_list_env("GEMNESS_ALLOWED_ROOTS")

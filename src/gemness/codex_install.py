@@ -35,7 +35,7 @@ class CodexConfigOptions:
     allowed_roots: tuple[Path, ...]
     gemini_command: str | None
     startup_timeout_sec: int = 60
-    tool_timeout_sec: int = 300
+    tool_timeout_sec: int = 600
     required: bool = False
     model: str | None = None
     transcript_dir: str = str(DEFAULT_TRANSCRIPT_DIR)
@@ -84,7 +84,7 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
         "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
         "GEMNESS_PAUSE_BEFORE_SEND": "false",
-        "GEMNESS_TOOL_TIMEOUT_SEC": "120",
+        "GEMNESS_TOOL_TIMEOUT_SEC": "600",
         "GEMNESS_GEMINI_OUTPUT_FORMAT": "stream-json",
         "GEMNESS_GEMINI_SKIP_TRUST": "false",
         "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
@@ -129,7 +129,7 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
             "GEMNESS_PAUSE_BEFORE_SEND": "false",
-            "GEMNESS_TOOL_TIMEOUT_SEC": "120",
+            "GEMNESS_TOOL_TIMEOUT_SEC": "600",
             "GEMNESS_GEMINI_OUTPUT_FORMAT": "stream-json",
             "GEMNESS_GEMINI_SKIP_TRUST": "false",
             "GEMNESS_GEMINI_TRUST_WORKSPACE": "true",
