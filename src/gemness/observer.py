@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import queue
 import secrets
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,7 @@ from .redaction import redact_payload, redact_text
 
 
 FINAL_STATUSES = {"valid", "invalid", "error", "cancelled", "completed"}
+STALE_PROCESS_GRACE_SEC = 15
 SESSION_STATUSES = {
     "queued",
     "waiting_for_user_approval",
@@ -26,6 +30,7 @@ SESSION_STATUSES = {
     "cancelled",
     "completed",
 }
+OPEN_SESSION_STATUSES = SESSION_STATUSES - FINAL_STATUSES
 
 
 class EventBus:
@@ -589,6 +594,35 @@ class ObserverHub:
 
     def refresh_from_disk(self) -> None:
         self._load_existing_events()
+        self._settle_stale_sessions()
+
+    def _settle_stale_sessions(self) -> None:
+        stale: list[tuple[str, str]] = []
+        now = time.time()
+        with self._lock:
+            for session in self.sessions.values():
+                if session.status not in OPEN_SESSION_STATUSES:
+                    continue
+                age = _age_seconds(session.updated_at, now)
+                pid = _last_started_pid(self.events.get(session.session_id, []))
+                reason = ""
+                if pid is not None and age > STALE_PROCESS_GRACE_SEC and not _process_is_running(pid):
+                    reason = f"process {pid} is no longer running"
+                elif age > self.config.agy_timeout_sec + STALE_PROCESS_GRACE_SEC:
+                    reason = f"no observer updates for {int(age)} seconds"
+                if reason:
+                    stale.append((session.session_id, reason))
+        for session_id, reason in stale:
+            with self._lock:
+                session = self.sessions.get(session_id)
+                if session is None or session.status not in OPEN_SESSION_STATUSES:
+                    continue
+            self.set_status(
+                session_id,
+                "error",
+                "session.error",
+                {"message": f"Stale observer session marked as error: {reason}", "reason": "stale_observer_session"},
+            )
 
     def _public_event(self, event: ObserverEvent, *, raw: bool) -> dict[str, Any]:
         data = event.to_dict()
@@ -926,6 +960,59 @@ def _parse_iso(value: str) -> float:
     from datetime import datetime
 
     return datetime.fromisoformat(parsed).timestamp()
+
+
+def _age_seconds(updated_at: str, now: float) -> float:
+    try:
+        return max(0.0, now - _parse_iso(updated_at))
+    except ValueError:
+        return 0.0
+
+
+def _last_started_pid(events: list[ObserverEvent]) -> int | None:
+    for event in reversed(events):
+        if event.type != "antigravity.started":
+            continue
+        pid = event.payload.get("pid")
+        if isinstance(pid, int) and pid > 0:
+            return pid
+    return None
+
+
+def _process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_process_is_running(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _windows_process_is_running(pid: int) -> bool:
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _observer_base_url(host: str, port: int) -> str:

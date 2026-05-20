@@ -109,6 +109,33 @@ def test_dashboard_hub_refreshes_sessions_written_by_another_process(tmp_path) -
     assert [event["type"] for event in events][-1] == "prompt.sent"
 
 
+def test_dashboard_refresh_marks_dead_started_process_as_error(tmp_path, monkeypatch) -> None:
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    session = hub.create_session("ask_antigravity", "fake-model")
+    hub.set_status(session.session_id, "running", "antigravity.started", {"pid": 999999})
+    monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 60.0)
+    monkeypatch.setattr("gemness.observer._process_is_running", lambda pid: False)
+
+    listed = hub.list_sessions()[0]
+    events = hub.get_events(session.session_id, raw=True)
+    error_event = next(event for event in events if event["type"] == "session.error")
+
+    assert listed["status"] == "error"
+    assert error_event["payload"]["reason"] == "stale_observer_session"
+    assert error_event["payload"]["status"] == "error"
+
+
+def test_dashboard_refresh_marks_unupdated_open_session_as_error(tmp_path, monkeypatch) -> None:
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
+    session = hub.create_session("ask_antigravity", "fake-model")
+    monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 30.0)
+
+    listed = hub.list_sessions()[0]
+
+    assert listed["session_id"] == session.session_id
+    assert listed["status"] == "error"
+
+
 def test_rename_conversation_updates_root_title_and_persists(tmp_path) -> None:
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
     session = hub.create_session("ask_antigravity", "fake-model", title="기존 제목")

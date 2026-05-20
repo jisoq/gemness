@@ -78,6 +78,35 @@ def test_runner_missing_command_returns_clear_error(tmp_path) -> None:
     assert "Antigravity CLI not found" in result.message
 
 
+def test_runner_reprobes_after_failed_capability_probe(tmp_path, monkeypatch) -> None:
+    runner = AgyCliRunner(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_command="agy", agy_capture_mode="pipe"))
+    help_calls = 0
+
+    def fake_run(args, **kwargs):  # noqa: ANN001, ANN003
+        nonlocal help_calls
+        if args[-1] == "--version":
+            return subprocess.CompletedProcess(args, 0, stdout="1.0.0\n", stderr="")
+        if args[-1] == "--help":
+            help_calls += 1
+            if help_calls == 1:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="temporary failure")
+            return subprocess.CompletedProcess(args, 0, stdout=DEFAULT_HELP, stderr="")
+        raise AssertionError(f"Unexpected probe command: {args!r}")
+
+    monkeypatch.setattr("gemness.runner._executable_exists", lambda executable: True)
+    monkeypatch.setattr("gemness.runner.subprocess.run", fake_run)
+
+    failed = runner.probe_capabilities(tmp_path)
+    recovered = runner.probe_capabilities(tmp_path)
+    cached = runner.probe_capabilities(tmp_path)
+
+    assert failed.available is False
+    assert recovered.available is True
+    assert recovered.print_flag == "-p"
+    assert cached is recovered
+    assert help_calls == 2
+
+
 def test_runner_uses_print_mode_and_never_unsupported_flags(tmp_path) -> None:
     command, record_path = make_fake_agy(tmp_path, stdout="ok")
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
@@ -162,6 +191,18 @@ def test_runner_reports_auth_required_from_stderr(tmp_path) -> None:
     assert "authentication is required" in result.message
 
 
+def test_runner_does_not_treat_auth_words_in_success_stdout_as_auth_required(tmp_path) -> None:
+    command, _record_path = make_fake_agy(tmp_path, stdout="This answer discusses authorization and login flows.")
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False, agy_command=command, agy_timeout_sec=5, agy_capture_mode="pipe"))
+
+    result = runner.run("explain auth", session_id=session.session_id, hub=hub, cwd=tmp_path)
+
+    assert result.status == "completed"
+    assert result.metadata["auth_status"] == "ok"
+
+
 def test_runner_reports_empty_success_output_as_error(tmp_path) -> None:
     command, _record_path = make_fake_agy(tmp_path, stdout="", exit_code=0)
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
@@ -213,25 +254,25 @@ def test_runner_uses_native_conversation_flag_when_requested(tmp_path) -> None:
     assert hub.get_session(session.session_id, raw=True)["agy_conversation_id"] == native_id
 
 
-def test_runner_uses_native_continue_when_requested_without_conversation_id(tmp_path) -> None:
+def test_runner_does_not_use_native_continue_without_conversation_id(tmp_path) -> None:
     command, record_path = make_fake_agy(tmp_path, stdout="ok")
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
     session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL)
     runner = AgyCliRunner(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False, agy_command=command, agy_timeout_sec=5, agy_capture_mode="pipe"))
 
-    result = runner.run("follow up", session_id=session.session_id, hub=hub, cwd=tmp_path, use_native_continue=True)
+    result = runner.run("follow up", session_id=session.session_id, hub=hub, cwd=tmp_path)
 
     envelope = json.loads(result.stdout)
     assert result.status == "completed"
-    assert json.loads(record_path.read_text(encoding="utf-8")) == ["--continue", "-p", "follow up"]
-    assert envelope["metadata"]["native_session_mode"] == "continue"
+    assert json.loads(record_path.read_text(encoding="utf-8")) == ["-p", "follow up"]
+    assert envelope["metadata"]["native_session_mode"] == "new"
+    assert envelope["metadata"]["agy_conversation_id"] is None
 
 
-def test_runner_detects_native_conversation_id_from_conversation_file(tmp_path, monkeypatch) -> None:
+def test_runner_does_not_infer_native_conversation_id_from_conversation_file(tmp_path) -> None:
     native_id = "9b68b5b2-b7f5-4a82-9aa3-8fcd2e831517"
     conversation_dir = tmp_path / "agy-conversations"
     command, _record_path = make_fake_agy(tmp_path, stdout="ok", conversation_dir=conversation_dir, conversation_id=native_id)
-    monkeypatch.setattr("gemness.runner._agy_conversation_dir", lambda: conversation_dir)
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
     session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL)
     runner = AgyCliRunner(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False, agy_command=command, agy_timeout_sec=5, agy_capture_mode="pipe"))
@@ -242,9 +283,10 @@ def test_runner_detects_native_conversation_id_from_conversation_file(tmp_path, 
     raw_session = hub.get_session(session.session_id, raw=True)
     raw_conversation = hub.get_conversation(session.conversation_id, raw=True)
     assert result.status == "completed"
-    assert envelope["metadata"]["agy_conversation_id"] == native_id
-    assert raw_session["agy_conversation_id"] == native_id
-    assert raw_conversation["current_agy_conversation_id"] == native_id
+    assert (conversation_dir / f"{native_id}.pb").exists()
+    assert envelope["metadata"]["agy_conversation_id"] is None
+    assert raw_session["agy_conversation_id"] != native_id
+    assert raw_conversation["current_agy_conversation_id"] != native_id
 
 
 def make_fake_agy(

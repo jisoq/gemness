@@ -31,7 +31,6 @@ class _FollowUpPlan:
     branch_from_run_id: str | None
     cwd: Path | None
     native_conversation_id: str | None
-    use_native_continue: bool
     fallback_used: bool
     fallback_reason: str | None
 
@@ -92,7 +91,7 @@ class GemnessService:
             antigravity["conversation_flags"] = {
                 "continue": capabilities.supports_continue,
                 "conversation": capabilities.supports_conversation,
-                "used_by_gemness": capabilities.supports_continue or capabilities.supports_conversation,
+                "used_by_gemness": capabilities.supports_conversation,
             }
             if capabilities.error:
                 warnings.append(capabilities.error)
@@ -206,7 +205,6 @@ class GemnessService:
                 fallback_used=plan.fallback_used,
                 fallback_reason=plan.fallback_reason,
                 native_conversation_id=plan.native_conversation_id,
-                use_native_continue=plan.use_native_continue,
             )
 
     def start_follow_up(self, parent_session_id: str, instruction: str) -> str:
@@ -239,7 +237,6 @@ class GemnessService:
                     fallback_used=plan.fallback_used,
                     fallback_reason=plan.fallback_reason,
                     native_conversation_id=plan.native_conversation_id,
-                    use_native_continue=plan.use_native_continue,
                 )
 
         threading.Thread(target=run, daemon=True).start()
@@ -261,7 +258,6 @@ class GemnessService:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
-        use_native_continue: bool = False,
     ) -> dict[str, Any]:
         title = _session_title(title_source or prompt, tool_name)
         session = self._session(
@@ -291,7 +287,6 @@ class GemnessService:
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             native_conversation_id=native_conversation_id,
-            use_native_continue=use_native_continue,
         )
         if result.status == "interrupted":
             retry_result = self._retry_text(tool_name, session_id, prompt_to_send, result, cwd)
@@ -583,11 +578,11 @@ class GemnessService:
         else:
             fallback_reason = None
         latest = self.hub.is_latest_run(parent_session_id)
-        supports_conversation, supports_continue = self._native_continuation_support(cwd)
+        supports_conversation = self._native_conversation_supported(cwd)
         native_conversation_id = self._native_agy_conversation_id(parent) if supports_conversation else None
         if latest:
             root_run_id = self.hub.root_run_id(parent.conversation_id)
-            if native_conversation_id or supports_continue:
+            if native_conversation_id:
                 return _FollowUpPlan(
                     prompt=instruction,
                     conversation_id=parent.conversation_id,
@@ -597,9 +592,8 @@ class GemnessService:
                     branch_from_run_id=None,
                     cwd=cwd,
                     native_conversation_id=native_conversation_id,
-                    use_native_continue=native_conversation_id is None,
-                    fallback_used=fallback_reason is not None or native_conversation_id is None,
-                    fallback_reason=fallback_reason or ("native_continue_without_conversation_id" if native_conversation_id is None else None),
+                    fallback_used=fallback_reason is not None,
+                    fallback_reason=fallback_reason,
                 )
             return _FollowUpPlan(
                 prompt=self.hub.build_follow_up_prompt(parent_session_id, instruction),
@@ -610,9 +604,9 @@ class GemnessService:
                 branch_from_run_id=None,
                 cwd=cwd,
                 native_conversation_id=None,
-                use_native_continue=False,
                 fallback_used=True,
-                fallback_reason=fallback_reason or "native_conversation_flags_unavailable",
+                fallback_reason=fallback_reason
+                or ("native_conversation_id_unavailable" if supports_conversation else "native_conversation_flag_unavailable"),
             )
         return _FollowUpPlan(
             prompt=self.hub.build_follow_up_prompt(parent_session_id, instruction),
@@ -623,7 +617,6 @@ class GemnessService:
             branch_from_run_id=parent_session_id,
             cwd=cwd,
             native_conversation_id=None,
-            use_native_continue=False,
             fallback_used=True,
             fallback_reason=fallback_reason or "branch_from_past_run",
         )
@@ -639,10 +632,10 @@ class GemnessService:
                 return value
         return None
 
-    def _native_continuation_support(self, cwd: Path | None) -> tuple[bool, bool]:
+    def _native_conversation_supported(self, cwd: Path | None) -> bool:
         probe_method = getattr(self.runner, "probe_capabilities", None)
         capabilities = probe_method(cwd) if callable(probe_method) else AgyCliRunner(self.config).probe_capabilities(cwd)
-        return bool(capabilities.supports_conversation), bool(capabilities.supports_continue)
+        return bool(capabilities.supports_conversation)
 
     def _conversation_lock(self, conversation_id: str | None) -> threading.Lock:
         key = conversation_id or "__new_conversation__"

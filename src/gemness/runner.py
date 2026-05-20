@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -18,13 +17,12 @@ from .observer import ObserverHub
 
 AUTH_REQUIRED_MARKERS = (
     "not logged in",
-    "log in",
-    "login",
-    "sign in",
-    "signin",
-    "authenticate",
-    "authentication",
-    "authorization",
+    "not authenticated",
+    "please log in",
+    "please login",
+    "please sign in",
+    "authentication required",
+    "authorization required",
     "authorization code",
     "browser-based google sign-in",
 )
@@ -36,7 +34,6 @@ CAPTURE_MODE_WINPTY = "winpty"
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_SINGLE_RE = re.compile(r"\x1b[@-Z\\-_]")
-_AGY_CONVERSATION_DIR = "~/.gemini/antigravity-cli/conversations"
 
 
 @dataclass(slots=True)
@@ -225,7 +222,6 @@ class AgyRunner(Protocol):
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
-        use_native_continue: bool = False,
     ) -> AgyRunResult:
         ...
 
@@ -246,7 +242,6 @@ class AgyCliRunner:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
-        use_native_continue: bool = False,
     ) -> AgyRunResult:
         capabilities = self.probe_capabilities(cwd)
         if not capabilities.available:
@@ -258,7 +253,6 @@ class AgyCliRunner:
             capabilities,
             prompt,
             native_conversation_id=native_conversation_id,
-            use_native_continue=use_native_continue,
         )
         capture_mode = _resolve_capture_mode(self.config)
         hub.record_run_command(
@@ -274,7 +268,6 @@ class AgyCliRunner:
         )
         started = time.monotonic()
         env = gemness_env(self.config)
-        conversation_snapshot = _conversation_snapshot()
         try:
             running = _start_agy_command(command, cwd, env, capture_mode)
         except FileNotFoundError:
@@ -318,9 +311,6 @@ class AgyCliRunner:
         raw_stdout = running.stdout()
         stderr = running.stderr()
         exit_code = running.poll()
-        detected_conversation_id = native_conversation_id or _detect_updated_conversation(conversation_snapshot)
-        if detected_conversation_id:
-            hub.set_agy_conversation_id(session_id, detected_conversation_id, source="native_cli", phase=phase)
         auth_status = detect_auth_status(raw_stdout, stderr, exit_code)
         if exit_code == 0 and not raw_stdout.strip():
             auth_status = "unknown"
@@ -333,7 +323,7 @@ class AgyCliRunner:
             exit_code=exit_code,
             auth_status=auth_status,
             capture_mode=running.capture_mode,
-            agy_conversation_id=detected_conversation_id,
+            agy_conversation_id=native_conversation_id,
             native_session_mode=native_session_mode,
         )
         envelope = _response_envelope(raw_stdout, metadata)
@@ -376,8 +366,7 @@ class AgyCliRunner:
             message = f"Antigravity CLI not found: {self.config.agy_command}"
             if fallback_paths:
                 message += f"; checked fallback paths: {', '.join(fallback_paths)}"
-            self._capabilities = AgyCapabilities(command=command, available=False, resolved=resolved, error=message)
-            return self._capabilities
+            return AgyCapabilities(command=command, available=False, resolved=resolved, error=message)
         try:
             version_completed = subprocess.run(
                 [*command, "--version"],
@@ -404,11 +393,9 @@ class AgyCliRunner:
                 env=gemness_env(self.config),
             )
         except FileNotFoundError:
-            self._capabilities = AgyCapabilities(command=command, available=False, resolved=resolved, error=f"Antigravity CLI not found: {self.config.agy_command}")
-            return self._capabilities
+            return AgyCapabilities(command=command, available=False, resolved=resolved, error=f"Antigravity CLI not found: {self.config.agy_command}")
         except (OSError, subprocess.TimeoutExpired) as exc:
-            self._capabilities = AgyCapabilities(command=command, available=False, resolved=resolved, error=f"Antigravity CLI capability probe failed: {exc}")
-            return self._capabilities
+            return AgyCapabilities(command=command, available=False, resolved=resolved, error=f"Antigravity CLI capability probe failed: {exc}")
 
         help_text = "\n".join(part for part in [help_completed.stdout, help_completed.stderr] if part)
         version = (version_completed.stdout or version_completed.stderr).strip() or None
@@ -420,7 +407,7 @@ class AgyCliRunner:
         print_flag = _select_print_flag(help_text)
         if print_flag is None:
             warnings.append("Antigravity CLI help does not advertise -p, --print, or --prompt.")
-        self._capabilities = AgyCapabilities(
+        capabilities = AgyCapabilities(
             command=command,
             available=help_completed.returncode == 0,
             resolved=resolved,
@@ -432,7 +419,9 @@ class AgyCliRunner:
             warnings=warnings,
             error=None if help_completed.returncode == 0 else "Antigravity CLI help check failed",
         )
-        return self._capabilities
+        if capabilities.available and capabilities.print_flag:
+            self._capabilities = capabilities
+        return capabilities
 
 
 def probe_auth(command: list[str], print_flag: str | None, cwd: Path | None, config: GemnessConfig) -> AgyAuthProbe:
@@ -680,15 +669,11 @@ def _build_agy_command(
     prompt: str,
     *,
     native_conversation_id: str | None,
-    use_native_continue: bool,
 ) -> tuple[list[str], str]:
     command = [*capabilities.command]
     if native_conversation_id and capabilities.supports_conversation:
         command.extend(["--conversation", native_conversation_id])
         native_session_mode = "conversation"
-    elif use_native_continue and capabilities.supports_continue:
-        command.append("--continue")
-        native_session_mode = "continue"
     else:
         native_session_mode = "new"
     command.extend([capabilities.print_flag or "-p", prompt])
@@ -732,57 +717,13 @@ def _conversation_id(hub: ObserverHub, session_id: str) -> str | None:
     return session.conversation_id if session is not None else None
 
 
-def _conversation_snapshot() -> dict[str, tuple[int, int]]:
-    directory = _agy_conversation_dir()
-    if not directory.exists():
-        return {}
-    snapshot: dict[str, tuple[int, int]] = {}
-    for path in directory.glob("*.pb"):
-        if not _is_uuid(path.stem):
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        snapshot[path.stem] = (stat.st_mtime_ns, stat.st_size)
-    return snapshot
-
-
-def _detect_updated_conversation(before: dict[str, tuple[int, int]]) -> str | None:
-    directory = _agy_conversation_dir()
-    if not directory.exists():
-        return None
-    candidates: list[tuple[int, str]] = []
-    for path in directory.glob("*.pb"):
-        if not _is_uuid(path.stem):
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        current = (stat.st_mtime_ns, stat.st_size)
-        if before.get(path.stem) != current:
-            candidates.append((stat.st_mtime_ns, path.stem))
-    if not candidates:
-        return None
-    return max(candidates)[1]
-
-
-def _agy_conversation_dir() -> Path:
-    return Path(os.path.expanduser(_AGY_CONVERSATION_DIR))
-
-
-def _is_uuid(value: str) -> bool:
-    try:
-        uuid.UUID(value)
-    except ValueError:
-        return False
-    return True
-
-
 def detect_auth_status(stdout: str, stderr: str, exit_code: int | None) -> str:
-    text = f"{stdout}\n{stderr}".lower()
-    if any(marker in text for marker in AUTH_REQUIRED_MARKERS):
+    if exit_code == 0 and stdout.strip():
+        return "ok"
+    diagnostic = stderr.strip().lower()
+    if exit_code != 0 and not diagnostic:
+        diagnostic = stdout.strip().lower()
+    if any(marker in diagnostic for marker in AUTH_REQUIRED_MARKERS):
         return "auth_required"
     if exit_code == 0:
         return "ok"

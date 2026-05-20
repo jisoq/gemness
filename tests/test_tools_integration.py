@@ -54,7 +54,6 @@ class FakeRunner:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
-        use_native_continue: bool = False,
     ) -> AgyRunResult:
         self.calls.append(
             {
@@ -65,7 +64,6 @@ class FakeRunner:
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
                 "native_conversation_id": native_conversation_id,
-                "use_native_continue": use_native_continue,
             }
         )
         hub.set_status(session_id, "running", "antigravity.started", {"model": DEFAULT_MODEL_LABEL, "streaming": False}, role="gemness", phase=phase)
@@ -350,21 +348,24 @@ def test_completed_follow_up_uses_native_conversation_id_when_available(tmp_path
         assert service.hub.get_session(second["session_id"])["parent_session_id"] == first["session_id"]
         assert service.runner.calls[1]["prompt"] == "go deeper"
         assert service.runner.calls[1]["native_conversation_id"] == native_id
-        assert service.runner.calls[1]["use_native_continue"] is False
         assert second["conversation_id"] == first["conversation_id"]
     finally:
         service.shutdown()
 
 
-def test_completed_follow_up_uses_native_continue_when_id_is_unavailable(tmp_path) -> None:
+def test_completed_follow_up_uses_summary_when_native_id_is_unavailable(tmp_path) -> None:
     service = make_service(tmp_path, ["first", "second"])
     try:
         first = service.ask_antigravity("first prompt")
+        service.hub.conversations[first["conversation_id"]].summary = "First answer happened."
         second = service.follow_up_antigravity(first["session_id"], "go deeper")
         assert second["status"] == "completed"
-        assert service.runner.calls[1]["prompt"] == "go deeper"
-        assert service.runner.calls[1]["native_conversation_id"] is None
-        assert service.runner.calls[1]["use_native_continue"] is True
+        call = service.runner.calls[1]
+        assert "Context summary:\nFirst answer happened." in call["prompt"]
+        assert "User follow-up:\ngo deeper" in call["prompt"]
+        assert call["native_conversation_id"] is None
+        assert call["fallback_used"] is True
+        assert call["fallback_reason"] == "native_conversation_id_unavailable"
     finally:
         service.shutdown()
 
@@ -381,9 +382,8 @@ def test_completed_follow_up_uses_summary_when_native_flags_are_unavailable(tmp_
         assert "Context summary:\nFirst answer happened." in call["prompt"]
         assert "User follow-up:\ngo deeper" in call["prompt"]
         assert call["native_conversation_id"] is None
-        assert call["use_native_continue"] is False
         assert call["fallback_used"] is True
-        assert call["fallback_reason"] == "native_conversation_flags_unavailable"
+        assert call["fallback_reason"] == "native_conversation_flag_unavailable"
     finally:
         service.shutdown()
 
@@ -405,7 +405,6 @@ def test_middle_turn_follow_up_creates_branch_conversation(tmp_path) -> None:
         assert "User follow-up:" in service.runner.calls[2]["prompt"]
         assert "Recent turns:" not in service.runner.calls[2]["prompt"]
         assert service.runner.calls[2]["native_conversation_id"] is None
-        assert service.runner.calls[2]["use_native_continue"] is False
     finally:
         service.shutdown()
 

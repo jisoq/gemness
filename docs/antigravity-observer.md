@@ -38,7 +38,7 @@ Gemness does not claim token-level streaming. Observer UI events are final-outpu
 
 ## Conversation Continuity
 
-Gemness keeps conversation continuity inside Observer transcripts and native Antigravity CLI conversations. `follow_up_antigravity` prefers `agy --conversation <id> -p <prompt>` when a real Antigravity conversation ID has been detected from the local CLI conversation store. If that ID is unavailable, it can use `agy --continue -p <prompt>` for the latest conversation or fall back to a short summary prompt. It does not forward prior prompts, responses, diffs, file dumps, logs, or transcript payloads.
+Gemness keeps conversation continuity inside Observer transcripts and native Antigravity CLI conversations. `follow_up_antigravity` uses `agy --conversation <id> -p <prompt>` only when Gemness has a trusted Antigravity conversation UUID stored for the run. If that ID is unavailable, Gemness starts a new `agy -p` call with a short conversation-summary prompt. It does not use global `agy --continue`, and it does not forward prior prompts, responses, diffs, file dumps, logs, or transcript payloads.
 
 ## Health Checks
 
