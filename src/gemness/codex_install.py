@@ -33,12 +33,9 @@ TOOL_NAMES = (
 AUTO_APPROVE_TOOLS = {
     "antigravity_health",
     "ask_antigravity",
-    "start_antigravity",
     "follow_up_antigravity",
-    "start_follow_up_antigravity",
     "get_antigravity_run",
     "await_antigravity_run",
-    "cancel_antigravity_run",
 }
 
 

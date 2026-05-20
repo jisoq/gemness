@@ -130,7 +130,7 @@ def test_runner_uses_print_mode_and_never_unsupported_flags(tmp_path) -> None:
     assert result.status == "completed"
     assert recorded == ["-p", "hello"]
     assert not any(flag in recorded for flag in unsupported)
-    assert hub.get_session(session.session_id)["command_argv"][-2:] == ["-p", "hello"]
+    assert hub.get_session(session.session_id)["command_argv"][-2:] == ["-p", "[PROMPT_REDACTED]"]
 
 
 def test_runner_detaches_agy_stdin(tmp_path, monkeypatch) -> None:
@@ -168,15 +168,22 @@ def test_runner_synthesizes_non_streaming_envelope_and_metadata(tmp_path) -> Non
     assert envelope["metadata"]["run_id"] == session.session_id
     assert envelope["metadata"]["conversation_id"] == session.conversation_id
     assert envelope["metadata"]["cwd"] == str(tmp_path)
+    assert envelope["metadata"]["command"][-2:] == ["-p", "[PROMPT_REDACTED]"]
     assert envelope["metadata"]["exit_code"] == 0
     assert envelope["metadata"]["auth_status"] == "ok"
     assert envelope["metadata"]["streaming"] is False
     assert result.stderr == "diagnostic\n"
     events = hub.get_events(session.session_id, raw=True)
+    response_event = next(event for event in events if event["type"] == "antigravity.response")
     assert "antigravity.started" in [event["type"] for event in events]
     assert "antigravity.response" in [event["type"] for event in events]
     assert "antigravity.stderr" in [event["type"] for event in events]
     assert "antigravity.exited" in [event["type"] for event in events]
+    assert response_event["payload"]["response_preview"] == "final answer\n"
+    assert "response" not in response_event["payload"]
+    assert "stdout" not in response_event["payload"]
+    artifact_path = Path(response_event["payload"]["stdout_artifact"]["path"])
+    assert artifact_path.read_text(encoding="utf-8") == "final answer\n"
 
 
 def test_runner_reports_auth_required_from_stderr(tmp_path) -> None:
@@ -252,6 +259,7 @@ def test_runner_uses_native_conversation_flag_when_requested(tmp_path) -> None:
     assert recorded == ["--conversation", native_id, "-p", "follow up"]
     assert envelope["metadata"]["native_session_mode"] == "conversation"
     assert envelope["metadata"]["agy_conversation_id"] == native_id
+    assert envelope["metadata"]["command"][-2:] == ["-p", "[PROMPT_REDACTED]"]
     assert hub.get_session(session.session_id, raw=True)["agy_conversation_id"] == native_id
 
 

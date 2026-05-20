@@ -1208,7 +1208,7 @@ INDEX_HTML = r"""<!doctype html>
             direction: "agents_to_antigravity",
             title: "Agents -> Antigravity",
             timestamp: event.ts,
-            body: payload.prompt || "프롬프트가 Antigravity CLI로 전송되었습니다.",
+            body: payload.prompt || payload.prompt_preview || "프롬프트가 Antigravity CLI로 전송되었습니다.",
             meta: { 단계: "Antigravity에 전송됨" },
             rawEvent: event
           };
@@ -1224,14 +1224,15 @@ INDEX_HTML = r"""<!doctype html>
           };
         case "antigravity.response": {
           const parsed = parseAntigravityEnvelope(payload.response || "");
-          const body = parsed.response ?? payload.response ?? "";
+          const body = parsed.response ?? payload.response_preview ?? payload.response ?? "";
+          const metadata = parsed.metadata ?? payload.metadata;
           return {
             speaker: "antigravity",
             direction: "antigravity_to_agents",
             title: parsed.error ? "Antigravity -> Agents · 오류 포함" : "Antigravity -> Agents",
             timestamp: event.ts,
             body: body || "Antigravity가 빈 응답을 반환했습니다.",
-            meta: { stats: parsed.stats, metadata: parsed.metadata, error: parsed.error, streaming: parsed.metadata?.streaming ?? payload.streaming, 형식: parsed.envelope ? "JSON envelope" : "원문 응답" },
+            meta: { stats: parsed.stats, metadata, error: parsed.error, streaming: metadata?.streaming ?? payload.streaming, artifact: payload.stdout_artifact, 형식: parsed.envelope ? "JSON envelope" : payload.response_preview ? "stdout preview" : "원문 응답" },
             severity: parsed.error ? "error" : "",
             rawEvent: event
           };
@@ -1252,9 +1253,9 @@ INDEX_HTML = r"""<!doctype html>
         case "repair.started":
           return turn(event, "observer", "system", "Observer", `응답 복구를 1회 시도했습니다.\n${repairReason(payload)}`, {}, "warn");
         case "repair.prompt_sent":
-          return turn(event, "agents", "agents_to_antigravity", "Agents -> Antigravity", payload.prompt || "구조 복구용 프롬프트를 보냈습니다.", { 단계: "응답 복구" });
+          return turn(event, "agents", "agents_to_antigravity", "Agents -> Antigravity", payload.prompt || payload.prompt_preview || "구조 복구용 프롬프트를 보냈습니다.", { 단계: "응답 복구", chars: payload.prompt_chars });
         case "repair.response":
-          return turn(event, "antigravity", "antigravity_to_agents", "Antigravity -> Agents", formatReadable(payload.response || ""), { 단계: "복구 응답" });
+          return turn(event, "antigravity", "antigravity_to_agents", "Antigravity -> Agents", formatReadable(payload.response || payload.response_preview || ""), { 단계: "복구 응답", chars: payload.response_chars });
         case "repair.validation_passed":
           return turn(event, "observer", "system", "Observer", "복구된 JSON이 schema 검증을 통과했습니다.", { 결과: "복구 성공" });
         case "repair.validation_failed":
@@ -1279,7 +1280,7 @@ INDEX_HTML = r"""<!doctype html>
       const prompt = event.payload?.prompt;
       if (!prompt) return false;
       return allEvents.slice(index + 1).some((candidate) =>
-        candidate.type === "prompt.sent" && candidate.payload?.prompt === prompt
+        candidate.type === "prompt.sent" && (candidate.payload?.prompt === prompt || candidate.payload?.prompt_ref === "prompt.rendered")
       );
     }
     function turn(event, speaker, direction, title, body, meta = {}, severity = "") {
@@ -1379,6 +1380,7 @@ INDEX_HTML = r"""<!doctype html>
     function resultSummaryText(result) {
       if (result.text) return result.text;
       if (result.data) return formatReadable(result.data);
+      if (result.response_preview) return formatReadable(result.response_preview);
       if (result.raw_response) return formatReadable(result.raw_response);
       if (result.message) return result.message;
       return "세션이 완료되었습니다.";

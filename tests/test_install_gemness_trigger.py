@@ -68,4 +68,6 @@ def test_skill_front_matter_is_yamlish() -> None:
     text = install_gemness_trigger.SKILL_CONTENT
     assert text.startswith("---\n")
     assert "\n---\n\n# Gemness Skill" in text
+    assert "antigravity reviewer" in text
+    assert "advanced detached/background APIs" in text
     assert "//" not in text.split("---", 2)[1]

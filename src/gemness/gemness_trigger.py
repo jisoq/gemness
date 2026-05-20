@@ -17,19 +17,20 @@ When the user says **"use gemness"** or clearly asks to use Gemness, treat it as
 
 Expected behavior:
 
-1. Prefer the MCP tools exposed by the `gemness` server.
-2. If `antigravity_health` is available, call it first when connection status is uncertain.
-3. Choose the tool based on the task:
+1. The Codex main agent should delegate the Antigravity work to an `antigravity reviewer` subagent instead of calling Gemness directly in the main context. Prefer a lightweight high-reasoning reviewer profile such as `gpt-5.5-mini` with `xhigh` reasoning when available.
+2. The reviewer subagent calls the blocking final-result Gemness tools and waits there until Antigravity finishes.
+3. If connection status is uncertain and `antigravity_health` is available, the reviewer subagent may call it first.
+4. The reviewer subagent chooses the final-result tool based on the task:
    - Use `review_current_diff_with_antigravity` for current workspace change review.
    - Use `ask_antigravity_json` when a structured JSON result is needed.
    - Use `ask_antigravity` for general second opinion, architecture critique, debugging advice, or cross-checking.
    - Use `follow_up_antigravity` with the previous `session_id` when continuing the same Gemness observer conversation.
-4. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
-5. Treat Antigravity output as advisory, not authoritative.
-6. Verify Antigravity's suggestions before applying them.
-7. Summarize what Antigravity said and what was accepted, rejected, or left unverified.
-8. If the MCP server or tool is unavailable, say that Gemness is not connected and provide the next setup step instead of silently skipping Antigravity.
-9. Do not send secrets, private keys, credentials, or raw `.env` values to Antigravity.
+5. The subagent must return a concise final advisory summary to the parent. It must not return only `run_id`, `observer_url`, or `accepted`.
+6. The main agent verifies the advisory result before applying changes and reports what was accepted, rejected, or left uncertain.
+7. `start_antigravity`, `get_antigravity_run`, `await_antigravity_run`, and `cancel_antigravity_run` are advanced background/batch APIs. Use them only when the user explicitly asks for detached/background execution.
+8. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
+9. If the MCP server or tool is unavailable, say that Gemness is not connected and provide the next setup step instead of silently skipping Antigravity.
+10. Do not send secrets, private keys, credentials, or raw `.env` values to Antigravity.
 
 Trigger phrases include:
 
@@ -54,17 +55,20 @@ Use this skill when the user says `use gemness`, mentions Gemness, or asks to co
 
 ## Procedure
 
-1. If connection status is uncertain and `antigravity_health` exists, call it first.
-2. Select the right tool:
+1. Spawn or delegate to an `antigravity reviewer` subagent when the environment supports subagents. Prefer a lightweight high-reasoning reviewer profile such as `gpt-5.5-mini` with `xhigh` reasoning when available. Keep the main Codex context focused on orchestration and verification.
+2. The reviewer subagent should call Gemness, wait for completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status.
+3. If connection status is uncertain and `antigravity_health` exists, the reviewer may call it first.
+4. Select the final-result tool:
    - `review_current_diff_with_antigravity` for current workspace change review.
    - `ask_antigravity_json` for schema-constrained structured output.
    - `ask_antigravity` for general second opinion or reasoning review.
    - `follow_up_antigravity` for continuing the same Gemness observer conversation.
-3. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
-4. Do not include secrets or credentials.
-5. Treat Antigravity's result as advisory.
-6. Verify before applying changes.
-7. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
+5. Treat `start_*`, `get_antigravity_run`, `await_antigravity_run`, and `cancel_antigravity_run` as advanced detached/background APIs. Use them only when the user explicitly asks for that mode.
+6. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
+7. Do not include secrets or credentials.
+8. Treat Antigravity's result as advisory.
+9. Verify before applying changes.
+10. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
 
 ## Failure behavior
 

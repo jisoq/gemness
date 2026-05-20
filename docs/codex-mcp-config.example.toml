@@ -28,13 +28,13 @@ approval_mode = "approve"
 approval_mode = "approve"
 
 [mcp_servers.gemness.tools."start_antigravity"]
-approval_mode = "approve"
+approval_mode = "prompt"
 
 [mcp_servers.gemness.tools."follow_up_antigravity"]
 approval_mode = "approve"
 
 [mcp_servers.gemness.tools."start_follow_up_antigravity"]
-approval_mode = "approve"
+approval_mode = "prompt"
 
 [mcp_servers.gemness.tools."ask_antigravity_json"]
 approval_mode = "prompt"
@@ -55,7 +55,7 @@ approval_mode = "approve"
 approval_mode = "approve"
 
 [mcp_servers.gemness.tools."cancel_antigravity_run"]
-approval_mode = "approve"
+approval_mode = "prompt"
 
 [mcp_servers.gemness.env]
 GEMNESS_OBSERVER_ENABLED = "true"

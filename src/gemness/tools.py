@@ -24,6 +24,21 @@ from .schema_validation import validate_json_schema, validate_schema_definition
 from .workspace import normalized_allowed_roots, resolve_workspace_cwd
 
 
+RESPONSE_PREVIEW_CHARS = 4000
+PROGRESS_NOISE_PATTERNS = (
+    re.compile(r"^\s*(?:Searching|Reading|Inspecting|Scanning|Running|Waiting)\b.{0,160}(?:\.\.\.|…)\s*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:I(?:'|’)ll|I will|I(?:'|’)m going to|Let me)\s+"
+        r"(?:inspect|search|check|look|scan|review|find|run|open|read)\b.{0,160}(?:\.\.\.|…)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*.*(?:background task|background job).*(?:wait|waiting|complete|finished).*$", re.IGNORECASE),
+    re.compile(r"^\s*.*백그라운드\s*작업.*(?:대기|기다|완료|종료).*$"),
+    re.compile(r"^\s*.*(?:파일|코드|워크스페이스|리포지토리|저장소).*(?:검색|확인|살펴보|찾아보).*(?:중|겠습니다|볼게요).*$"),
+    re.compile(r"^\s*(?:잠시\s*)?(?:대기|기다리)겠(?:습니다|어요)\.?\s*$"),
+)
+
+
 @dataclass(slots=True)
 class _FollowUpPlan:
     prompt: str
@@ -455,6 +470,7 @@ class GemnessService:
             return self._runner_error(session_id, observer_url, result)
 
         text, envelope = extract_cli_response(result.stdout)
+        clean_text = clean_advisory_text(text)
         stats = _merged_stats(result.stats, envelope)
         metadata = _result_metadata(result, envelope)
         envelope_error = _envelope_error(envelope)
@@ -462,7 +478,8 @@ class GemnessService:
             return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata)
         payload = {
             "status": "completed",
-            "text": text,
+            "text": clean_text,
+            "summary": _advisory_summary(clean_text),
             "session_id": session_id,
             "run_id": session.run_id or session_id,
             "conversation_id": session.conversation_id,
@@ -470,6 +487,8 @@ class GemnessService:
             "stats": stats,
             "metadata": metadata,
         }
+        if clean_text != text:
+            payload["filtered_progress"] = True
         if envelope is not None:
             payload["stats"] = stats | {"cli_envelope_keys": sorted(envelope.keys())}
         self.hub.set_status(session_id, "completed", "session.completed", {"result": payload})
@@ -546,7 +565,7 @@ class GemnessService:
             payload = {
                 "status": "valid",
                 "data": data,
-                "raw_response": response_text,
+                "response_preview": _preview_text(response_text),
                 "session_id": session_id,
                 "run_id": session.run_id or session_id,
                 "conversation_id": session.conversation_id,
@@ -575,7 +594,7 @@ class GemnessService:
             payload = {
                 "status": "valid",
                 "data": repair["data"],
-                "raw_response": repair["raw_response"],
+                "response_preview": _preview_text(repair["raw_response"]),
                 "session_id": session_id,
                 "run_id": session.run_id or session_id,
                 "conversation_id": session.conversation_id,
@@ -593,7 +612,7 @@ class GemnessService:
             return self._runner_error(session_id, observer_url, repair["result"])
         payload = {
             "status": "invalid",
-            "raw_response": response_text,
+            "response_preview": _preview_text(response_text),
             "parse_error": parse_error,
             "validation_errors": validation_errors,
             "session_id": session_id,
@@ -632,7 +651,13 @@ class GemnessService:
             {"parse_error": parse_error, "validation_errors": validation_errors},
         )
         repair_prompt = _repair_prompt(schema, raw_response, parse_error, validation_errors)
-        self.hub.append_event(session_id, "repair.prompt_sent", "codex_mcp", {"prompt": repair_prompt}, phase="repair")
+        self.hub.append_event(
+            session_id,
+            "repair.prompt_sent",
+            "codex_mcp",
+            {"prompt_preview": _preview_text(repair_prompt), "prompt_chars": len(repair_prompt)},
+            phase="repair",
+        )
         result = self._call_runner(
             repair_prompt,
             session_id=session_id,
@@ -652,7 +677,13 @@ class GemnessService:
         envelope_error = _envelope_error(envelope)
         if envelope_error:
             return {"status": "error", "result": AgyRunResult.error(envelope_error, exit_code=result.exit_code, stderr=result.stderr, stdout=result.stdout, metadata=result.metadata)}
-        self.hub.append_event(session_id, "repair.response", "gemness", {"response": response_text}, phase="repair")
+        self.hub.append_event(
+            session_id,
+            "repair.response",
+            "gemness",
+            {"response_preview": _preview_text(response_text), "response_chars": len(response_text)},
+            phase="repair",
+        )
         data, repair_parse_error, candidate = parse_json_candidate(response_text)
         if repair_parse_error is not None:
             self.hub.append_event(
@@ -1040,6 +1071,34 @@ def _is_uuid(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def clean_advisory_text(text: str) -> str:
+    lines = str(text or "").splitlines()
+    kept = [line for line in lines if not _is_progress_noise_line(line)]
+    cleaned = "\n".join(kept).strip()
+    return cleaned or str(text or "").strip()
+
+
+def _is_progress_noise_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return any(pattern.match(stripped) for pattern in PROGRESS_NOISE_PATTERNS)
+
+
+def _advisory_summary(text: str) -> str:
+    stripped = " ".join(str(text or "").split())
+    if len(stripped) <= 400:
+        return stripped
+    return stripped[:400].rstrip() + "..."
+
+
+def _preview_text(text: str, limit: int = RESPONSE_PREVIEW_CHARS) -> str:
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + f"\n...[truncated {len(value) - limit} chars]"
 
 
 class _NullLock:

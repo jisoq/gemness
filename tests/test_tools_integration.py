@@ -128,12 +128,50 @@ def test_ask_antigravity_happy_path(tmp_path) -> None:
         result = service.ask_antigravity("Say hello")
         assert result["status"] == "completed"
         assert result["text"] == "hello"
+        assert result["summary"] == "hello"
         assert result["session_id"]
         assert result["metadata"]["streaming"] is False
         assert result["observer_url"].startswith("http://127.0.0.1:")
         assert service.hub.get_session(result["session_id"])["title"] == "Say hello"
         events = service.hub.get_events(result["session_id"], raw=False)
         assert "prompt.sent" in [event["type"] for event in events]
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_filters_progress_noise_from_final_result(tmp_path) -> None:
+    noisy = "\n".join(
+        [
+            "Searching repository files...",
+            "백그라운드 작업 완료까지 대기하겠습니다.",
+            "최종 검토 결과입니다.",
+        ]
+    )
+    service = make_service(tmp_path, [noisy])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "completed"
+        assert result["text"] == "최종 검토 결과입니다."
+        assert result["filtered_progress"] is True
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_preserves_advice_that_starts_like_progress(tmp_path) -> None:
+    advice = "\n".join(
+        [
+            "Searching broadly before narrowing the scope is risky advice here.",
+            "Running tests before committing is required.",
+        ]
+    )
+    service = make_service(tmp_path, [advice])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "completed"
+        assert result["text"] == advice
+        assert "filtered_progress" not in result
     finally:
         service.shutdown()
 
@@ -159,6 +197,8 @@ def test_ask_antigravity_json_valid_json(tmp_path) -> None:
         result = service.ask_antigravity_json("Return answer", TEXT_SCHEMA)
         assert result["status"] == "valid"
         assert result["data"] == {"answer": "yes"}
+        assert "raw_response" not in result
+        assert result["response_preview"] == '{"answer":"yes"}'
         assert result["repaired"] is False
         assert result["repair_attempted"] is False
         assert result["repair_succeeded"] is False
@@ -349,6 +389,12 @@ def test_prompt_sends_without_observer_approval_pause(tmp_path) -> None:
         assert result["status"] == "completed"
         assert service.runner.calls[0]["prompt"] == "original"
         assert "prompt.pending_approval" not in [event["type"] for event in events]
+        sent = next(event for event in events if event["type"] == "prompt.sent")
+        rendered = next(event for event in events if event["type"] == "prompt.rendered")
+        assert rendered["payload"]["prompt"] == "original"
+        assert sent["payload"]["prompt_ref"] == "prompt.rendered"
+        assert sent["payload"]["prompt_preview"] == "original"
+        assert "prompt" not in sent["payload"]
     finally:
         service.shutdown()
 

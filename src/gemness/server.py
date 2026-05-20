@@ -23,7 +23,7 @@ TOOLS = [
     },
     {
         "name": "ask_antigravity",
-        "description": "Ask Antigravity CLI for advisory text and expose the call in the local observer UI.",
+        "description": "Blocking final-result Antigravity advisory tool. Intended for an antigravity reviewer subagent in the default Codex flow; returns a cleaned final result and observer URL, not raw transcript.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -36,7 +36,7 @@ TOOLS = [
     },
     {
         "name": "start_antigravity",
-        "description": "Start a detached Antigravity CLI advisory run and return immediately with a run id.",
+        "description": "Advanced background API: start a detached Antigravity CLI advisory run and return immediately with a run id.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -50,7 +50,7 @@ TOOLS = [
     },
     {
         "name": "follow_up_antigravity",
-        "description": "Continue a previous Antigravity observer conversation from a parent session id.",
+        "description": "Blocking final-result follow-up for a previous Antigravity observer conversation. Intended for reviewer subagents in the default Codex flow.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -63,7 +63,7 @@ TOOLS = [
     },
     {
         "name": "start_follow_up_antigravity",
-        "description": "Start a detached follow-up Antigravity run from a previous observer run id.",
+        "description": "Advanced background API: start a detached follow-up Antigravity run from a previous observer run id.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -77,7 +77,7 @@ TOOLS = [
     },
     {
         "name": "ask_antigravity_json",
-        "description": "Ask Antigravity CLI for JSON, validate it against a schema, and expose parse/repair events.",
+        "description": "Blocking final-result Antigravity JSON tool. Validates the final response against a schema and returns data plus observer URL without raw transcript.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -91,7 +91,7 @@ TOOLS = [
     },
     {
         "name": "start_antigravity_json",
-        "description": "Start a detached Antigravity JSON run and validate the final response in the background.",
+        "description": "Advanced background API: start a detached Antigravity JSON run and validate the final response in the background.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -106,7 +106,7 @@ TOOLS = [
     },
     {
         "name": "review_current_diff_with_antigravity",
-        "description": "Ask Antigravity CLI to inspect the current workspace and review repository changes itself.",
+        "description": "Blocking final-result current-diff review. Intended for an antigravity reviewer subagent; Antigravity inspects the workspace itself and Gemness returns cleaned advisory data plus observer URL.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -118,7 +118,7 @@ TOOLS = [
     },
     {
         "name": "start_review_current_diff_with_antigravity",
-        "description": "Start a detached Antigravity current-diff review run.",
+        "description": "Advanced background API: start a detached Antigravity current-diff review run.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -131,7 +131,7 @@ TOOLS = [
     },
     {
         "name": "get_antigravity_run",
-        "description": "Return the current state, final result when available, and recent observer events for a detached Antigravity run.",
+        "description": "Advanced background API: return current state, final result when available, and recent observer events for a detached Antigravity run.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -145,7 +145,7 @@ TOOLS = [
     },
     {
         "name": "await_antigravity_run",
-        "description": "Wait briefly for a detached Antigravity run, then return completion or the current running state.",
+        "description": "Advanced background API: wait briefly for a detached Antigravity run, then return completion or the current running state.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -160,7 +160,7 @@ TOOLS = [
     },
     {
         "name": "cancel_antigravity_run",
-        "description": "Request cancellation for a detached Antigravity run by run id.",
+        "description": "Advanced background API: request cancellation for a detached Antigravity run by run id.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+from pathlib import Path
 
 from gemness.config import GemnessConfig
 from gemness.observer import ObserverHub
@@ -150,6 +151,8 @@ def test_rename_conversation_updates_root_title_and_persists(tmp_path) -> None:
 def test_delete_conversation_removes_terminal_runs_and_transcript_files(tmp_path) -> None:
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
     session = hub.create_session("ask_antigravity", "fake-model", title="삭제할 대화")
+    artifact = hub.write_text_artifact(session.session_id, "stdout.txt", "raw output")
+    extensionless_artifact = hub.write_text_artifact(session.session_id, "raw-output", "raw output")
     hub.set_status(session.session_id, "completed", "session.completed", {"result": {"status": "completed", "text": "done"}})
 
     result = hub.delete_conversation(session.conversation_id)
@@ -159,6 +162,8 @@ def test_delete_conversation_removes_terminal_runs_and_transcript_files(tmp_path
     assert session.session_id not in [item["session_id"] for item in restored.list_sessions()]
     assert session.conversation_id not in [item["conversation_id"] for item in restored.list_conversations()]
     assert not (tmp_path / f"{session.session_id}.jsonl").exists()
+    assert not Path(artifact["path"]).exists()
+    assert not Path(extensionless_artifact["path"]).exists()
 
 
 def test_follow_up_prompt_uses_summary_not_prior_turn_payloads(tmp_path) -> None:

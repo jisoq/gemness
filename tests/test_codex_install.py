@@ -40,6 +40,9 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert server["env"]["GEMNESS_AGY_CAPTURE_MODE"] == "auto"
     assert server["env"]["GEMNESS_AGY_HEARTBEAT_INTERVAL"] == "5"
     assert server["env"]["GEMNESS_AGY_CONCURRENCY_LIMIT"] == "4"
+    assert server["tools"]["start_antigravity"]["approval_mode"] == "prompt"
+    assert server["tools"]["cancel_antigravity_run"]["approval_mode"] == "prompt"
+    assert server["tools"]["ask_antigravity"]["approval_mode"] == "approve"
     assert "GEMNESS_AGY_COMMAND" not in server["env"]
     assert "GEMNESS_WORKSPACE_ROOT" not in server["env"]
     assert "GEMNESS_ALLOWED_ROOTS" not in server["env"]

@@ -17,7 +17,7 @@ Gemness는 Codex가 Antigravity CLI(`agy`)의 조언을 구하고, 브라우저 
 - `await_antigravity_run`
 - `cancel_antigravity_run`
 
-각 루트 도구 호출은 Gemness 실행(run)과 Gemness 대화(conversation)를 생성합니다. `start_*` 도구는 실행을 등록한 뒤 즉시 `{ status: "accepted", run_id, conversation_id, observer_url }`을 반환하고, 실제 `agy` 프로세스는 Gemness 내부 백그라운드 worker에서 처리합니다. 진행 상태는 `get_antigravity_run` 또는 짧은 대기용 `await_antigravity_run`으로 확인하며, 실행 제어는 `conversation_id`가 아니라 `run_id` 기준으로 수행합니다. 기존 `ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity` 도구는 호환성을 위해 `start → await until done` 방식의 blocking wrapper로 유지됩니다.
+각 루트 도구 호출은 Gemness 실행(run)과 Gemness 대화(conversation)를 생성합니다. Codex 연동의 기본 UX는 main agent가 Antigravity 작업을 직접 붙잡는 방식이 아니라, `antigravity reviewer` subagent가 `ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity` 같은 blocking final-result 도구를 호출하고 최종 advisory만 parent에게 돌려주는 방식입니다. `start_*`, `get_antigravity_run`, `await_antigravity_run`, `cancel_antigravity_run` 도구는 명시적인 background/batch 작업을 위한 advanced API로 유지됩니다.
 
 ---
 
@@ -95,6 +95,8 @@ uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 - `default_tools_approval_mode = "prompt"`
 - `GEMNESS_AGY_TIMEOUT = "600"`
 
+`use gemness` 트리거 가이던스는 Codex main agent가 Gemness MCP 도구를 직접 오래 점유하지 않도록 설계되어 있습니다. main agent는 reviewer subagent에 Antigravity 검토를 위임하고, reviewer subagent가 Gemness의 blocking final-result 도구 안에서 대기한 뒤 정제된 요약, 주요 findings, `observer_url`을 parent에게 반환합니다.
+
 특정 경로의 Antigravity CLI 실행 파일을 고정하여 사용하려면 다음과 같이 실행하십시오:
 
 ```powershell
@@ -116,12 +118,12 @@ http://127.0.0.1:56755
 
 ---
 
-## Detached Run Workflow
+## Advanced Detached Run Workflow
 
-긴 Antigravity 작업에는 blocking 도구 대신 아래 흐름을 권장합니다:
+명시적인 background 또는 batch 작업이 필요할 때만 아래 detached 흐름을 사용합니다:
 
 1. `start_antigravity`, `start_antigravity_json`, `start_review_current_diff_with_antigravity` 또는 `start_follow_up_antigravity`를 호출합니다.
-2. 반환된 `run_id`와 `observer_url`을 사용자에게 알려주고, Codex main agent는 다른 작업을 계속할 수 있습니다.
+2. 반환된 `run_id`와 `observer_url`을 사용자에게 알려주고, 호출자는 다른 작업을 계속할 수 있습니다.
 3. `get_antigravity_run(run_id)`으로 즉시 상태를 보거나 `await_antigravity_run(run_id, timeout_sec=5)`으로 짧게만 기다립니다.
 4. 필요하면 `event_cursor`를 넘겨 새 이벤트만 조회합니다.
 5. 중단이 필요하면 `cancel_antigravity_run(run_id)`을 호출합니다.
@@ -142,6 +144,8 @@ http://127.0.0.1:56755
 - API, SSE 이벤트 스트림, 데이터 내보내기(export), 세션 이름 변경 및 삭제 등의 모든 엔드포인트는 로컬 요청에만 응답합니다.
 - 대화 기록 내 프롬프트 및 응답 텍스트는 UI 및 API 상에서 기본적으로 민감 정보 필터링(redacted)이 적용되어 표시됩니다.
 - 민감 정보 필터링이 해제된 원본 데이터(raw transcript)를 내보내려면 API 호출 시 명시적으로 `raw=1` 쿼리 파라미터를 추가해야 합니다.
+- MCP 도구 응답은 raw transcript 전체를 반환하지 않습니다. 최종 advisory result, 구조화된 data/findings, 요약, `observer_url` 위주로 반환하며 Antigravity 진행 문구와 장황한 내부 출력은 Observer 쪽으로 격리합니다.
+- Observer에 기록되는 `run.command` 및 결과 metadata의 `agy -p <prompt>` 형태 argv는 prompt 본문을 `[PROMPT_REDACTED]`로 대체합니다.
 - Gemness는 대량의 컨텍스트 전달 수단(courier)으로 사용되어서는 안 됩니다. Antigravity CLI가 직접 로컬 워크스페이스를 파악하고 탐색할 수 있으므로, 프롬프트에 방대한 diff 파일, 코드 덤프, 로그 텍스트 등을 직접 복사해서 붙여넣지 마십시오.
 - `review_current_diff_with_antigravity` 도구는 Gemness 서버가 직접 생성한 diff 텍스트를 인자로 실어 보내지 않습니다. 지정된 워크스페이스 내에서 `agy` 프로세스를 시작하고, Antigravity CLI가 스스로 리포지토리 변경 사항을 확인하도록 요청합니다. 로컬 Antigravity CLI가 접근해서는 안 되는 기밀(secrets)이 포함된 워크스페이스에서는 해당 도구를 실행하지 마십시오.
 

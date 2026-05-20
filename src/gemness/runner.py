@@ -30,6 +30,7 @@ AUTH_REQUIRED_MARKERS = (
 
 WINPTY_ROWS = 48
 WINPTY_COLS = 160
+RESPONSE_PREVIEW_CHARS = 4000
 CAPTURE_MODE_PIPE = "pipe"
 CAPTURE_MODE_WINPTY = "winpty"
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -263,10 +264,11 @@ class AgyCliRunner:
             prompt,
             native_conversation_id=native_conversation_id,
         )
+        recorded_command = _redact_prompt_argument(command, capabilities.print_flag)
         capture_mode = _resolve_capture_mode(self.config)
         hub.record_run_command(
             session_id,
-            command,
+            recorded_command,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             agy_conversation_id=native_conversation_id,
@@ -366,7 +368,7 @@ class AgyCliRunner:
         metadata = _metadata(
             session_id=session_id,
             conversation_id=conversation_id,
-            command=command,
+            command=recorded_command,
             cwd=cwd,
             duration_ms=int((time.monotonic() - started) * 1000),
             exit_code=exit_code,
@@ -381,11 +383,18 @@ class AgyCliRunner:
             metadata["cancelled"] = True
         envelope = _response_envelope(raw_stdout, metadata)
         if raw_stdout:
+            stdout_artifact = hub.write_text_artifact(session_id, "stdout.txt" if phase is None else f"{phase}.stdout.txt", raw_stdout)
             hub.append_event(
                 session_id,
                 "antigravity.response",
                 "gemness",
-                {"response": envelope, "stdout": raw_stdout, "metadata": metadata, "streaming": False},
+                {
+                    "response_preview": _preview(raw_stdout),
+                    "stdout_artifact": stdout_artifact,
+                    "stdout_bytes": stdout_artifact["bytes"],
+                    "metadata": metadata,
+                    "streaming": False,
+                },
                 phase=phase,
             )
         if stderr:
@@ -718,6 +727,12 @@ def _tail(value: str, limit: int = 4000) -> str:
     return value[-limit:]
 
 
+def _preview(value: str, limit: int = RESPONSE_PREVIEW_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + f"\n...[truncated {len(value) - limit} chars]"
+
+
 def clean_console_output(value: str) -> str:
     value = _OSC_RE.sub("", value)
     value = _ANSI_CSI_RE.sub("", value)
@@ -770,6 +785,23 @@ def _build_agy_command(
         native_session_mode = "new"
     command.extend([capabilities.print_flag or "-p", prompt])
     return command, native_session_mode
+
+
+def _redact_prompt_argument(command: list[str], print_flag: str | None) -> list[str]:
+    safe: list[str] = []
+    redact_next = False
+    prompt_flags = {"-p", "--print", "--prompt"}
+    if print_flag:
+        prompt_flags.add(print_flag)
+    for item in command:
+        if redact_next:
+            safe.append("[PROMPT_REDACTED]")
+            redact_next = False
+            continue
+        safe.append(item)
+        if item in prompt_flags:
+            redact_next = True
+    return safe
 
 
 def _response_envelope(raw_stdout: str, metadata: dict[str, Any]) -> str:
