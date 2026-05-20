@@ -322,6 +322,32 @@ INDEX_HTML = r"""<!doctype html>
     .badge.valid, .badge.completed { color: var(--good); }
     .badge.invalid, .badge.error, .badge.cancelled { color: var(--bad); }
     .badge.repairing, .badge.running, .badge.sending { color: var(--warn); }
+    .session-heading { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: var(--muted);
+      box-shadow: 0 0 0 1px color-mix(in srgb, currentColor, transparent 72%);
+    }
+    .status-dot.live {
+      color: var(--good);
+      background: var(--good);
+      animation: statusPulse 1.15s ease-in-out infinite;
+    }
+    .status-dot.completed, .status-dot.valid { color: var(--good); background: var(--good); }
+    .status-dot.stale, .status-dot.starting, .status-dot.running, .status-dot.sending, .status-dot.repairing, .status-dot.queued {
+      color: var(--warn);
+      background: var(--warn);
+    }
+    .status-dot.stale { animation: statusPulse 1.8s ease-in-out infinite; }
+    .status-dot.error, .status-dot.invalid, .status-dot.timeout { color: var(--bad); background: var(--bad); }
+    .status-dot.cancelled { color: var(--muted); background: var(--muted); }
+    @keyframes statusPulse {
+      0%, 100% { opacity: 0.45; transform: scale(0.88); box-shadow: 0 0 0 1px color-mix(in srgb, currentColor, transparent 70%); }
+      50% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 6px color-mix(in srgb, currentColor, transparent 86%); }
+    }
     .summary-bar {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -334,6 +360,28 @@ INDEX_HTML = r"""<!doctype html>
     .summary-grid { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
     .summary-item { min-width: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .summary-item strong { color: var(--text); font-weight: 600; }
+    .runtime-signal {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      min-width: 0;
+    }
+    .runtime-copy { display: grid; gap: 4px; min-width: 0; }
+    .runtime-title { font-weight: 700; font-size: 13px; }
+    .runtime-details { display: flex; flex-wrap: wrap; gap: 6px; }
+    .runtime-chip {
+      color: var(--muted);
+      font-size: 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel);
+      overflow-wrap: anywhere;
+    }
     .transcript-shell {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -476,6 +524,7 @@ INDEX_HTML = r"""<!doctype html>
           <button id="copy">기록 복사</button>
           <button id="export">JSON 내보내기</button>
         </div>
+        <div id="runtimeSignal"></div>
         <div id="summaryGrid" class="summary-grid"></div>
       </div>
       <div id="review" class="findings"></div>
@@ -763,10 +812,11 @@ INDEX_HTML = r"""<!doctype html>
       const title = sessionTitle(s);
       const deleteDisabled = isTerminalStatus(s.status) ? "" : "disabled";
       const deleteTitle = isTerminalStatus(s.status) ? "기록 제거" : "실행 중인 항목은 제거할 수 없습니다.";
+      const telemetry = runTelemetry(s, []);
       return `
         <article class="session ${s._active || s.session_id === currentSessionId ? "active" : ""}">
           <button class="session-main" data-session="${escapeHtml(s.session_id)}">
-            <span><span class="session-title">${escapeHtml(title)}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span>
+            <span class="session-heading">${statusDotHtml(telemetry)}<span><span class="session-title">${escapeHtml(title)}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span></span>
             <span class="meta">${escapeHtml(toolMeta)}</span>
             <span class="meta">${escapeHtml(s.model || "")}</span>
             <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
@@ -824,6 +874,7 @@ INDEX_HTML = r"""<!doctype html>
     function renderSessionSummary(session, events) {
       const cwd = findCwd(events);
       const conversation = transcript?.conversation || {};
+      setInnerHtmlIfChanged("runtimeSignal", renderRuntimeSignal(session, events));
       const html = [
         ["제목", sessionTitle(session)],
         ["도구", toolLabel(session.tool_name)],
@@ -838,6 +889,20 @@ INDEX_HTML = r"""<!doctype html>
         ["raw 보기", qs("raw").checked ? "켜짐" : "꺼짐"]
       ].map(([label, value]) => `<span class="summary-item"><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</span>`).join("");
       setInnerHtmlIfChanged("summaryGrid", html);
+    }
+    function renderRuntimeSignal(session, events) {
+      if (!session?.session_id) return "";
+      const telemetry = runTelemetry(session, events);
+      const details = telemetry.details.map((item) => `<span class="runtime-chip">${escapeHtml(item)}</span>`).join("");
+      return `
+        <div class="runtime-signal ${escapeHtml(telemetry.state)}">
+          ${statusDotHtml(telemetry)}
+          <div class="runtime-copy">
+            <div class="runtime-title">${escapeHtml(telemetry.label)}</div>
+            <div class="runtime-details">${details}</div>
+          </div>
+        </div>
+      `;
     }
     function renderConversationTurn(turn) {
       const meta = Object.entries(turn.meta || {})
@@ -1028,6 +1093,8 @@ INDEX_HTML = r"""<!doctype html>
     function describeEventAsConversationTurn(event, index = 0, allEvents = []) {
       const payload = event.payload || {};
       switch (event.type) {
+        case "antigravity.heartbeat":
+          return null;
         case "session.created":
           return {
             speaker: "observer",
@@ -1146,6 +1213,97 @@ INDEX_HTML = r"""<!doctype html>
     }
     function turn(event, speaker, direction, title, body, meta = {}, severity = "") {
       return { speaker, direction, title, timestamp: event.ts, body, meta, severity, rawEvent: event };
+    }
+    function runTelemetry(session, events = []) {
+      const status = session?.status || "unknown";
+      const relevantEvents = (events || []).filter((event) => eventMatchesSession(event, session));
+      const heartbeat = latestEvent(relevantEvents, "antigravity.heartbeat");
+      const exited = latestEvent(relevantEvents, "antigravity.exited");
+      const terminalEvent = latestTerminalEvent(relevantEvents);
+      const terminal = isTerminalStatus(status);
+      const heartbeatAge = heartbeat ? ageMs(heartbeat.ts) : null;
+      const terminalReference = terminalEvent?.ts || exited?.ts || session?.completed_at || "";
+      const heartbeatToTerminalMs = terminal && heartbeat ? durationBetween(heartbeat.ts, terminalReference) : null;
+      let state = status;
+      let label = statusLabel(status);
+      if (terminal) {
+        state = ["completed", "valid"].includes(status) ? "completed" : ["error", "invalid"].includes(status) ? "error" : status;
+      } else if (heartbeat) {
+        state = heartbeatAge !== null && heartbeatAge > 15000 ? "stale" : "live";
+        label = state === "stale" ? "Heartbeat 지연" : "Live";
+      } else if (["running", "sending", "repairing", "queued"].includes(status)) {
+        state = status === "running" ? "starting" : status;
+      }
+      const details = telemetryDetails({ session, status, state, heartbeat, heartbeatAge, heartbeatToTerminalMs, exited });
+      return {
+        state,
+        label,
+        details,
+        heartbeat,
+        heartbeatAge,
+        tooltip: [label, ...details].filter(Boolean).join(" · ")
+      };
+    }
+    function telemetryDetails({ session, status, state, heartbeat, heartbeatAge, heartbeatToTerminalMs, exited }) {
+      const payload = heartbeat?.payload || {};
+      const details = [];
+      if (heartbeat) {
+        if (isTerminalStatus(status)) {
+          details.push(`마지막 heartbeat ${formatTime(heartbeat.ts)}`);
+          if (heartbeatToTerminalMs !== null) details.push(`종료 ${formatDuration(heartbeatToTerminalMs)} 전`);
+        } else {
+          details.push(`최근 heartbeat ${formatAge(heartbeatAge)} 전`);
+        }
+        if (payload.elapsed_ms !== undefined) details.push(`경과 ${formatDuration(payload.elapsed_ms)}`);
+        if (payload.timeout_remaining_ms !== undefined) details.push(`timeout ${formatDuration(payload.timeout_remaining_ms)} 남음`);
+        if (payload.pid !== undefined && payload.pid !== null) details.push(`pid ${payload.pid}`);
+        if (payload.capture_mode) details.push(`capture ${payload.capture_mode}`);
+        if (payload.stdout_bytes !== undefined) details.push(`stdout ${payload.stdout_bytes}B`);
+        if (payload.stderr_bytes !== undefined) details.push(`stderr ${payload.stderr_bytes}B`);
+        if (payload.last_activity_ms_ago !== undefined) details.push(`마지막 출력 ${formatDuration(payload.last_activity_ms_ago)} 전`);
+      } else if (!isTerminalStatus(status)) {
+        details.push(state === "queued" ? "실행 대기 중" : "heartbeat 대기 중");
+      }
+      if (isTerminalStatus(status)) {
+        if (session?.duration_ms !== undefined && session.duration_ms !== null) details.push(`총 ${formatDuration(session.duration_ms)}`);
+        if (exited?.payload?.duration_ms !== undefined) details.push(`프로세스 ${formatDuration(exited.payload.duration_ms)}`);
+        if (exited?.payload?.exit_code !== undefined) details.push(`exit ${exited.payload.exit_code}`);
+      }
+      return details.length ? details : [statusLabel(status)];
+    }
+    function statusDotHtml(telemetry) {
+      const state = telemetry?.state || "unknown";
+      const title = telemetry?.tooltip || telemetry?.label || statusLabel(state);
+      return `<span class="status-dot ${escapeHtml(state)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></span>`;
+    }
+    function latestEvent(events, type) {
+      return [...(events || [])].reverse().find((event) => event.type === type) || null;
+    }
+    function latestTerminalEvent(events) {
+      return [...(events || [])].reverse().find((event) =>
+        ["session.completed", "session.cancelled", "session.error"].includes(event.type)
+      ) || null;
+    }
+    function eventMatchesSession(event, session) {
+      const sessionId = session?.session_id || session?.run_id;
+      if (!sessionId) return true;
+      const payload = event?.payload || {};
+      return event?.session_id === sessionId || payload.run_id === sessionId || payload.session_id === sessionId;
+    }
+    function ageMs(ts) {
+      const time = new Date(ts).getTime();
+      if (Number.isNaN(time)) return null;
+      return Math.max(0, Date.now() - time);
+    }
+    function durationBetween(startTs, endTs) {
+      const start = new Date(startTs).getTime();
+      const end = new Date(endTs).getTime();
+      if (Number.isNaN(start) || Number.isNaN(end)) return null;
+      return Math.max(0, end - start);
+    }
+    function formatAge(ms) {
+      if (ms === null || ms === undefined) return "알 수 없음";
+      return formatDuration(ms);
     }
     function resultSummaryText(result) {
       if (result.text) return result.text;
@@ -1313,6 +1471,8 @@ INDEX_HTML = r"""<!doctype html>
     window.describeEventAsConversationTurn = describeEventAsConversationTurn;
     window.preferredLiveSession = preferredLiveSession;
     window.groupSessionsByConversation = groupSessionsByConversation;
+    window.runTelemetry = runTelemetry;
+    window.renderRuntimeSignal = renderRuntimeSignal;
     window.parseAntigravityEnvelope = parseAntigravityEnvelope;
     window.renderMarkdown = renderMarkdown;
     window.renderSessionGroup = renderSessionGroup;

@@ -137,6 +137,9 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "buildReadableTranscript" in INDEX_HTML
     assert "isTerminalStatus" in INDEX_HTML
     assert "isBenignAntigravityStderr" in INDEX_HTML
+    assert "runtimeSignal" in INDEX_HTML
+    assert "function runTelemetry" in INDEX_HTML
+    assert ".status-dot.live" in INDEX_HTML
     assert "conversation id" in INDEX_HTML
     assert "run id" in INDEX_HTML
     assert "256-color support not detected" in INDEX_HTML
@@ -343,6 +346,94 @@ console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.
     assert turns[0]["title"] == "Antigravity -> Agents"
     assert turns[0]["body"] == "첫 응답"
     assert turns[0]["meta"]["metadata"]["streaming"] is False
+
+
+def test_heartbeat_events_update_runtime_signal_without_chat_turns(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const heartbeat = {
+  event_id: "heartbeat-1",
+  session_id: "run_1",
+  type: "antigravity.heartbeat",
+  ts: new Date().toISOString(),
+  role: "gemness",
+  payload: {
+    run_id: "run_1",
+    elapsed_ms: 3210,
+    timeout_remaining_ms: 96000,
+    pid: 123,
+    capture_mode: "winpty",
+    stdout_bytes: 42,
+    stderr_bytes: 0,
+    last_activity_ms_ago: 120
+  }
+};
+const otherRunHeartbeat = {
+  ...heartbeat,
+  event_id: "heartbeat-2",
+  session_id: "run_2",
+  payload: { ...heartbeat.payload, run_id: "run_2", pid: 999 }
+};
+const completedHeartbeat = {
+  ...heartbeat,
+  ts: "2026-05-19T03:04:18.000Z"
+};
+const exited = {
+  session_id: "run_1",
+  type: "antigravity.exited",
+  ts: "2026-05-19T03:04:22.560Z",
+  payload: { duration_ms: 4560, exit_code: 0 }
+};
+const completed = {
+  session_id: "run_1",
+  type: "session.completed",
+  ts: "2026-05-19T03:04:22.560Z",
+  payload: { status: "completed" }
+};
+const runningSession = { session_id: "run_1", status: "running" };
+const completedSession = { session_id: "run_1", status: "completed", duration_ms: 5000 };
+const turns = buildConversationTranscript([heartbeat]);
+const telemetry = runTelemetry(runningSession, [otherRunHeartbeat, heartbeat]);
+const completedTelemetry = runTelemetry(completedSession, [completedHeartbeat, exited, completed]);
+const signalHtml = renderRuntimeSignal(runningSession, [otherRunHeartbeat, heartbeat]);
+const debugHtml = renderRawEvent(heartbeat);
+console.log(JSON.stringify({
+  turnCount: turns.length,
+  state: telemetry.state,
+  label: telemetry.label,
+  details: telemetry.details,
+  completedState: completedTelemetry.state,
+  completedDetails: completedTelemetry.details,
+  completedUsesFrozenHeartbeat: completedTelemetry.details.some((item) => item.startsWith("마지막 heartbeat")),
+  completedUsesTerminalDelta: completedTelemetry.details.includes("종료 4.6초 전"),
+  completedHasLiveRecency: completedTelemetry.details.some((item) => item.startsWith("최근 heartbeat")),
+  signalHasLiveDot: signalHtml.includes("status-dot live"),
+  signalHasPid: signalHtml.includes("pid 123"),
+  signalUsesActiveRun: !signalHtml.includes("pid 999"),
+  debugKeepsRawHeartbeat: debugHtml.includes("antigravity.heartbeat")
+}));
+"""
+    script_path = tmp_path / "heartbeat-runtime-signal-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert data["turnCount"] == 0
+    assert data["state"] == "live"
+    assert data["label"] == "Live"
+    assert "pid 123" in data["details"]
+    assert "경과 3.2초" in data["details"]
+    assert data["completedState"] == "completed"
+    assert data["completedUsesFrozenHeartbeat"] is True
+    assert data["completedUsesTerminalDelta"] is True
+    assert data["completedHasLiveRecency"] is False
+    assert "프로세스 4.6초" in data["completedDetails"]
+    assert data["signalHasLiveDot"] is True
+    assert data["signalHasPid"] is True
+    assert data["signalUsesActiveRun"] is True
+    assert data["debugKeepsRawHeartbeat"] is True
 
 
 def test_live_session_picker_prefers_newest_non_terminal_session(tmp_path) -> None:

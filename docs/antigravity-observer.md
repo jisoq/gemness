@@ -1,6 +1,6 @@
 # Gemness Antigravity Observer
 
-Gemness wraps Antigravity CLI (`agy`) as a local MCP advisory server. Codex asks Gemness for a second opinion, Gemness registers a run, invokes `agy` in a background worker, and the Observer UI records the prompt, progress heartbeats, final stdout/stderr, JSON validation, and repair attempts. The Observer UI also lets you rename or remove completed local conversation records. Gemness is a task-clarification bridge, not a bulk context courier: prompts should state the user's intent, cwd, and constraints, then let Antigravity inspect the workspace with its own tools when needed.
+Gemness wraps Antigravity CLI (`agy`) as a local MCP advisory server. Codex asks Gemness for a second opinion, Gemness registers a run, invokes `agy` in a background worker, and the Observer UI records the prompt, progress heartbeats, final stdout/stderr, JSON validation, and repair attempts. Heartbeats are summarized as a live status LED and runtime telemetry in the default UI, while the raw heartbeat events remain available in the debug panel. The Observer UI also lets you rename or remove completed local conversation records. Gemness is a task-clarification bridge, not a bulk context courier: prompts should state the user's intent, cwd, and constraints, then let Antigravity inspect the workspace with its own tools when needed.
 
 ## Runtime Flow
 
@@ -42,7 +42,7 @@ Gemness does not claim token-level streaming. Antigravity text output is still c
 - `antigravity.stderr`
 - `antigravity.exited`
 
-Heartbeat payloads include elapsed time, timeout remaining, pid, capture mode, stdout/stderr byte counts, and last activity age. They let the user distinguish an active long run from a stuck or silent run without pretending that token-level streaming is available.
+Heartbeat payloads include elapsed time, timeout remaining, pid, capture mode, stdout/stderr byte counts, and last activity age. They let the user distinguish an active long run from a stuck or silent run without pretending that token-level streaming is available. The default conversation timeline hides heartbeat events to avoid noisy chat churn; use the runtime status strip for the latest heartbeat and the raw debug panel for the full event stream.
 
 ## Detached Run Control
 
