@@ -324,6 +324,28 @@ def test_runner_emits_heartbeat_payload_while_process_is_running(tmp_path) -> No
     assert "timeout_remaining_ms" in heartbeats[0]
 
 
+def test_runner_heartbeat_reports_stdout_bytes_before_exit(tmp_path) -> None:
+    command, _record_path = make_fake_agy(tmp_path, stdout="late", stdout_before_sleep="early", sleep_sec=0.3)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(
+        GemnessConfig(
+            transcript_dir=tmp_path / "transcripts",
+            observer_enabled=False,
+            agy_command=command,
+            agy_timeout_sec=5,
+            agy_capture_mode="pipe",
+            agy_heartbeat_interval_sec=0.05,
+        )
+    )
+    heartbeats: list[dict[str, object]] = []
+
+    result = runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path, heartbeat_callback=heartbeats.append)
+
+    assert result.status == "completed"
+    assert any(int(heartbeat["stdout_bytes"]) >= len("early\n".encode("utf-8")) for heartbeat in heartbeats)
+
+
 def test_runner_reports_cancelled_when_manager_terminates_process(tmp_path) -> None:
     command, _record_path = make_fake_agy(tmp_path, stdout="late", sleep_sec=2)
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
@@ -388,6 +410,7 @@ def make_fake_agy(
     conversation_dir: Path | None = None,
     conversation_id: str | None = None,
     sleep_sec: float = 0,
+    stdout_before_sleep: str = "",
 ) -> tuple[str, Path]:
     record_path = tmp_path / "agy-argv.json"
     script_path = tmp_path / "fake_agy.py"
@@ -400,6 +423,7 @@ def make_fake_agy(
                 f"record_path = {str(record_path)!r}",
                 f"help_text = {help_text!r}",
                 f"stdout = {stdout!r}",
+                f"stdout_before_sleep = {stdout_before_sleep!r}",
                 f"stderr = {stderr!r}",
                 f"exit_code = {exit_code!r}",
                 f"conversation_dir = {None if conversation_dir is None else str(conversation_dir)!r}",
@@ -418,6 +442,8 @@ def make_fake_agy(
                 "    Path(conversation_dir).mkdir(parents=True, exist_ok=True)",
                 "    path = Path(conversation_dir) / f'{conversation_id}.pb'",
                 "    path.write_bytes(path.read_bytes() + b'x' if path.exists() else b'x')",
+                "if stdout_before_sleep:",
+                "    print(stdout_before_sleep, flush=True)",
                 "if sleep_sec:",
                 "    time.sleep(sleep_sec)",
                 "if stdout:",

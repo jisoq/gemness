@@ -175,6 +175,9 @@ class _RunningAgyCommand:
     capture_mode: str
     stdout_parts: list[str]
     stderr_parts: list[str]
+    stdout_byte_count: list[int]
+    stderr_byte_count: list[int]
+    capture_lock: threading.Lock
     stdout_thread: threading.Thread | None
     stderr_thread: threading.Thread | None
     poll_fn: Callable[[], int | None]
@@ -193,13 +196,15 @@ class _RunningAgyCommand:
             self.stderr_thread.join(timeout=1)
 
     def stdout(self) -> str:
-        value = "".join(self.stdout_parts)
+        with self.capture_lock:
+            value = "".join(self.stdout_parts)
         if self.capture_mode == CAPTURE_MODE_WINPTY:
             return clean_console_output(value)
         return value
 
     def stderr(self) -> str:
-        return "".join(self.stderr_parts)
+        with self.capture_lock:
+            return "".join(self.stderr_parts)
 
 
 @dataclass(slots=True)
@@ -572,14 +577,20 @@ def _start_pipe_command(command: list[str], cwd: Path | None, env: dict[str, str
     )
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
-    stdout_thread = _reader_thread(process.stdout, stdout_parts)
-    stderr_thread = _reader_thread(process.stderr, stderr_parts)
+    stdout_byte_count = [0]
+    stderr_byte_count = [0]
+    capture_lock = threading.Lock()
+    stdout_thread = _reader_thread(process.stdout, stdout_parts, stdout_byte_count, capture_lock)
+    stderr_thread = _reader_thread(process.stderr, stderr_parts, stderr_byte_count, capture_lock)
     return _RunningAgyCommand(
         process=process,
         pid=process.pid,
         capture_mode=CAPTURE_MODE_PIPE,
         stdout_parts=stdout_parts,
         stderr_parts=stderr_parts,
+        stdout_byte_count=stdout_byte_count,
+        stderr_byte_count=stderr_byte_count,
+        capture_lock=capture_lock,
         stdout_thread=stdout_thread,
         stderr_thread=stderr_thread,
         poll_fn=process.poll,
@@ -600,7 +611,10 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
         dimensions=(WINPTY_ROWS, WINPTY_COLS),
     )
     stdout_parts: list[str] = []
-    stdout_thread = _winpty_reader_thread(process, stdout_parts)
+    stdout_byte_count = [0]
+    stderr_byte_count = [0]
+    capture_lock = threading.Lock()
+    stdout_thread = _winpty_reader_thread(process, stdout_parts, stdout_byte_count, capture_lock)
 
     def poll() -> int | None:
         if process.isalive():
@@ -616,6 +630,9 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
         capture_mode=CAPTURE_MODE_WINPTY,
         stdout_parts=stdout_parts,
         stderr_parts=[],
+        stdout_byte_count=stdout_byte_count,
+        stderr_byte_count=stderr_byte_count,
+        capture_lock=capture_lock,
         stdout_thread=stdout_thread,
         stderr_thread=None,
         poll_fn=poll,
@@ -623,7 +640,7 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
     )
 
 
-def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
+def _reader_thread(pipe: Any, parts: list[str], byte_count: list[int], lock: threading.Lock) -> threading.Thread:
     def read_pipe() -> None:
         if pipe is None:
             return
@@ -632,7 +649,9 @@ def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
                 value = pipe.readline()
                 if value == "":
                     break
-                parts.append(value)
+                with lock:
+                    parts.append(value)
+                    byte_count[0] += len(value.encode("utf-8", errors="replace"))
         finally:
             try:
                 pipe.close()
@@ -644,7 +663,7 @@ def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
     return thread
 
 
-def _winpty_reader_thread(process: Any, parts: list[str]) -> threading.Thread:
+def _winpty_reader_thread(process: Any, parts: list[str], byte_count: list[int], lock: threading.Lock) -> threading.Thread:
     def read_console() -> None:
         while True:
             try:
@@ -658,7 +677,9 @@ def _winpty_reader_thread(process: Any, parts: list[str]) -> threading.Thread:
                     break
                 time.sleep(0.05)
                 continue
-            parts.append(value)
+            with lock:
+                parts.append(value)
+                byte_count[0] += len(value.encode("utf-8", errors="replace"))
 
     thread = threading.Thread(target=read_console, daemon=True)
     thread.start()
@@ -666,9 +687,8 @@ def _winpty_reader_thread(process: Any, parts: list[str]) -> threading.Thread:
 
 
 def _captured_bytes(running: _RunningAgyCommand) -> tuple[int, int]:
-    stdout = "".join(running.stdout_parts)
-    stderr = "".join(running.stderr_parts)
-    return len(stdout.encode("utf-8", errors="replace")), len(stderr.encode("utf-8", errors="replace"))
+    with running.capture_lock:
+        return running.stdout_byte_count[0], running.stderr_byte_count[0]
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
