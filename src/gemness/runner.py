@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -222,6 +223,10 @@ class AgyRunner(Protocol):
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[Any], None] | None = None,
+        heartbeat_callback: Callable[[dict[str, Any]], None] | None = None,
+        heartbeat_interval_sec: float | None = None,
     ) -> AgyRunResult:
         ...
 
@@ -242,6 +247,10 @@ class AgyCliRunner:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[Any], None] | None = None,
+        heartbeat_callback: Callable[[dict[str, Any]], None] | None = None,
+        heartbeat_interval_sec: float | None = None,
     ) -> AgyRunResult:
         capabilities = self.probe_capabilities(cwd)
         if not capabilities.available:
@@ -276,6 +285,8 @@ class AgyCliRunner:
             return AgyRunResult.error(str(exc), exit_code=None)
         except RuntimeError as exc:
             return AgyRunResult.error(str(exc), exit_code=None)
+        if process_callback is not None:
+            process_callback(running)
 
         conversation_id = _conversation_id(hub, session_id)
         hub.set_status(
@@ -300,9 +311,45 @@ class AgyCliRunner:
         )
 
         timed_out = False
+        cancelled = False
+        last_stdout_bytes, last_stderr_bytes = _captured_bytes(running)
+        last_activity_monotonic = started
+        heartbeat_every = max(0.1, float(heartbeat_interval_sec or self.config.agy_heartbeat_interval_sec or 5.0))
+        next_heartbeat = started + heartbeat_every
         while running.poll() is None:
+            now = time.monotonic()
+            stdout_bytes, stderr_bytes = _captured_bytes(running)
+            if (stdout_bytes, stderr_bytes) != (last_stdout_bytes, last_stderr_bytes):
+                last_stdout_bytes, last_stderr_bytes = stdout_bytes, stderr_bytes
+                last_activity_monotonic = now
+            if heartbeat_callback is not None and now >= next_heartbeat:
+                heartbeat_callback(
+                    {
+                        "elapsed_ms": int((now - started) * 1000),
+                        "timeout_remaining_ms": max(0, int((self.config.agy_timeout_sec - (now - started)) * 1000)),
+                        "pid": running.pid,
+                        "capture_mode": running.capture_mode,
+                        "stdout_bytes": stdout_bytes,
+                        "stderr_bytes": stderr_bytes,
+                        "last_activity_ms_ago": int((now - last_activity_monotonic) * 1000),
+                        "streaming": False,
+                    }
+                )
+                next_heartbeat = now + heartbeat_every
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                hub.append_event(session_id, "antigravity.cancel_requested", "gemness", {"pid": running.pid, "phase": phase}, phase=phase)
+                running.terminate()
+                break
             if time.monotonic() - started > self.config.agy_timeout_sec:
                 timed_out = True
+                hub.append_event(
+                    session_id,
+                    "antigravity.timeout",
+                    "gemness",
+                    {"timeout_sec": self.config.agy_timeout_sec, "pid": running.pid, "phase": phase},
+                    phase=phase,
+                )
                 running.terminate()
                 break
             time.sleep(0.05)
@@ -311,6 +358,8 @@ class AgyCliRunner:
         raw_stdout = running.stdout()
         stderr = running.stderr()
         exit_code = running.poll()
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
         auth_status = detect_auth_status(raw_stdout, stderr, exit_code)
         if exit_code == 0 and not raw_stdout.strip():
             auth_status = "unknown"
@@ -326,6 +375,10 @@ class AgyCliRunner:
             agy_conversation_id=native_conversation_id,
             native_session_mode=native_session_mode,
         )
+        if timed_out:
+            metadata["timed_out"] = True
+        if cancelled:
+            metadata["cancelled"] = True
         envelope = _response_envelope(raw_stdout, metadata)
         if raw_stdout:
             hub.append_event(
@@ -339,6 +392,8 @@ class AgyCliRunner:
             hub.append_event(session_id, "antigravity.stderr", "gemness", {"stderr": _tail(stderr)}, phase=phase)
         hub.append_event(session_id, "antigravity.exited", "gemness", metadata, phase=phase)
 
+        if cancelled:
+            return AgyRunResult.cancelled(stdout=envelope, stderr=stderr, metadata=metadata)
         if timed_out:
             return AgyRunResult.error("Antigravity CLI timed out", exit_code=exit_code, stderr=stderr, stdout=envelope, metadata=metadata, raw_stdout=raw_stdout)
         if auth_status == "auth_required":
@@ -492,6 +547,7 @@ def _start_agy_command(command: list[str], cwd: Path | None, env: dict[str, str]
 
 
 def _start_pipe_command(command: list[str], cwd: Path | None, env: dict[str, str]) -> _RunningAgyCommand:
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -502,6 +558,8 @@ def _start_pipe_command(command: list[str], cwd: Path | None, env: dict[str, str
         errors="replace",
         cwd=str(cwd) if cwd is not None else None,
         env=env,
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
     )
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
@@ -598,10 +656,44 @@ def _winpty_reader_thread(process: Any, parts: list[str]) -> threading.Thread:
     return thread
 
 
+def _captured_bytes(running: _RunningAgyCommand) -> tuple[int, int]:
+    stdout = "".join(running.stdout_parts)
+    stderr = "".join(running.stderr_parts)
+    return len(stdout.encode("utf-8", errors="replace")), len(stderr.encode("utf-8", errors="replace"))
+
+
 def _terminate_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
-    process.terminate()
+    if os.name == "nt":
+        _terminate_windows_process_tree(process)
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+        process.wait(timeout=2)
+
+
+def _terminate_windows_process_tree(process: subprocess.Popen[str]) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        process.terminate()
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:

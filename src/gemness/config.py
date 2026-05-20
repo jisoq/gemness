@@ -25,6 +25,13 @@ def _int_env(name: str, default: int) -> int:
     return int(value)
 
 
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
 def _choice_env(name: str, default: str, choices: set[str]) -> str:
     value = os.getenv(name, default).strip().lower()
     if value not in choices:
@@ -72,9 +79,11 @@ class GemnessConfig:
     transcript_dir: Path = field(default_factory=lambda: Path(os.getenv("GEMNESS_TRANSCRIPT_DIR", str(DEFAULT_TRANSCRIPT_DIR))).expanduser())
     redact_raw_by_default: bool = field(default_factory=lambda: _bool_env("GEMNESS_REDACT_RAW_BY_DEFAULT", True))
     agy_command: str = field(default_factory=lambda: os.getenv("GEMNESS_AGY_COMMAND", DEFAULT_AGY_COMMAND))
-    agy_timeout_sec: float = field(default_factory=lambda: float(os.getenv("GEMNESS_AGY_TIMEOUT", "600")))
-    agy_health_timeout_sec: float = field(default_factory=lambda: float(os.getenv("GEMNESS_AGY_HEALTH_TIMEOUT", "20")))
+    agy_timeout_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_TIMEOUT", 600.0))
+    agy_health_timeout_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_HEALTH_TIMEOUT", 20.0))
     agy_capture_mode: str = field(default_factory=lambda: _choice_env("GEMNESS_AGY_CAPTURE_MODE", "auto", AGY_CAPTURE_MODES))
+    agy_heartbeat_interval_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_HEARTBEAT_INTERVAL", 5.0))
+    agy_concurrency_limit: int = field(default_factory=lambda: _int_env("GEMNESS_AGY_CONCURRENCY_LIMIT", 4))
     workspace_root: Path | None = field(default_factory=lambda: _optional_path_env("GEMNESS_WORKSPACE_ROOT"))
     allowed_roots: tuple[Path, ...] = field(default_factory=lambda: _path_list_env("GEMNESS_ALLOWED_ROOTS"))
 

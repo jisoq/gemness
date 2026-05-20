@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
@@ -289,6 +290,56 @@ def test_runner_does_not_infer_native_conversation_id_from_conversation_file(tmp
     assert raw_conversation["current_agy_conversation_id"] != native_id
 
 
+def test_runner_emits_heartbeat_payload_while_process_is_running(tmp_path) -> None:
+    command, _record_path = make_fake_agy(tmp_path, stdout="ok", sleep_sec=0.3)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(
+        GemnessConfig(
+            transcript_dir=tmp_path / "transcripts",
+            observer_enabled=False,
+            agy_command=command,
+            agy_timeout_sec=5,
+            agy_capture_mode="pipe",
+            agy_heartbeat_interval_sec=0.1,
+        )
+    )
+    heartbeats: list[dict[str, object]] = []
+
+    result = runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path, heartbeat_callback=heartbeats.append)
+
+    assert result.status == "completed"
+    assert heartbeats
+    assert heartbeats[0]["pid"]
+    assert heartbeats[0]["capture_mode"] == "pipe"
+    assert "timeout_remaining_ms" in heartbeats[0]
+
+
+def test_runner_reports_cancelled_when_manager_terminates_process(tmp_path) -> None:
+    command, _record_path = make_fake_agy(tmp_path, stdout="late", sleep_sec=2)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(
+        GemnessConfig(
+            transcript_dir=tmp_path / "transcripts",
+            observer_enabled=False,
+            agy_command=command,
+            agy_timeout_sec=5,
+            agy_capture_mode="pipe",
+        )
+    )
+    cancel_event = threading.Event()
+
+    def terminate_after_start(running) -> None:  # noqa: ANN001
+        cancel_event.set()
+        running.terminate()
+
+    result = runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path, cancel_event=cancel_event, process_callback=terminate_after_start)
+
+    assert result.status == "cancelled"
+    assert result.metadata["cancelled"] is True
+
+
 def make_fake_agy(
     tmp_path: Path,
     *,
@@ -298,6 +349,7 @@ def make_fake_agy(
     help_text: str = DEFAULT_HELP,
     conversation_dir: Path | None = None,
     conversation_id: str | None = None,
+    sleep_sec: float = 0,
 ) -> tuple[str, Path]:
     record_path = tmp_path / "agy-argv.json"
     script_path = tmp_path / "fake_agy.py"
@@ -305,7 +357,7 @@ def make_fake_agy(
         "\n".join(
             [
                 "from __future__ import annotations",
-                "import json, sys",
+                "import json, sys, time",
                 "from pathlib import Path",
                 f"record_path = {str(record_path)!r}",
                 f"help_text = {help_text!r}",
@@ -314,6 +366,7 @@ def make_fake_agy(
                 f"exit_code = {exit_code!r}",
                 f"conversation_dir = {None if conversation_dir is None else str(conversation_dir)!r}",
                 f"conversation_id = {conversation_id!r}",
+                f"sleep_sec = {sleep_sec!r}",
                 "args = sys.argv[1:]",
                 "if args == ['--help']:",
                 "    print(help_text)",
@@ -327,6 +380,8 @@ def make_fake_agy(
                 "    Path(conversation_dir).mkdir(parents=True, exist_ok=True)",
                 "    path = Path(conversation_dir) / f'{conversation_id}.pb'",
                 "    path.write_bytes(path.read_bytes() + b'x' if path.exists() else b'x')",
+                "if sleep_sec:",
+                "    time.sleep(sleep_sec)",
                 "if stdout:",
                 "    print(stdout)",
                 "if stderr:",

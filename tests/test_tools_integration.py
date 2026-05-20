@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any, Callable
 
@@ -54,6 +55,10 @@ class FakeRunner:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback=None,
+        heartbeat_callback=None,
+        heartbeat_interval_sec: float | None = None,
     ) -> AgyRunResult:
         self.calls.append(
             {
@@ -64,12 +69,23 @@ class FakeRunner:
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
                 "native_conversation_id": native_conversation_id,
+                "cancel_event": cancel_event,
+                "heartbeat_callback": heartbeat_callback,
+                "heartbeat_interval_sec": heartbeat_interval_sec,
             }
         )
         hub.set_status(session_id, "running", "antigravity.started", {"model": DEFAULT_MODEL_LABEL, "streaming": False}, role="gemness", phase=phase)
         response = self.responses.pop(0)
         if callable(response):
-            return response(prompt=prompt, session_id=session_id, hub=hub, cwd=cwd, phase=phase)
+            return response(
+                prompt=prompt,
+                session_id=session_id,
+                hub=hub,
+                cwd=cwd,
+                phase=phase,
+                cancel_event=cancel_event,
+                heartbeat_callback=heartbeat_callback,
+            )
         if isinstance(response, AgyRunResult):
             if response.stdout:
                 hub.append_event(session_id, "antigravity.response", "gemness", {"response": response.stdout, "streaming": False}, phase=phase)
@@ -333,6 +349,121 @@ def test_prompt_sends_without_observer_approval_pause(tmp_path) -> None:
         assert result["status"] == "completed"
         assert service.runner.calls[0]["prompt"] == "original"
         assert "prompt.pending_approval" not in [event["type"] for event in events]
+    finally:
+        service.shutdown()
+
+
+def test_start_antigravity_returns_detached_run_and_await_collects_result(tmp_path) -> None:
+    release = threading.Event()
+
+    def slow_response(prompt, session_id, hub, **kwargs):  # noqa: ANN001, ANN003
+        assert prompt == "slow prompt"
+        release.wait(timeout=2)
+        stdout = json.dumps({"response": "slow answer", "metadata": {"streaming": False, "run_id": session_id}})
+        hub.append_event(session_id, "antigravity.response", "gemness", {"response": stdout, "streaming": False})
+        hub.append_event(session_id, "antigravity.exited", "gemness", {"exit_code": 0, "streaming": False})
+        return AgyRunResult.completed(stdout, metadata={"streaming": False, "run_id": session_id})
+
+    service = make_service(tmp_path, [slow_response])
+    try:
+        started = service.start_antigravity("slow prompt")
+        assert started["status"] == "accepted"
+        assert started["run_id"]
+        early = service.await_antigravity_run(started["run_id"], timeout_sec=0.01)
+        assert early["status"] in {"queued", "sending", "running"}
+        assert "result" not in early
+
+        release.set()
+        done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
+
+        assert done["status"] == "completed"
+        assert done["result"]["text"] == "slow answer"
+        assert done["result"]["run_id"] == started["run_id"]
+    finally:
+        service.shutdown()
+
+
+def test_idempotency_key_reuses_existing_detached_run(tmp_path) -> None:
+    service = make_service(tmp_path, ["once"])
+    try:
+        first = service.start_antigravity("first", idempotency_key="same-request")
+        second = service.start_antigravity("second", idempotency_key="same-request")
+        done = service.await_antigravity_run(first["run_id"], timeout_sec=2)
+
+        assert second["run_id"] == first["run_id"]
+        assert second["idempotent"] is True
+        assert done["result"]["text"] == "once"
+        assert len(service.runner.calls) == 1
+    finally:
+        service.shutdown()
+
+
+def test_get_antigravity_run_event_cursor_returns_only_later_events(tmp_path) -> None:
+    release = threading.Event()
+
+    def slow_response(session_id, **kwargs):  # noqa: ANN001, ANN003
+        release.wait(timeout=2)
+        stdout = json.dumps({"response": "cursor ok", "metadata": {"streaming": False, "run_id": session_id}})
+        return AgyRunResult.completed(stdout, metadata={"streaming": False, "run_id": session_id})
+
+    service = make_service(tmp_path, [slow_response])
+    try:
+        started = service.start_antigravity("cursor")
+        first = service.get_antigravity_run(started["run_id"])
+        cursor = first["next_event_cursor"]
+        release.set()
+        done = service.await_antigravity_run(started["run_id"], timeout_sec=2, event_cursor=cursor)
+
+        assert done["status"] == "completed"
+        assert done["events"]
+        assert all(event["event_id"] != cursor for event in done["events"])
+    finally:
+        service.shutdown()
+
+
+def test_cancel_antigravity_run_marks_run_cancelled(tmp_path) -> None:
+    observed_cancel = threading.Event()
+
+    def cancellable_response(session_id, cancel_event, **kwargs):  # noqa: ANN001, ANN003
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                observed_cancel.set()
+                return AgyRunResult.cancelled(metadata={"streaming": False, "cancelled": True})
+            time.sleep(0.01)
+        return AgyRunResult.completed(json.dumps({"response": "too late", "metadata": {"streaming": False, "run_id": session_id}}))
+
+    service = make_service(tmp_path, [cancellable_response])
+    try:
+        started = service.start_antigravity("cancel me")
+        _wait_for_session_status(service.hub, "running")
+
+        cancelled = service.cancel_antigravity_run(started["run_id"])
+        done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
+
+        assert cancelled["cancel"]["status"] in {"cancelling", "cancelled"}
+        assert done["status"] == "cancelled"
+        assert observed_cancel.is_set()
+    finally:
+        service.shutdown()
+
+
+def test_heartbeat_callback_records_observer_event(tmp_path) -> None:
+    def heartbeat_response(session_id, heartbeat_callback, **kwargs):  # noqa: ANN001, ANN003
+        heartbeat_callback({"elapsed_ms": 10, "timeout_remaining_ms": 1990, "pid": 123, "capture_mode": "test", "stdout_bytes": 0, "stderr_bytes": 0})
+        stdout = json.dumps({"response": "heartbeat ok", "metadata": {"streaming": False, "run_id": session_id}})
+        return AgyRunResult.completed(stdout, metadata={"streaming": False, "run_id": session_id})
+
+    service = make_service(tmp_path, [heartbeat_response])
+    try:
+        started = service.start_antigravity("heartbeat")
+        done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
+        events = service.hub.get_events(started["run_id"], raw=True)
+
+        assert done["status"] == "completed"
+        heartbeat = next(event for event in events if event["type"] == "antigravity.heartbeat")
+        assert heartbeat["payload"]["pid"] == 123
+        assert heartbeat["payload"]["timeout_remaining_ms"] == 1990
     finally:
         service.shutdown()
 

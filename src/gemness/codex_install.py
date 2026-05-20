@@ -19,10 +19,27 @@ CONSOLE_SCRIPT = "gemness"
 TOOL_NAMES = (
     "antigravity_health",
     "ask_antigravity",
+    "start_antigravity",
     "follow_up_antigravity",
+    "start_follow_up_antigravity",
     "ask_antigravity_json",
+    "start_antigravity_json",
     "review_current_diff_with_antigravity",
+    "start_review_current_diff_with_antigravity",
+    "get_antigravity_run",
+    "await_antigravity_run",
+    "cancel_antigravity_run",
 )
+AUTO_APPROVE_TOOLS = {
+    "antigravity_health",
+    "ask_antigravity",
+    "start_antigravity",
+    "follow_up_antigravity",
+    "start_follow_up_antigravity",
+    "get_antigravity_run",
+    "await_antigravity_run",
+    "cancel_antigravity_run",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +87,7 @@ def build_codex_config(options: CodexConfigOptions) -> str:
     approval_blocks = "\n\n".join(
         (
             f"[mcp_servers.{MCP_SERVER_NAME}.tools.{_toml_string(name)}]\n"
-            f"approval_mode = {_toml_string('approve' if name in {'antigravity_health', 'ask_antigravity', 'follow_up_antigravity'} else 'prompt')}"
+            f"approval_mode = {_toml_string('approve' if name in AUTO_APPROVE_TOOLS else 'prompt')}"
         )
         for name in TOOL_NAMES
     )
@@ -83,6 +100,8 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
         "GEMNESS_AGY_TIMEOUT": "600",
         "GEMNESS_AGY_CAPTURE_MODE": "auto",
+        "GEMNESS_AGY_HEARTBEAT_INTERVAL": "5",
+        "GEMNESS_AGY_CONCURRENCY_LIMIT": "4",
     }
     if options.agy_command:
         env_lines["GEMNESS_AGY_COMMAND"] = options.agy_command
@@ -122,6 +141,8 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
             "GEMNESS_AGY_TIMEOUT": "600",
             "GEMNESS_AGY_CAPTURE_MODE": "auto",
+            "GEMNESS_AGY_HEARTBEAT_INTERVAL": "5",
+            "GEMNESS_AGY_CONCURRENCY_LIMIT": "4",
         }
     )
     if options.agy_command:

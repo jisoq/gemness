@@ -83,6 +83,8 @@ required = false
 [mcp_servers.gemness.env]
 GEMNESS_AGY_TIMEOUT = "600"
 GEMNESS_AGY_CAPTURE_MODE = "auto"
+GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"
+GEMNESS_AGY_CONCURRENCY_LIMIT = "4"
 ```
 
 Verify:
@@ -93,6 +95,8 @@ Verify:
 - Default bootstrap does not write workspace-root or allowed-root environment values.
 - Default bootstrap does not write a machine-specific `GEMNESS_AGY_COMMAND`.
 - `GEMNESS_AGY_CAPTURE_MODE = "auto"` allows Windows console capture and ordinary stdout/stderr capture elsewhere.
+- `GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"` records progress events for long detached runs.
+- `GEMNESS_AGY_CONCURRENCY_LIMIT = "4"` limits concurrent Antigravity background runs.
 
 To pin a local CLI path explicitly:
 

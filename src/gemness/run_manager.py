@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from .config import GemnessConfig
+from .models import utc_now
+from .observer import FINAL_STATUSES, ObserverHub, OPEN_SESSION_STATUSES
+
+
+RunCallable = Callable[
+    [threading.Event, Callable[[Any], None], Callable[[dict[str, Any]], None]],
+    dict[str, Any],
+]
+
+
+@dataclass(slots=True)
+class ManagedRun:
+    run_id: str
+    idempotency_key: str | None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    done: threading.Event = field(default_factory=threading.Event)
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    process: Any = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    started_at: str = field(default_factory=utc_now)
+    completed_at: str | None = None
+
+
+class RunManager:
+    def __init__(self, config: GemnessConfig, hub: ObserverHub) -> None:
+        self.config = config
+        self.hub = hub
+        self._runs: dict[str, ManagedRun] = {}
+        self._idempotency: dict[str, str] = {}
+        self._lock = threading.RLock()
+        self._semaphore = threading.BoundedSemaphore(max(1, int(config.agy_concurrency_limit or 1)))
+
+    def find_by_idempotency_key(self, idempotency_key: str | None) -> str | None:
+        key = _clean_key(idempotency_key)
+        if key is None:
+            return None
+        with self._lock:
+            run_id = self._idempotency.get(key)
+        if run_id is not None:
+            return run_id
+        self.hub.refresh_from_disk()
+        for session in self.hub.list_sessions():
+            session_id = session.get("session_id")
+            if not isinstance(session_id, str):
+                continue
+            for event in self.hub.get_events(session_id, raw=True):
+                if event.get("type") != "run.accepted":
+                    continue
+                payload = event.get("payload", {})
+                if isinstance(payload, dict) and payload.get("idempotency_key") == key:
+                    with self._lock:
+                        self._idempotency[key] = session_id
+                    return session_id
+        return None
+
+    def start(self, run_id: str, run_callable: RunCallable, *, idempotency_key: str | None = None) -> ManagedRun:
+        managed = ManagedRun(run_id=run_id, idempotency_key=_clean_key(idempotency_key))
+        with self._lock:
+            self._runs[run_id] = managed
+            if managed.idempotency_key:
+                self._idempotency.setdefault(managed.idempotency_key, run_id)
+        self.hub.append_event(
+            run_id,
+            "run.accepted",
+            "system",
+            {
+                "run_id": run_id,
+                "idempotency_key": managed.idempotency_key,
+                "concurrency_limit": max(1, int(self.config.agy_concurrency_limit or 1)),
+            },
+        )
+        thread = threading.Thread(target=self._worker, args=(managed, run_callable), name=f"gemness-run-{run_id}", daemon=True)
+        thread.start()
+        return managed
+
+    def get(self, run_id: str) -> ManagedRun | None:
+        with self._lock:
+            return self._runs.get(run_id)
+
+    def cancel(self, run_id: str) -> dict[str, Any]:
+        managed = self.get(run_id)
+        if managed is None:
+            return self._cancel_unmanaged(run_id)
+        if managed.result is not None:
+            return {
+                "status": str(managed.result.get("status") or "completed"),
+                "run_id": run_id,
+                "message": "Run is already terminal.",
+            }
+        managed.cancel_event.set()
+        self.hub.append_event(run_id, "run.cancel_requested", "system", {"run_id": run_id})
+        process = managed.process
+        if process is not None:
+            try:
+                process.terminate()
+            except Exception as exc:  # noqa: BLE001 - best-effort cancellation surface.
+                self.hub.append_event(run_id, "run.cancel_failed", "system", {"run_id": run_id, "message": str(exc)})
+        with managed.condition:
+            if managed.result is None:
+                self._cancel_if_still_queued(run_id)
+        return {"status": "cancelling", "run_id": run_id}
+
+    def await_run(self, run_id: str, timeout_sec: float) -> ManagedRun | None:
+        managed = self.get(run_id)
+        if managed is None:
+            return None
+        timeout_sec = max(0.0, min(float(timeout_sec), 30.0))
+        deadline = time.monotonic() + timeout_sec
+        with managed.condition:
+            while managed.result is None and not managed.done.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                managed.condition.wait(timeout=remaining)
+        return managed
+
+    def register_process(self, run_id: str, process: Any) -> None:
+        managed = self.get(run_id)
+        if managed is None:
+            return
+        with managed.condition:
+            managed.process = process
+            managed.condition.notify_all()
+
+    def heartbeat(self, run_id: str, payload: dict[str, Any]) -> None:
+        managed = self.get(run_id)
+        payload = {"run_id": run_id, **payload}
+        if managed is not None and managed.cancel_event.is_set():
+            payload["cancel_requested"] = True
+        self.hub.append_event(run_id, "antigravity.heartbeat", "gemness", payload)
+
+    def _worker(self, managed: ManagedRun, run_callable: RunCallable) -> None:
+        acquired = False
+        try:
+            self._semaphore.acquire()
+            acquired = True
+            if managed.cancel_event.is_set():
+                managed.result = self._mark_cancelled(managed.run_id, "cancelled_before_start")
+                return
+            result = run_callable(
+                managed.cancel_event,
+                lambda process: self.register_process(managed.run_id, process),
+                lambda payload: self.heartbeat(managed.run_id, payload),
+            )
+            managed.result = result
+        except Exception as exc:  # noqa: BLE001 - detached worker must settle its public run.
+            managed.error = str(exc)
+            managed.result = {
+                "status": "error",
+                "run_id": managed.run_id,
+                "session_id": managed.run_id,
+                "message": str(exc),
+                "observer_url": self.hub.observer_url(managed.run_id),
+            }
+            try:
+                self.hub.set_status(managed.run_id, "error", "session.error", managed.result)
+            except Exception:
+                pass
+        finally:
+            if acquired:
+                self._semaphore.release()
+            managed.completed_at = utc_now()
+            managed.done.set()
+            with managed.condition:
+                managed.condition.notify_all()
+
+    def _cancel_unmanaged(self, run_id: str) -> dict[str, Any]:
+        try:
+            session = self.hub.get_session(run_id, raw=True)
+        except KeyError:
+            return {"status": "error", "run_id": run_id, "message": f"Unknown run_id: {run_id}"}
+        if session.get("status") in FINAL_STATUSES:
+            return {"status": session["status"], "run_id": run_id, "message": "Run is already terminal."}
+        payload = {
+            "status": "cancelled",
+            "run_id": run_id,
+            "session_id": run_id,
+            "observer_url": self.hub.observer_url(run_id),
+            "reason": "cancel_requested_after_manager_restart",
+        }
+        self.hub.append_event(run_id, "run.cancel_requested", "system", {"run_id": run_id, "managed": False})
+        self.hub.set_status(run_id, "cancelled", "session.cancelled", payload)
+        return payload
+
+    def _cancel_if_still_queued(self, run_id: str) -> None:
+        try:
+            session = self.hub.get_session(run_id, raw=True)
+        except KeyError:
+            return
+        if session.get("status") not in OPEN_SESSION_STATUSES:
+            return
+        if session.get("status") != "queued":
+            return
+        self._mark_cancelled(run_id, "cancelled_while_queued")
+
+    def _mark_cancelled(self, run_id: str, reason: str) -> dict[str, Any]:
+        payload = {
+            "status": "cancelled",
+            "run_id": run_id,
+            "session_id": run_id,
+            "observer_url": self.hub.observer_url(run_id),
+            "reason": reason,
+        }
+        self.hub.set_status(run_id, "cancelled", "session.cancelled", payload)
+        return payload
+
+
+def _clean_key(idempotency_key: str | None) -> str | None:
+    if idempotency_key is None:
+        return None
+    key = " ".join(str(idempotency_key).split())
+    return key or None
