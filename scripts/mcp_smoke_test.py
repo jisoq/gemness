@@ -7,7 +7,7 @@ from gemness.mcp_smoke import run_smoke
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the Gemness MCP server over stdio JSON-RPC.")
-    parser.add_argument("--real", action="store_true", help="Also call ask_text and invoke the real Gemini CLI.")
+    parser.add_argument("--real", action="store_true", help="Also call ask_antigravity and invoke the real Antigravity CLI.")
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Server command after --, for example: -- gemness start-mcp-server")
     args = parser.parse_args()

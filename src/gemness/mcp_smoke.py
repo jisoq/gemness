@@ -50,14 +50,14 @@ def run_smoke(
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
-                "params": {"name": "health_check", "arguments": {"check_gemini": False}},
+                "params": {"name": "antigravity_health", "arguments": {"check_antigravity": False}},
             },
             timeout,
         )
         health_result = health["result"]["structuredContent"]
         if health_result["status"] not in {"ok", "warning"}:
-            raise RuntimeError(f"health_check failed: {health_result}")
-        lines.append(f"health_check ok: status={health_result['status']} cwd={health_result['workspace']['cwd']}")
+            raise RuntimeError(f"antigravity_health failed: {health_result}")
+        lines.append(f"antigravity_health ok: status={health_result['status']} cwd={health_result['workspace']['cwd']}")
 
         if real:
             asked = _request(
@@ -67,7 +67,7 @@ def run_smoke(
                     "id": 4,
                     "method": "tools/call",
                     "params": {
-                        "name": "ask_text",
+                        "name": "ask_antigravity",
                         "arguments": {"prompt": "Reply with one short sentence confirming Gemness smoke test connectivity."},
                     },
                 },
@@ -75,8 +75,8 @@ def run_smoke(
             )
             asked_result = asked["result"]["structuredContent"]
             if asked_result["status"] == "error":
-                raise RuntimeError(f"ask_text failed: {asked_result}")
-            lines.append(f"ask_text ok: status={asked_result['status']}")
+                raise RuntimeError(f"ask_antigravity failed: {asked_result}")
+            lines.append(f"ask_antigravity ok: status={asked_result['status']}")
 
         lines.append("MCP smoke test passed")
         return lines

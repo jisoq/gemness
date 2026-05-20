@@ -10,34 +10,33 @@ from .tools import GemnessService
 
 TOOLS = [
     {
-        "name": "health_check",
-        "description": "Check MCP server, workspace, observer, and Gemini CLI readiness without calling a model.",
+        "name": "antigravity_health",
+        "description": "Check MCP server, workspace, observer, and Antigravity CLI readiness.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "cwd": {"type": "string"},
-                "check_gemini": {"type": "boolean", "default": True},
+                "check_antigravity": {"type": "boolean", "default": True},
             },
         },
     },
     {
-        "name": "ask_text",
-        "description": "Ask Gemini for advisory text and expose the call in the local observer UI.",
+        "name": "ask_antigravity",
+        "description": "Ask Antigravity CLI for advisory text and expose the call in the local observer UI.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "required": ["prompt"],
             "properties": {
                 "prompt": {"type": "string"},
-                "model": {"type": "string"},
                 "cwd": {"type": "string"},
             },
         },
     },
     {
-        "name": "follow_up",
-        "description": "Continue a previous Gemini observer conversation from a parent session id.",
+        "name": "follow_up_antigravity",
+        "description": "Continue a previous Antigravity observer conversation from a parent session id.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -45,13 +44,12 @@ TOOLS = [
             "properties": {
                 "parent_session_id": {"type": "string"},
                 "prompt": {"type": "string"},
-                "model": {"type": "string"},
             },
         },
     },
     {
-        "name": "ask_json",
-        "description": "Ask Gemini for JSON, validate it against a schema, and expose parse/repair events.",
+        "name": "ask_antigravity_json",
+        "description": "Ask Antigravity CLI for JSON, validate it against a schema, and expose parse/repair events.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -59,20 +57,18 @@ TOOLS = [
             "properties": {
                 "prompt": {"type": "string"},
                 "schema": {"type": "object"},
-                "model": {"type": "string"},
                 "cwd": {"type": "string"},
             },
         },
     },
     {
-        "name": "review_current_diff",
-        "description": "Review the current git diff with Gemini without granting Gemini shell access.",
+        "name": "review_current_diff_with_antigravity",
+        "description": "Ask Antigravity CLI to inspect the current workspace and review repository changes itself.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "base_ref": {"type": "string", "default": "HEAD"},
-                "model": {"type": "string"},
                 "cwd": {"type": "string"},
             },
         },
@@ -131,16 +127,16 @@ def _handle_message(message: dict[str, Any], service: GemnessService) -> dict[st
 def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any]:
     name = _normalize_tool_name(params.get("name"))
     arguments = params.get("arguments") or {}
-    if name == "health_check":
-        result = service.health_check(cwd=arguments.get("cwd"), check_gemini=bool(arguments.get("check_gemini", True)))
-    elif name == "ask_text":
-        result = service.ask_text(str(arguments["prompt"]), model=arguments.get("model"), cwd=arguments.get("cwd"))
-    elif name == "follow_up":
-        result = service.follow_up(str(arguments["parent_session_id"]), str(arguments["prompt"]), model=arguments.get("model"))
-    elif name == "ask_json":
-        result = service.ask_json(str(arguments["prompt"]), arguments["schema"], model=arguments.get("model"), cwd=arguments.get("cwd"))
-    elif name == "review_current_diff":
-        result = service.review_current_diff(base_ref=str(arguments.get("base_ref") or "HEAD"), model=arguments.get("model"), cwd=arguments.get("cwd"))
+    if name == "antigravity_health":
+        result = service.antigravity_health(cwd=arguments.get("cwd"), check_antigravity=bool(arguments.get("check_antigravity", True)))
+    elif name == "ask_antigravity":
+        result = service.ask_antigravity(str(arguments["prompt"]), cwd=arguments.get("cwd"))
+    elif name == "follow_up_antigravity":
+        result = service.follow_up_antigravity(str(arguments["parent_session_id"]), str(arguments["prompt"]))
+    elif name == "ask_antigravity_json":
+        result = service.ask_antigravity_json(str(arguments["prompt"]), arguments["schema"], cwd=arguments.get("cwd"))
+    elif name == "review_current_diff_with_antigravity":
+        result = service.review_current_diff_with_antigravity(base_ref=str(arguments.get("base_ref") or "HEAD"), cwd=arguments.get("cwd"))
     else:
         raise ValueError(f"Unknown tool: {params.get('name')}")
     return {

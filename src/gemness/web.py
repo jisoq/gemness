@@ -18,7 +18,7 @@ class ObserverWebServer:
             raise ValueError("Observer web server only supports loopback hosts")
         self.hub = hub
         self.httpd = _HubHTTPServer((host, port), _Handler, hub)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, name="gemini-observer-web", daemon=True)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, name="Antigravity-observer-web", daemon=True)
 
     @property
     def base_url(self) -> str:
@@ -79,7 +79,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"conversations": self.server.hub.list_conversations()})
             return
         if path == "/api/config":
-            self._json({"pause_before_send": self.server.hub.pause_before_send, "redact_raw_by_default": True})
+            self._json({"redact_raw_by_default": True})
             return
         if path == "/api/events":
             self._sse(raw=_truthy(query.get("raw", ["0"])[0]))
@@ -95,7 +95,7 @@ class _Handler(BaseHTTPRequestHandler):
                 body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Disposition", f"attachment; filename=gemini-session-{quote(session_id)}.json")
+                self.send_header("Content-Disposition", f"attachment; filename=Antigravity-session-{quote(session_id)}.json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -118,46 +118,48 @@ class _Handler(BaseHTTPRequestHandler):
                 return
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
-    def do_POST(self) -> None:
+    def do_PATCH(self) -> None:
         parsed = urlparse(self.path)
         payload = self._read_json()
-        path = parsed.path
-        if path == "/api/config":
-            if "pause_before_send" in payload:
-                self.server.hub.pause_before_send = bool(payload["pause_before_send"])
-            self._json({"pause_before_send": self.server.hub.pause_before_send})
-            return
-        parts = _parts(path)
-        if len(parts) == 4 and parts[:2] == ["api", "sessions"] and parts[3] == "interventions":
-            session_id = parts[2]
-            action = str(payload.get("action") or "")
-            instruction = payload.get("instruction")
-            prompt = payload.get("prompt")
-            session = self.server.hub.sessions.get(session_id)
-            if session is None:
-                self._json({"error": "unknown session"}, HTTPStatus.NOT_FOUND)
+        parts = _parts(parsed.path)
+        title = str(payload.get("title") or "")
+        try:
+            if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
+                session = self.server.hub.rename_session(parts[2], title)
+                self._json({"session": session})
                 return
-            terminal_statuses = {"completed", "valid", "invalid", "error"}
-            should_follow_up = action == "follow_up" or (
-                session.status in terminal_statuses and action in {"approve", "add_instruction", "edit_prompt"}
-            )
-            if should_follow_up:
-                follow_up_text = str(instruction or prompt or "").strip()
-                if not follow_up_text:
-                    self._json({"error": "follow-up instruction required"}, HTTPStatus.BAD_REQUEST)
-                    return
-                self.server.hub.add_intervention(session_id, action, instruction=instruction)
-                self.server.hub.pop_intervention(session_id, {action})
-                if self.server.hub.service is None:
-                    self._json({"error": "service unavailable"}, HTTPStatus.CONFLICT)
-                    return
-                child_session_id = self.server.hub.service.start_follow_up(session_id, follow_up_text)
-                child = self.server.hub.sessions.get(child_session_id)
-                self._json({"child_session_id": child_session_id, "conversation_id": child.conversation_id if child else None})
+            if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
+                conversation = self.server.hub.rename_conversation(parts[2], title)
+                self._json({"conversation": conversation})
                 return
-            intervention = self.server.hub.add_intervention(session_id, action, instruction=instruction, prompt=prompt)
-            self._json({"intervention": intervention.to_dict()})
+        except KeyError:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
+        except ValueError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        parts = _parts(parsed.path)
+        try:
+            if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
+                self._json(self.server.hub.delete_session(parts[2]))
+                return
+            if len(parts) == 3 and parts[:2] == ["api", "conversations"]:
+                self._json(self.server.hub.delete_conversation(parts[2]))
+                return
+        except KeyError:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        except ValueError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+            return
+        self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:
+        self._read_json()
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def _authorized(self, query: dict[str, list[str]]) -> bool:
@@ -240,7 +242,7 @@ INDEX_HTML = r"""<!doctype html>
       --warn: #956300;
       --good: #157348;
       --agents: #0d6b72;
-      --gemini: #6650a4;
+      --Antigravity: #6650a4;
       --observer: #59636f;
       --user: #8a5600;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -258,7 +260,7 @@ INDEX_HTML = r"""<!doctype html>
         --warn: #e3b247;
         --good: #61d394;
         --agents: #5dd4dd;
-        --gemini: #c6b8ff;
+        --Antigravity: #c6b8ff;
         --observer: #aeb8c4;
         --user: #ffd27d;
       }
@@ -275,10 +277,9 @@ INDEX_HTML = r"""<!doctype html>
       cursor: pointer;
     }
     button.primary { background: var(--accent); border-color: var(--accent); color: white; }
-    .layout { display: grid; grid-template-columns: 320px minmax(0, 1fr) 340px; min-height: 100vh; }
-    aside, main, .intervention { min-width: 0; padding: 16px; }
+    .layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); min-height: 100vh; }
+    aside, main { min-width: 0; padding: 16px; }
     aside { border-right: 1px solid var(--line); background: var(--panel); }
-    .intervention { border-left: 1px solid var(--line); background: var(--panel); }
     h1, h2 { margin: 0 0 12px; font-size: 16px; }
     .toolbar, .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .session-list { display: grid; gap: 8px; }
@@ -296,9 +297,24 @@ INDEX_HTML = r"""<!doctype html>
       width: 100%;
       text-align: left;
       display: grid;
-      gap: 4px;
+      gap: 8px;
       background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px;
     }
+    .session-main {
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      padding: 0;
+      display: grid;
+      gap: 4px;
+      text-align: left;
+      width: 100%;
+    }
+    .session-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .session-actions button { padding: 4px 7px; font-size: 12px; background: var(--panel); }
     .session-title { font-weight: 700; overflow-wrap: anywhere; }
     .session.active { outline: 2px solid var(--accent); }
     .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -346,8 +362,8 @@ INDEX_HTML = r"""<!doctype html>
     .turn-title::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--observer); flex: 0 0 auto; }
     .turn.agents .turn-title { color: var(--agents); }
     .turn.agents .turn-title::before { background: var(--agents); }
-    .turn.gemini .turn-title { color: var(--gemini); }
-    .turn.gemini .turn-title::before { background: var(--gemini); }
+    .turn.Antigravity .turn-title { color: var(--Antigravity); }
+    .turn.Antigravity .turn-title::before { background: var(--Antigravity); }
     .turn.user .turn-title { color: var(--user); }
     .turn.user .turn-title::before { background: var(--user); }
     .turn.error .turn-title { color: var(--bad); }
@@ -420,16 +436,9 @@ INDEX_HTML = r"""<!doctype html>
     pre { margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.45; }
     .prose { margin: 0; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
     .raw-block { border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
-    textarea { width: 100%; min-height: 120px; resize: vertical; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
     label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
     .stack { display: grid; gap: 10px; }
     .help { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 0; }
-    .field { display: grid; gap: 5px; }
-    .field-label { color: var(--text); font-weight: 700; font-size: 13px; }
-    .intervention-status { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; background: var(--panel-2); line-height: 1.5; }
-    .action-section { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 7px; }
-    .action-section h3 { margin: 0; font-size: 13px; }
-    .button-grid { display: grid; gap: 7px; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
     .findings { display: grid; gap: 8px; margin-bottom: 12px; }
     .finding { border-left: 3px solid var(--accent); padding: 8px 10px; background: var(--panel); }
@@ -437,10 +446,10 @@ INDEX_HTML = r"""<!doctype html>
     .debug-panel > summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
     @media (max-width: 1100px) {
       .layout { grid-template-columns: 1fr; }
-      aside, .intervention { border: 0; border-bottom: 1px solid var(--line); }
+      aside { border: 0; border-bottom: 1px solid var(--line); }
     }
     @media (max-width: 700px) {
-      aside, main, .intervention { padding: 12px; }
+      aside, main { padding: 12px; }
       .turn { grid-template-columns: 1fr; gap: 5px; }
       .turn-time { font-size: 11px; }
       .transcript-flow { padding: 0 12px; }
@@ -456,7 +465,6 @@ INDEX_HTML = r"""<!doctype html>
         <button id="refresh">새로고침</button>
       </div>
       <div class="toolbar">
-        <label><input id="pause" type="checkbox"> 보내기 전 멈춤</label>
         <label><input id="raw" type="checkbox"> 원본 보기</label>
       </div>
       <div id="sessionList" class="session-list"></div>
@@ -479,46 +487,6 @@ INDEX_HTML = r"""<!doctype html>
         <div id="debugEvents"></div>
       </details>
     </main>
-    <section class="intervention">
-      <h2>사용자 개입</h2>
-      <div class="stack">
-        <div id="interventionStatus" class="intervention-status">세션을 선택하면 현재 단계에서 가능한 개입이 표시됩니다.</div>
-        <div class="field">
-          <div class="field-label">추가 지시 / follow-up 질문</div>
-          <p id="instructionHelp" class="help">전송 전에는 기존 프롬프트 뒤에 붙고, 실행 중에는 중단 후 재시도 지시가 되며, 완료 후에는 후속 질문이 됩니다.</p>
-          <textarea id="instructionBox" placeholder="예: 테스트 관점만 다시 봐줘"></textarea>
-        </div>
-        <div class="field">
-          <div class="field-label">프롬프트 전체 교체</div>
-          <p class="help">Gemini로 보내기 전 단계에서만 사용합니다. 기존 프롬프트를 이 내용으로 완전히 바꿉니다.</p>
-          <textarea id="promptBox" placeholder="전송 전 상태에서만 사용할 전체 프롬프트"></textarea>
-        </div>
-        <div class="action-section" data-section="before-send">
-          <h3>전송 전</h3>
-          <p class="help">승인 대기 중인 프롬프트를 보내거나, 보내기 전에 내용을 바꿀 때 사용합니다.</p>
-          <div class="button-grid">
-            <button class="primary" data-action="approve">승인하고 Gemini에 전송</button>
-            <button data-action="edit_prompt">전체 프롬프트로 교체</button>
-            <button data-action="add_instruction">추가 지시를 붙임</button>
-          </div>
-        </div>
-        <div class="action-section" data-section="running">
-          <h3>실행 중</h3>
-          <p class="help">Gemini CLI에는 실시간 주입을 하지 않습니다. 필요하면 현재 실행을 끊고 지시를 포함해 새로 시도합니다.</p>
-          <div class="button-grid">
-            <button data-action="interrupt_retry">중단 후 이 지시로 재시도</button>
-            <button data-action="cancel">세션 취소</button>
-          </div>
-        </div>
-        <div class="action-section" data-section="after-complete">
-          <h3>완료 후</h3>
-          <p class="help">기존 대화 요약을 이어받아 새 follow-up 세션을 만듭니다.</p>
-          <div class="button-grid">
-            <button data-action="follow_up">후속 질문으로 이어가기</button>
-          </div>
-        </div>
-      </div>
-    </section>
   </div>
   <script>
     const explicitSessionPath = location.pathname.startsWith("/sessions/");
@@ -531,6 +499,7 @@ INDEX_HTML = r"""<!doctype html>
     let transcript = null;
     let source = null;
     let pollTimer = null;
+    let refreshInFlight = null;
     if (explicitSessionPath) canonicalizeDashboardUrl();
 
     const statusLabels = {
@@ -546,13 +515,13 @@ INDEX_HTML = r"""<!doctype html>
       completed: "완료"
     };
     const toolLabels = {
-      ask_text: "텍스트 질문",
-      ask_json: "JSON 질문",
-      review_current_diff: "현재 diff 리뷰"
+      ask_antigravity: "Antigravity 질문",
+      ask_antigravity_json: "Antigravity JSON 질문",
+      review_current_diff_with_antigravity: "현재 변경 리뷰"
     };
     const roleLabels = {
       codex_mcp: "Codex/MCP",
-      gemness: "Gemini CLI",
+      gemness: "Antigravity CLI",
       user: "사용자",
       system: "시스템"
     };
@@ -562,15 +531,11 @@ INDEX_HTML = r"""<!doctype html>
       "prompt.redacted": "민감정보 가림",
       "prompt.pending_approval": "전송 승인 대기",
       "prompt.sent": "프롬프트 전송",
-      "gemini.started": "Gemini 실행 시작",
-      "gemini.model_detected": "Gemini 모델 감지",
-      "gemini.delta": "Gemini 응답 조각",
-      "gemini.response": "Gemini 응답",
-      "gemini.stderr": "Gemini 경고",
-      "gemini.stream_error": "Gemini 스트림 오류",
-      "gemini.tool_use": "Gemini 도구 요청",
-      "gemini.tool_result": "Gemini 도구 결과",
-      "gemini.exited": "Gemini 종료",
+      "antigravity.started": "Antigravity 실행 시작",
+      "antigravity.model_detected": "Antigravity 모델 감지",
+      "antigravity.response": "Antigravity 응답",
+      "antigravity.stderr": "Antigravity 경고",
+      "antigravity.exited": "Antigravity 종료",
       "json.extracted": "JSON 후보 추출",
       "json.parse_failed": "JSON 파싱 실패",
       "json.validation_failed": "스키마 검증 실패",
@@ -580,10 +545,8 @@ INDEX_HTML = r"""<!doctype html>
       "repair.response": "복구 응답",
       "repair.validation_passed": "복구 검증 성공",
       "repair.validation_failed": "복구 검증 실패",
-      "intervention.received": "개입 수신",
-      "intervention.applied": "개입 적용",
       "run.command": "실행 명령",
-      "conversation.native_session_rotated": "Gemini native session 회전",
+      "conversation.agy_context_rotated": "Antigravity 대화 컨텍스트 회전",
       "session.completed": "세션 완료",
       "session.cancelled": "세션 취소",
       "session.error": "세션 오류"
@@ -615,8 +578,8 @@ INDEX_HTML = r"""<!doctype html>
         // Storage may be disabled in private contexts.
       }
     }
-    async function getJson(path) {
-      const response = await fetch(api(path));
+    async function requestJson(path, options = {}) {
+      const response = await fetch(api(path), options);
       if (!response.ok) {
         const message = await response.text();
         if (response.status === 401) recoverFromAuthFailure();
@@ -625,19 +588,30 @@ INDEX_HTML = r"""<!doctype html>
       markAuthHealthy();
       return await response.json();
     }
-    async function postJson(path, body) {
-      const response = await fetch(api(path), {
-        method: "POST",
+    async function getJson(path) {
+      return await requestJson(path);
+    }
+    async function patchJson(path, body) {
+      return await requestJson(path, {
+        method: "PATCH",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body)
       });
-      if (!response.ok) {
-        const message = await response.text();
-        if (response.status === 401) recoverFromAuthFailure();
-        throw new Error(message);
-      }
-      markAuthHealthy();
-      return await response.json();
+    }
+    async function deleteJson(path) {
+      return await requestJson(path, {
+        method: "DELETE"
+      });
+    }
+    function hasActiveTextSelection() {
+      const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+      return !!selection && !selection.isCollapsed && !!String(selection.toString() || "").trim();
+    }
+    function refreshDashboard(options = {}) {
+      if (options.automatic && hasActiveTextSelection()) return Promise.resolve();
+      if (refreshInFlight) return refreshInFlight;
+      refreshInFlight = loadSessions().finally(() => { refreshInFlight = null; });
+      return refreshInFlight;
     }
     async function loadSessions() {
       const data = await getJson("/api/sessions");
@@ -714,10 +688,11 @@ INDEX_HTML = r"""<!doctype html>
       const conversationItems = groupSessionsByConversation(sessions);
       const liveSessions = conversationItems.filter((session) => !isTerminalStatus(session.status));
       const historySessions = conversationItems.filter((session) => isTerminalStatus(session.status));
-      qs("sessionList").innerHTML = [
+      const html = [
         renderSessionGroup("Live", liveSessions, "실행 중인 세션이 없습니다."),
         renderSessionGroup("History", historySessions, "이전 세션이 없습니다.")
       ].join("");
+      if (!setInnerHtmlIfChanged("sessionList", html)) return;
       document.querySelectorAll("[data-session]").forEach((button) => {
         button.onclick = async () => {
           liveMode = false;
@@ -727,13 +702,21 @@ INDEX_HTML = r"""<!doctype html>
           await loadTranscript();
         };
       });
+      document.querySelectorAll("[data-rename-kind]").forEach((button) => {
+        button.onclick = () => renameSessionListItem(button);
+      });
+      document.querySelectorAll("[data-delete-kind]").forEach((button) => {
+        button.onclick = () => deleteSessionListItem(button);
+      });
     }
     function groupSessionsByConversation(sessionItems) {
       const groups = new Map();
       for (const session of sessionItems || []) {
         const key = session.conversation_id || session.session_id;
-        if (!groups.has(key)) groups.set(key, { conversation_id: session.conversation_id || "", runs: [] });
-        groups.get(key).runs.push(session);
+        if (!groups.has(key)) groups.set(key, { conversation_id: session.conversation_id || "", conversation_title: session.conversation_title || "", runs: [] });
+        const group = groups.get(key);
+        if (session.conversation_title && !group.conversation_title) group.conversation_title = session.conversation_title;
+        group.runs.push(session);
       }
       return [...groups.values()]
         .map(conversationListItem)
@@ -748,9 +731,10 @@ INDEX_HTML = r"""<!doctype html>
       const turnCount = runs.reduce((count, session) => Math.max(count, Number(session.turn_index) || 0), 0) || runs.length;
       return {
         ...display,
-        title: root.title || display.title,
+        title: group.conversation_title || root.title || display.title,
         session_id: display.session_id,
         conversation_id: display.conversation_id || group.conversation_id,
+        conversation_title: group.conversation_title || "",
         turn_count: turnCount,
         _active: runs.some((session) => session.session_id === currentSessionId),
         _run_session_ids: runs.map((session) => session.session_id)
@@ -774,31 +758,73 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderSessionButton(s) {
       const toolMeta = s.turn_count && s.turn_count > 1 ? `${s.turn_count}턴 · ${toolLabel(s.tool_name)}` : toolLabel(s.tool_name);
+      const targetKind = s.conversation_id ? "conversation" : "session";
+      const targetId = s.conversation_id || s.session_id;
+      const title = sessionTitle(s);
+      const deleteDisabled = isTerminalStatus(s.status) ? "" : "disabled";
+      const deleteTitle = isTerminalStatus(s.status) ? "기록 제거" : "실행 중인 항목은 제거할 수 없습니다.";
       return `
-        <button class="session ${s._active || s.session_id === currentSessionId ? "active" : ""}" data-session="${s.session_id}">
-          <span><span class="session-title">${escapeHtml(sessionTitle(s))}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span>
-          <span class="meta">${escapeHtml(toolMeta)}</span>
-          <span class="meta">${escapeHtml(s.model || "")}</span>
-          <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
-        </button>
+        <article class="session ${s._active || s.session_id === currentSessionId ? "active" : ""}">
+          <button class="session-main" data-session="${escapeHtml(s.session_id)}">
+            <span><span class="session-title">${escapeHtml(title)}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span>
+            <span class="meta">${escapeHtml(toolMeta)}</span>
+            <span class="meta">${escapeHtml(s.model || "")}</span>
+            <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
+          </button>
+          <div class="session-actions">
+            <button data-rename-kind="${targetKind}" data-rename-id="${escapeHtml(targetId)}" data-current-title="${escapeHtml(title)}">이름 변경</button>
+            <button data-delete-kind="${targetKind}" data-delete-id="${escapeHtml(targetId)}" data-delete-title="${escapeHtml(title)}" title="${escapeHtml(deleteTitle)}" ${deleteDisabled}>제거</button>
+          </div>
+        </article>
       `;
+    }
+    async function renameSessionListItem(button) {
+      const kind = button.dataset.renameKind;
+      const id = button.dataset.renameId;
+      const currentTitle = button.dataset.currentTitle || "";
+      const nextTitle = prompt("새 이름", currentTitle);
+      if (nextTitle === null) return;
+      const title = nextTitle.trim();
+      if (!title) {
+        alert("이름을 입력해주세요.");
+        return;
+      }
+      const path = kind === "conversation" ? `/api/conversations/${id}` : `/api/sessions/${id}`;
+      await patchJson(path, { title });
+      await loadSessions();
+    }
+    async function deleteSessionListItem(button) {
+      const kind = button.dataset.deleteKind;
+      const id = button.dataset.deleteId;
+      const title = button.dataset.deleteTitle || "선택한 항목";
+      if (!confirm(`"${title}" 기록을 제거할까요? 이 작업은 로컬 transcript 파일도 삭제합니다.`)) return;
+      const path = kind === "conversation" ? `/api/conversations/${id}` : `/api/sessions/${id}`;
+      await deleteJson(path);
+      if (transcript?.conversation?.conversation_id === id || transcript?.session?.session_id === id) {
+        currentSessionId = "";
+        liveMode = true;
+        transcript = null;
+      }
+      await loadSessions();
     }
     function renderTranscript() {
       const session = transcript?.session || {};
+      const openKeys = openRawEventKeys();
       qs("title").textContent = session.session_id ? `${sessionTitle(session)} · ${statusLabel(session.status)}` : "대화 기록";
       renderReview(transcript?.events || []);
       renderSessionSummary(session, transcript?.events || []);
-      updateInterventionPanel(session);
       const turns = buildConversationTranscript(visibleEvents(transcript?.events || []));
-      qs("transcriptFlow").innerHTML = turns.length ? turns.map(renderConversationTurn).join("") : `<p class="prose">아직 표시할 대화가 없습니다.</p>`;
-      qs("debugEvents").innerHTML = (transcript?.events || []).map(renderRawEvent).join("");
-      const lastPrompt = [...(transcript?.events || [])].reverse().find((e) => e.type === "prompt.rendered");
-      if (lastPrompt && !qs("promptBox").value) qs("promptBox").value = lastPrompt.payload.prompt || "";
+      const visibleTurns = displayConversationTurns(turns);
+      const transcriptHtml = visibleTurns.length ? visibleTurns.map(renderConversationTurn).join("") : `<p class="prose">아직 표시할 대화가 없습니다.</p>`;
+      const debugHtml = (transcript?.events || []).map(renderRawEvent).join("");
+      setInnerHtmlIfChanged("transcriptFlow", transcriptHtml);
+      setInnerHtmlIfChanged("debugEvents", debugHtml);
+      restoreRawEventKeys(openKeys);
     }
     function renderSessionSummary(session, events) {
       const cwd = findCwd(events);
       const conversation = transcript?.conversation || {};
-      qs("summaryGrid").innerHTML = [
+      const html = [
         ["제목", sessionTitle(session)],
         ["도구", toolLabel(session.tool_name)],
         ["모델", session.model || "알 수 없음"],
@@ -811,12 +837,14 @@ INDEX_HTML = r"""<!doctype html>
         ["turn", session.turn_index || "없음"],
         ["raw 보기", qs("raw").checked ? "켜짐" : "꺼짐"]
       ].map(([label, value]) => `<span class="summary-item"><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</span>`).join("");
+      setInnerHtmlIfChanged("summaryGrid", html);
     }
     function renderConversationTurn(turn) {
       const meta = Object.entries(turn.meta || {})
         .filter(([, value]) => value !== undefined && value !== null && value !== "")
         .map(([key, value]) => `<span>${escapeHtml(metaLabel(key))}: ${escapeHtml(formatMetaValue(value))}</span>`)
         .join("");
+      const rawKey = rawEventKey(turn.rawEvent, "turn");
       return `
         <article class="turn ${escapeHtml(turn.speaker)} ${escapeHtml(turn.severity || "")}">
           <div class="turn-time">${escapeHtml(formatTime(turn.timestamp))}</div>
@@ -824,7 +852,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="turn-title">${escapeHtml(turn.title)}</div>
             <div class="turn-body">${renderMarkdown(turn.body || "")}</div>
             ${meta ? `<div class="turn-meta">${meta}</div>` : ""}
-            <details class="raw-event">
+            <details class="raw-event" data-raw-key="${escapeHtml(rawKey)}">
               <summary>원본 이벤트 보기</summary>
               <pre>${escapeHtml(JSON.stringify(turn.rawEvent || {}, null, 2))}</pre>
             </details>
@@ -833,25 +861,49 @@ INDEX_HTML = r"""<!doctype html>
       `;
     }
     function renderRawEvent(event) {
+      const rawKey = rawEventKey(event, "debug");
       return `
-        <details class="raw-event">
+        <details class="raw-event" data-raw-key="${escapeHtml(rawKey)}">
           <summary>${escapeHtml(formatTime(event.ts))} · ${escapeHtml(eventLabel(event.type))}</summary>
           <pre>${escapeHtml(JSON.stringify(event, null, 2))}</pre>
         </details>
       `;
     }
+    function rawEventKey(event, scope = "event") {
+      const fallback = [event?.session_id || "", event?.type || "", event?.ts || ""].join(":");
+      return `${scope}:${event?.event_id || fallback}`;
+    }
+    function openRawEventKeys() {
+      const keys = new Set();
+      document.querySelectorAll("details.raw-event[data-raw-key][open]").forEach((element) => {
+        if (element.dataset.rawKey) keys.add(element.dataset.rawKey);
+      });
+      return keys;
+    }
+    function restoreRawEventKeys(keys) {
+      if (!keys || !keys.size) return;
+      document.querySelectorAll("details.raw-event[data-raw-key]").forEach((element) => {
+        if (keys.has(element.dataset.rawKey)) element.open = true;
+      });
+    }
+    function setInnerHtmlIfChanged(id, html) {
+      const element = qs(id);
+      if (element.innerHTML === html) return false;
+      element.innerHTML = html;
+      return true;
+    }
     function visibleEvents(events) {
       if (qs("raw").checked) return events;
-      return events.filter((event) => !isBenignGeminiStderr(event));
+      return events.filter((event) => !isBenignAntigravityStderr(event));
     }
     function renderReview(events) {
       const completed = [...events].reverse().find((e) => e.type === "session.completed" && e.payload?.result?.data?.findings);
       if (!completed) {
-        qs("review").innerHTML = "";
+        setInnerHtmlIfChanged("review", "");
         return;
       }
       const data = completed.payload.result.data;
-      qs("review").innerHTML = `
+      const html = `
         <div class="finding"><strong>리뷰 결론: ${escapeHtml(verdictLabel(data.verdict))}</strong><br>${escapeHtml(data.summary || "")}</div>
         ${(data.findings || []).map((f) => `
           <div class="finding">
@@ -861,69 +913,16 @@ INDEX_HTML = r"""<!doctype html>
           </div>
         `).join("")}
       `;
-    }
-    async function sendIntervention(action) {
-      if (!currentSessionId) return;
-      const currentSession = sessions.find((session) => session.session_id === currentSessionId) || transcript?.session || {};
-      const body = {action};
-      const instruction = qs("instructionBox").value.trim();
-      const prompt = qs("promptBox").value.trim();
-      if (action === "edit_prompt" && !prompt) {
-        alert("프롬프트 전체 교체에는 교체할 프롬프트가 필요합니다.");
-        return;
-      }
-      if (["add_instruction", "interrupt_retry", "follow_up"].includes(action) && !instruction) {
-        alert("이 작업에는 추가 지시 / follow-up 질문이 필요합니다.");
-        return;
-      }
-      if (instruction) body.instruction = instruction;
-      if (prompt && action === "edit_prompt") body.prompt = prompt;
-      const result = await postJson(`/api/sessions/${currentSessionId}/interventions`, body);
-      if (result.child_session_id) currentSessionId = result.child_session_id;
-      await loadSessions();
-    }
-    function updateInterventionPanel(session) {
-      const status = session.status || "";
-      const waiting = status === "waiting_for_user_approval";
-      const beforeSend = ["queued", "waiting_for_user_approval"].includes(status);
-      const running = ["sending", "running", "repairing"].includes(status);
-      const terminal = isTerminalStatus(status);
-      const statusText = terminal
-        ? "완료된 세션입니다. 추가 지시 / follow-up 질문을 입력하고 후속 질문으로 이어가세요."
-        : running
-          ? "Gemini가 실행 중입니다. 새 지시는 즉시 주입되지 않으며, 중단 후 재시도로만 반영됩니다."
-          : waiting
-            ? "전송 승인 대기 중입니다. 전체 프롬프트를 교체하거나 지시를 붙인 뒤 승인할 수 있습니다."
-            : beforeSend
-              ? "아직 Gemini로 보내기 전입니다. 프롬프트를 조정하거나 취소할 수 있습니다."
-              : "현재 단계에서 가능한 개입만 활성화됩니다.";
-      qs("interventionStatus").textContent = `현재 단계: ${statusLabel(status)}. ${statusText}`;
-      setActionEnabled("approve", waiting);
-      setActionEnabled("edit_prompt", beforeSend);
-      setActionEnabled("add_instruction", beforeSend);
-      setActionEnabled("cancel", beforeSend || running);
-      setActionEnabled("interrupt_retry", running);
-      setActionEnabled("follow_up", terminal);
-      qs("promptBox").disabled = !beforeSend;
-      qs("instructionHelp").textContent = terminal
-        ? "완료 후에는 이 내용이 새 follow-up 질문으로 사용됩니다."
-        : running
-          ? "실행 중에는 이 내용이 중단 후 재시도 지시로 사용됩니다."
-          : "전송 전에는 이 내용이 기존 프롬프트 뒤에 추가됩니다.";
-    }
-    function setActionEnabled(action, enabled) {
-      document.querySelectorAll(`[data-action="${action}"]`).forEach((button) => {
-        button.disabled = !enabled;
-      });
+      setInnerHtmlIfChanged("review", html);
     }
     function openEvents() {
       if (source) source.close();
       const raw = qs("raw").checked ? "1" : "0";
       source = new EventSource(api(`/api/events?raw=${raw}`));
-      source.onmessage = async () => { await loadSessions(); };
-      source.onerror = async () => { await loadSessions().catch(console.error); };
+      source.onmessage = async () => { await refreshDashboard({automatic: true}); };
+      source.onerror = async () => { await refreshDashboard({automatic: true}).catch(console.error); };
       if (!pollTimer) {
-        pollTimer = setInterval(() => { loadSessions().catch(console.error); }, 1500);
+        pollTimer = setInterval(() => { refreshDashboard({automatic: true}).catch(console.error); }, 1500);
         if (typeof pollTimer.unref === "function") pollTimer.unref();
       }
     }
@@ -1023,6 +1022,9 @@ INDEX_HTML = r"""<!doctype html>
         .map((event, index, allEvents) => describeEventAsConversationTurn(event, index, allEvents))
         .filter(Boolean);
     }
+    function displayConversationTurns(turns) {
+      return [...(turns || [])].sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
+    }
     function describeEventAsConversationTurn(event, index = 0, allEvents = []) {
       const payload = event.payload || {};
       switch (event.type) {
@@ -1032,92 +1034,75 @@ INDEX_HTML = r"""<!doctype html>
             direction: "system",
             title: "Observer",
             timestamp: event.ts,
-            body: `${toolLabel(payload.tool_name || event.tool_name)} run이 ${payload.model || "Gemini CLI default"}로 시작되었습니다.`,
+            body: `${toolLabel(payload.tool_name || event.tool_name)} run이 ${payload.model || "Antigravity CLI default"}로 시작되었습니다.`,
             meta: { status: payload.status, conversation_id: payload.conversation_id, run_id: payload.run_id || payload.session_id },
             rawEvent: event
           };
         case "run.command":
-          return turn(event, "observer", "system", "Observer", "Gemini CLI 실행 argv가 기록되었습니다.", {
-            mode: payload.native_resume_used ? "resume" : payload.gemini_session_id ? "session-id" : "legacy",
+          return turn(event, "observer", "system", "Observer", "Antigravity CLI 실행 argv가 기록되었습니다.", {
+            streaming: payload.streaming === false ? "false" : "",
             fallback: payload.fallback_used ? payload.fallback_reason || "fallback" : ""
           });
-        case "gemini.model_detected":
-          return turn(event, "observer", "system", "Observer", `Gemini CLI가 실제 사용 모델을 보고했습니다: ${payload.model || "알 수 없음"}.`, {
+        case "antigravity.model_detected":
+          return turn(event, "observer", "system", "Observer", `Antigravity CLI가 실제 사용 모델을 보고했습니다: ${payload.model || "알 수 없음"}.`, {
             source: payload.source || "detected"
           });
-        case "conversation.native_session_rotated":
-          return turn(event, "observer", "system", "Observer", `Gemini native session을 새로 시작했습니다. 사유: ${payload.reason || "알 수 없음"}.`, {}, "warn");
+        case "conversation.agy_context_rotated":
+          return turn(event, "observer", "system", "Observer", `Antigravity 대화 컨텍스트를 새로 시작했습니다. 사유: ${payload.reason || "알 수 없음"}.`, {}, "warn");
         case "prompt.rendered":
           if (hasMatchingLaterPromptSent(event, index, allEvents)) return null;
           return {
             speaker: "agents",
-            direction: "agents_to_gemini",
-            title: "Agents -> Gemini",
+            direction: "agents_to_antigravity",
+            title: "Agents -> Antigravity",
             timestamp: event.ts,
-            body: payload.prompt || "Gemini에게 보낼 프롬프트가 준비되었습니다.",
+            body: payload.prompt || "Antigravity에게 보낼 프롬프트가 준비되었습니다.",
             meta: { 단계: "전송 전 초안" },
             rawEvent: event
           };
         case "prompt.redacted":
           return null;
         case "prompt.pending_approval":
-          return turn(event, "observer", "system", "Observer", `Gemini로 보내기 전에 사용자 승인을 기다리고 있습니다. 제한 시간은 ${payload.timeout_sec || "설정된"}초입니다.`);
+          return turn(event, "observer", "system", "Observer", `Antigravity로 보내기 전에 사용자 승인을 기다리고 있습니다. 제한 시간은 ${payload.timeout_sec || "설정된"}초입니다.`);
         case "prompt.sent":
           return {
             speaker: "agents",
-            direction: "agents_to_gemini",
-            title: "Agents -> Gemini",
+            direction: "agents_to_antigravity",
+            title: "Agents -> Antigravity",
             timestamp: event.ts,
-            body: payload.prompt || "프롬프트가 Gemini CLI로 전송되었습니다.",
-            meta: { 단계: "Gemini에 전송됨" },
+            body: payload.prompt || "프롬프트가 Antigravity CLI로 전송되었습니다.",
+            meta: { 단계: "Antigravity에 전송됨" },
             rawEvent: event
           };
-        case "gemini.started":
+        case "antigravity.started":
           return {
-            speaker: "gemini",
+            speaker: "antigravity",
             direction: "system",
-            title: "Gemini CLI",
+            title: "Antigravity CLI",
             timestamp: event.ts,
-            body: "Gemini CLI를 시작했습니다.",
-            meta: { 모델: payload.model, cwd: payload.cwd, "output mode": payload.output_format, pid: payload.pid },
+            body: "Antigravity CLI를 시작했습니다.",
+            meta: { 모델: payload.model, cwd: payload.cwd, streaming: payload.streaming, pid: payload.pid },
             rawEvent: event
           };
-        case "gemini.delta":
-          if (hasLaterGeminiOutput(event, index, allEvents)) return null;
-          return {
-            speaker: "gemini",
-            direction: "gemini_to_agents",
-            title: "Gemini -> Agents · 응답 중",
-            timestamp: event.ts,
-            body: payload.response || payload.content || "",
-            meta: { 단계: "응답 수신 중" },
-            rawEvent: event
-          };
-        case "gemini.response": {
-          const parsed = parseGeminiEnvelope(payload.response || "");
+        case "antigravity.response": {
+          const parsed = parseAntigravityEnvelope(payload.response || "");
           const body = parsed.response ?? payload.response ?? "";
           return {
-            speaker: "gemini",
-            direction: "gemini_to_agents",
-            title: parsed.error ? "Gemini -> Agents · 오류 포함" : "Gemini -> Agents",
+            speaker: "antigravity",
+            direction: "antigravity_to_agents",
+            title: parsed.error ? "Antigravity -> Agents · 오류 포함" : "Antigravity -> Agents",
             timestamp: event.ts,
-            body: body || "Gemini가 빈 응답을 반환했습니다.",
-            meta: { stats: parsed.stats, error: parsed.error, 형식: parsed.envelope ? "JSON envelope" : "원문 응답" },
+            body: body || "Antigravity가 빈 응답을 반환했습니다.",
+            meta: { stats: parsed.stats, metadata: parsed.metadata, error: parsed.error, streaming: parsed.metadata?.streaming ?? payload.streaming, 형식: parsed.envelope ? "JSON envelope" : "원문 응답" },
             severity: parsed.error ? "error" : "",
             rawEvent: event
           };
         }
-        case "gemini.stderr":
-          if (isBenignGeminiStderr(event)) return null;
-          return turn(event, "observer", "system", "Observer", "Gemini CLI가 표준 오류 출력에 경고나 진단 메시지를 남겼습니다.", { stderr: payload.stderr }, "warn");
-        case "gemini.stream_error":
-          return turn(event, "observer", "system", "Observer", `Gemini CLI 스트림 오류가 기록되었습니다.\n${payload.message || ""}`, { severity: payload.severity }, "error");
-        case "gemini.tool_use":
-          return turn(event, "gemini", "system", "Gemini CLI", `Gemini CLI가 도구 사용을 요청했습니다: ${payload.tool_name || "알 수 없는 도구"}`, { tool_id: payload.tool_id, parameters: payload.parameters });
-        case "gemini.tool_result":
-          return turn(event, "gemini", "system", "Gemini CLI", `Gemini CLI 도구 실행 결과가 기록되었습니다: ${payload.status || "알 수 없음"}`, { tool_id: payload.tool_id, output: payload.output, error: payload.error });
-        case "gemini.exited":
-          return turn(event, "gemini", "system", "Gemini CLI", "Gemini CLI 프로세스가 종료되었습니다.", { "exit code": payload.exit_code ?? "없음", 실행시간: formatDuration(payload.duration_ms) });
+        case "antigravity.stderr":
+          if (isBenignAntigravityStderr(event)) return null;
+          return turn(event, "observer", "system", "Observer", "Antigravity CLI가 표준 오류 출력에 경고나 진단 메시지를 남겼습니다.", { stderr: payload.stderr }, "warn");
+        case "antigravity.exited":
+          return turn(event, "antigravity", "system", "Antigravity CLI", "Antigravity CLI 프로세스가 종료되었습니다.", { "exit code": payload.exit_code ?? "없음", 실행시간: formatDuration(payload.duration_ms), auth: payload.auth_status, streaming: payload.streaming });
         case "json.extracted":
           return turn(event, "observer", "system", "Observer", "응답에서 JSON 후보를 추출했습니다.", { stats: payload.stats, error: payload.error });
         case "json.parse_failed":
@@ -1129,17 +1114,13 @@ INDEX_HTML = r"""<!doctype html>
         case "repair.started":
           return turn(event, "observer", "system", "Observer", `응답 복구를 1회 시도했습니다.\n${repairReason(payload)}`, {}, "warn");
         case "repair.prompt_sent":
-          return turn(event, "agents", "agents_to_gemini", "Agents -> Gemini", payload.prompt || "구조 복구용 프롬프트를 보냈습니다.", { 단계: "응답 복구" });
+          return turn(event, "agents", "agents_to_antigravity", "Agents -> Antigravity", payload.prompt || "구조 복구용 프롬프트를 보냈습니다.", { 단계: "응답 복구" });
         case "repair.response":
-          return turn(event, "gemini", "gemini_to_agents", "Gemini -> Agents", formatReadable(payload.response || ""), { 단계: "복구 응답" });
+          return turn(event, "antigravity", "antigravity_to_agents", "Antigravity -> Agents", formatReadable(payload.response || ""), { 단계: "복구 응답" });
         case "repair.validation_passed":
           return turn(event, "observer", "system", "Observer", "복구된 JSON이 schema 검증을 통과했습니다.", { 결과: "복구 성공" });
         case "repair.validation_failed":
           return turn(event, "observer", "system", "Observer", `복구 후에도 schema 검증을 통과하지 못했습니다.\n${validationText(payload.validation_errors || payload.parse_error || [])}`, { 결과: "복구 실패" }, "error");
-        case "intervention.received":
-          return turn(event, "user", "user", "사용자 개입", `사용자가 "${actionLabel(payload.action)}"을 요청했습니다.${payload.instruction || payload.prompt ? `\n${payload.instruction || payload.prompt}` : ""}`);
-        case "intervention.applied":
-          return turn(event, "observer", "system", "Observer", `개입이 적용되었습니다: ${actionLabel(payload.action)}.${payload.instruction || payload.prompt ? `\n${payload.instruction || payload.prompt}` : ""}`);
         case "session.completed": {
           const result = payload.result || {};
           return turn(event, "observer", "system", "Observer", `최종 결과: ${statusLabel(result.status || payload.status || "completed")}\n${resultSummaryText(result)}`, {
@@ -1163,13 +1144,6 @@ INDEX_HTML = r"""<!doctype html>
         candidate.type === "prompt.sent" && candidate.payload?.prompt === prompt
       );
     }
-    function hasLaterGeminiOutput(event, index, allEvents) {
-      return allEvents.slice(index + 1).some((candidate) =>
-        candidate.session_id === event.session_id &&
-        (candidate.phase || "") === (event.phase || "") &&
-        ["gemini.delta", "gemini.response"].includes(candidate.type)
-      );
-    }
     function turn(event, speaker, direction, title, body, meta = {}, severity = "") {
       return { speaker, direction, title, timestamp: event.ts, body, meta, severity, rawEvent: event };
     }
@@ -1180,7 +1154,7 @@ INDEX_HTML = r"""<!doctype html>
       if (result.message) return result.message;
       return "세션이 완료되었습니다.";
     }
-    function parseGeminiEnvelope(value) {
+    function parseAntigravityEnvelope(value) {
       if (typeof value !== "string") return { response: "", envelope: null };
       try {
         const parsed = JSON.parse(value);
@@ -1188,6 +1162,7 @@ INDEX_HTML = r"""<!doctype html>
         return {
           response: typeof parsed.response === "string" ? parsed.response : typeof parsed.text === "string" ? parsed.text : value,
           stats: parsed.stats,
+          metadata: parsed.metadata,
           error: parsed.error,
           envelope: parsed
         };
@@ -1195,8 +1170,8 @@ INDEX_HTML = r"""<!doctype html>
         return { response: value, envelope: null };
       }
     }
-    function isBenignGeminiStderr(event) {
-      if (event.type !== "gemini.stderr") return false;
+    function isBenignAntigravityStderr(event) {
+      if (event.type !== "antigravity.stderr") return false;
       const stderr = String(event.payload?.stderr || "");
       const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       if (!lines.length) return true;
@@ -1243,17 +1218,6 @@ INDEX_HTML = r"""<!doctype html>
     function roleLabel(role) { return roleLabels[role] || role || "알 수 없음"; }
     function eventLabel(type) { return eventLabels[type] || type || "이벤트"; }
     function phaseLabel(phase) { return phase === "repair" ? "복구" : phase === "edited" ? "수정됨" : phase === "appended_instruction" ? "지시 추가됨" : phase; }
-    function actionLabel(action) {
-      return {
-        approve: "전송 승인",
-        edit_prompt: "프롬프트 수정",
-        add_instruction: "지시 추가",
-        cancel: "취소",
-        interrupt_retry: "중단 후 다시 시도",
-        follow_up: "이어서 질문",
-        note: "메모"
-      }[action] || action || "알 수 없음";
-    }
     function verdictLabel(verdict) {
       return { pass: "통과", needs_work: "수정 필요", unsafe: "위험" }[verdict] || verdict || "알 수 없음";
     }
@@ -1300,7 +1264,7 @@ INDEX_HTML = r"""<!doctype html>
       return ["completed", "valid", "invalid", "error", "cancelled"].includes(status);
     }
     function findCwd(events) {
-      const started = [...events].reverse().find((event) => event.type === "gemini.started" && event.payload?.cwd);
+      const started = [...events].reverse().find((event) => event.type === "antigravity.started" && event.payload?.cwd);
       return started?.payload?.cwd || "";
     }
     function metaLabel(key) { return key; }
@@ -1314,7 +1278,6 @@ INDEX_HTML = r"""<!doctype html>
       openEvents();
       if (currentSessionId) await loadTranscript();
     };
-    qs("pause").onchange = async () => { await postJson("/api/config", {pause_before_send: qs("pause").checked}); };
     qs("copy").onclick = async () => {
       if (!transcript) return;
       await navigator.clipboard.writeText(buildReadableTranscript(transcript));
@@ -1328,9 +1291,6 @@ INDEX_HTML = r"""<!doctype html>
       }
       location.href = api(`/api/sessions/${currentSessionId}/export?raw=${raw}`);
     };
-    document.querySelectorAll("[data-action]").forEach((button) => {
-      button.onclick = () => sendIntervention(button.dataset.action);
-    });
     function buildReadableTranscript(data) {
       const session = data.session || {};
       const turns = buildConversationTranscript(visibleEvents(data.events || []));
@@ -1349,14 +1309,16 @@ INDEX_HTML = r"""<!doctype html>
       return lines.join("\n").trim();
     }
     window.buildConversationTranscript = buildConversationTranscript;
+    window.displayConversationTurns = displayConversationTurns;
     window.describeEventAsConversationTurn = describeEventAsConversationTurn;
     window.preferredLiveSession = preferredLiveSession;
     window.groupSessionsByConversation = groupSessionsByConversation;
-    window.parseGeminiEnvelope = parseGeminiEnvelope;
+    window.parseAntigravityEnvelope = parseAntigravityEnvelope;
     window.renderMarkdown = renderMarkdown;
     window.renderSessionGroup = renderSessionGroup;
     window.sessionTitle = sessionTitle;
-    getJson("/api/config").then((config) => { qs("pause").checked = !!config.pause_before_send; }).catch(console.error);
+    window.hasActiveTextSelection = hasActiveTextSelection;
+    window.rawEventKey = rawEventKey;
     loadSessions().then(openEvents).catch(console.error);
   </script>
 </body>

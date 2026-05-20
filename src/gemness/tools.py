@@ -9,22 +9,16 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import DEFAULT_MODEL_LABEL, GemnessConfig
 from .json_utils import extract_cli_response, parse_json_candidate
 from .mcp_metadata import SERVER_NAME, SERVER_VERSION, TOOL_NAMES
-from .observer import ObserverHub, SessionCancelled
+from .observer import ObserverHub
 from .review import REVIEW_SCHEMA, build_review_prompt
-from .runner import GeminiCliRunner, GeminiRunner, GeminiRunResult, command_exists, gemness_env, resolve_gemini_command
+from .runner import AgyCliRunner, AgyRunResult, AgyRunner, agy_fallback_paths, command_exists, probe_auth, resolve_agy_command
 from .schema_validation import validate_json_schema, validate_schema_definition
 from .workspace import normalized_allowed_roots, resolve_workspace_cwd
-
-DiffProvider = Callable[[str, Path], str]
-
-
-class _NativeResumeRequiredError(RuntimeError):
-    pass
 
 
 @dataclass(slots=True)
@@ -36,8 +30,7 @@ class _FollowUpPlan:
     branch_from_conversation_id: str | None
     branch_from_run_id: str | None
     cwd: Path | None
-    native_session_mode: str
-    native_resume_enabled: bool
+    native_conversation_id: str | None
     fallback_used: bool
     fallback_reason: str | None
 
@@ -48,14 +41,12 @@ class GemnessService:
         config: GemnessConfig | None = None,
         *,
         hub: ObserverHub | None = None,
-        runner: GeminiRunner | None = None,
-        diff_provider: DiffProvider | None = None,
+        runner: AgyRunner | None = None,
     ) -> None:
         self.config = config or GemnessConfig.from_env()
         self.hub = hub or ObserverHub(self.config)
         self.hub.attach_service(self)
-        self.runner = runner or GeminiCliRunner(self.config)
-        self.diff_provider = diff_provider or self._git_diff
+        self.runner = runner or AgyCliRunner(self.config)
         self._conversation_locks: dict[str, threading.Lock] = {}
         self._conversation_locks_guard = threading.RLock()
         if self.config.observer_enabled and self.config.observer_start_on_init:
@@ -64,7 +55,7 @@ class GemnessService:
     def shutdown(self) -> None:
         self.hub.shutdown()
 
-    def health_check(self, *, cwd: str | None = None, check_gemini: bool = True) -> dict[str, Any]:
+    def antigravity_health(self, *, cwd: str | None = None, check_antigravity: bool = True) -> dict[str, Any]:
         warnings: list[str] = []
         try:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
@@ -79,33 +70,37 @@ class GemnessService:
         if not transcript_writable:
             warnings.append(f"Transcript directory is not writable: {transcript_dir}")
 
-        command_parts = resolve_gemini_command(self.config.gemini_command)
-        gemini: dict[str, Any] = {
-            "command": self.config.gemini_command,
-            "resolved": command_parts[0] if command_parts else self.config.gemini_command,
+        command_parts = resolve_agy_command(self.config.agy_command)
+        capabilities = None
+        auth_probe = {"status": "not_checked", "message": "Antigravity CLI auth probe was skipped."}
+        antigravity: dict[str, Any] = {
+            "command": self.config.agy_command,
+            "resolved": command_parts[0] if command_parts else self.config.agy_command,
             "argv": command_parts,
-            "model": self.config.model,
-            "model_label": _model_label(self.config.model),
-            "model_source": "configured" if self.config.model else "cli_default",
-            "version": None,
-            "skip_trust": self.config.gemini_skip_trust,
-            "trust_workspace": self.config.gemini_trust_workspace,
-            "approval_mode": self.config.gemini_approval_mode,
-            "output_format": self.config.gemini_output_format,
-            "available": command_exists(self.config.gemini_command),
+            "available": command_exists(self.config.agy_command),
+            "fallback_paths": [str(path) for path in agy_fallback_paths()],
+            "streaming": False,
+            "model_selection": "Use Antigravity CLI settings or `/model`; Gemness does not pass model flags.",
         }
-        if check_gemini:
-            version, version_warning = _gemini_version(command_parts, resolved_cwd, self.config)
-            gemini["version"] = version
-            if version_warning:
-                warnings.append(version_warning)
-            native_probe = self._native_resume_probe(resolved_cwd)
-            gemini["native_resume"] = {
-                "mode": self.config.gemini_native_resume,
-                "supported": native_probe.get("supported"),
-                "reason": native_probe.get("reason"),
-                "missing": native_probe.get("missing", []),
+        if check_antigravity:
+            probe_method = getattr(self.runner, "probe_capabilities", None)
+            capabilities = probe_method(resolved_cwd) if callable(probe_method) else AgyCliRunner(self.config).probe_capabilities(resolved_cwd)
+            antigravity["capabilities"] = capabilities.to_dict()
+            antigravity["version"] = capabilities.version
+            antigravity["print_mode"] = {"supported": capabilities.print_supported, "flag": capabilities.print_flag}
+            antigravity["conversation_flags"] = {
+                "continue": capabilities.supports_continue,
+                "conversation": capabilities.supports_conversation,
+                "used_by_gemness": capabilities.supports_conversation,
             }
+            if capabilities.error:
+                warnings.append(capabilities.error)
+            warnings.extend(capabilities.warnings)
+            if capabilities.available and capabilities.print_supported:
+                auth_probe = probe_auth(capabilities.command, capabilities.print_flag, resolved_cwd, self.config).to_dict()
+                if auth_probe["status"] in {"auth_required", "unknown"}:
+                    warnings.append(auth_probe["message"])
+        antigravity["auth"] = auth_probe
 
         workspace = {
             "cwd": str(resolved_cwd) if resolved_cwd is not None else None,
@@ -135,81 +130,49 @@ class GemnessService:
             },
             "mcp": {"transport": "stdio", "tools": TOOL_NAMES},
             "workspace": workspace,
-            "gemini": gemini,
+            "antigravity": antigravity,
             "observer": observer,
             "transcript": {"dir": str(transcript_dir), "writable": transcript_writable},
             "warnings": warnings,
         }
 
-    def ask_text(self, prompt: str, model: str | None = None, cwd: str | None = None) -> dict[str, Any]:
+    def ask_antigravity(self, prompt: str, cwd: str | None = None) -> dict[str, Any]:
         try:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
-        return self._run_text_session("ask_text", prompt, _selected_model(model, self.config.model), cwd=resolved_cwd, title_source=prompt)
+        return self._run_text_session("ask_antigravity", prompt, cwd=resolved_cwd, title_source=prompt)
 
-    def ask_json(self, prompt: str, schema: dict[str, Any], model: str | None = None, cwd: str | None = None) -> dict[str, Any]:
+    def ask_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None) -> dict[str, Any]:
         try:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
-        return self._run_json_session("ask_json", prompt, schema, _selected_model(model, self.config.model), cwd=resolved_cwd, title_source=prompt)
+        return self._run_json_session("ask_antigravity_json", prompt, schema, cwd=resolved_cwd, title_source=prompt)
 
-    def review_current_diff(self, base_ref: str = "HEAD", model: str | None = None, cwd: str | None = None) -> dict[str, Any]:
+    def review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None) -> dict[str, Any]:
         try:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
             base_ref = validate_base_ref(base_ref)
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
-        model = _selected_model(model, self.config.model)
-        try:
-            native_resume_enabled, _native_reason = self._native_resume_available(resolved_cwd)
-        except _NativeResumeRequiredError as exc:
-            session = self.hub.create_session(
-                "review_current_diff",
-                _model_label(model),
-                title=f"현재 diff 리뷰: {base_ref}",
-                project_root=str(resolved_cwd),
-                native_resume_enabled=False,
-            )
-            return self._runner_error(session.session_id, self.hub.observer_url(session.session_id), GeminiRunResult.error(str(exc), exit_code=None))
         session = self.hub.create_session(
-            "review_current_diff",
-            _model_label(model),
-            title=f"현재 diff 리뷰: {base_ref}",
+            "review_current_diff_with_antigravity",
+            DEFAULT_MODEL_LABEL,
+            title=f"현재 변경 리뷰: {base_ref}",
             project_root=str(resolved_cwd),
-            native_resume_enabled=native_resume_enabled,
         )
-        try:
-            diff = self.diff_provider(base_ref, resolved_cwd)
-        except Exception as exc:  # noqa: BLE001 - tool result should carry process errors.
-            self.hub.set_status(session.session_id, "error", "session.error", {"message": str(exc)})
-            return {
-                "status": "error",
-                "exit_code": None,
-                "session_id": session.session_id,
-                "observer_url": self.hub.observer_url(session.session_id),
-                "message": str(exc),
-            }
-
-        warnings: list[str] = []
-        diff_bytes = diff.encode("utf-8")
-        if len(diff_bytes) > self.config.diff_limit_bytes:
-            diff = diff_bytes[: self.config.diff_limit_bytes].decode("utf-8", errors="replace")
-            warnings.append(f"Diff truncated to {self.config.diff_limit_bytes} bytes")
-        prompt = build_review_prompt(diff, base_ref)
+        prompt = build_review_prompt(base_ref)
         return self._run_json_session(
-            "review_current_diff",
+            "review_current_diff_with_antigravity",
             prompt,
             REVIEW_SCHEMA,
-            model,
             existing_session_id=session.session_id,
-            warnings=warnings,
             cwd=resolved_cwd,
-            title_source=f"현재 diff 리뷰: {base_ref}",
+            title_source=f"현재 변경 리뷰: {base_ref}",
         )
 
-    def follow_up(self, parent_session_id: str, instruction: str, model: str | None = None) -> dict[str, Any]:
+    def follow_up_antigravity(self, parent_session_id: str, instruction: str) -> dict[str, Any]:
         self.hub.refresh_from_disk()
         if parent_session_id not in self.hub.sessions:
             return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
@@ -218,53 +181,45 @@ class GemnessService:
         with lock:
             if self.hub.is_latest_run(parent_session_id):
                 plan = self._follow_up_plan(parent_session_id, instruction)
-            gemini_session_id = _new_gemini_session_id() if plan.fallback_reason == "session_rotation" else None
             session = self.hub.create_session(
-                "ask_text",
-                _model_label(_selected_model(model, self.config.model)),
+                "ask_antigravity",
+                DEFAULT_MODEL_LABEL,
                 parent_session_id=plan.parent_session_id,
-                title=_session_title(instruction, "ask_text"),
+                title=_session_title(instruction, "ask_antigravity"),
                 conversation_id=plan.conversation_id,
                 parent_run_id=plan.parent_run_id,
                 branch_from_conversation_id=plan.branch_from_conversation_id,
                 branch_from_run_id=plan.branch_from_run_id,
                 project_root=str(plan.cwd) if plan.cwd is not None else None,
-                gemini_session_id=gemini_session_id,
-                native_resume_enabled=plan.native_resume_enabled,
-                native_resume_used=plan.native_session_mode == "resume",
+                agy_conversation_id=plan.native_conversation_id,
                 fallback_used=plan.fallback_used,
                 fallback_reason=plan.fallback_reason,
             )
             return self._run_text_session(
-                "ask_text",
+                "ask_antigravity",
                 plan.prompt,
-                _selected_model(model, self.config.model),
                 parent_session_id=plan.parent_session_id,
                 existing_session_id=session.session_id,
                 cwd=plan.cwd,
                 title_source=instruction,
-                native_session_mode=plan.native_session_mode,
                 fallback_used=plan.fallback_used,
                 fallback_reason=plan.fallback_reason,
-                resume_fallback_parent_run_id=plan.parent_run_id,
+                native_conversation_id=plan.native_conversation_id,
             )
 
-    def start_follow_up(self, parent_session_id: str, instruction: str, model: str | None = None) -> str:
+    def start_follow_up(self, parent_session_id: str, instruction: str) -> str:
         plan = self._follow_up_plan(parent_session_id, instruction)
-        gemini_session_id = _new_gemini_session_id() if plan.fallback_reason == "session_rotation" else None
         session = self.hub.create_session(
-            "ask_text",
-            _model_label(_selected_model(model, self.config.model)),
+            "ask_antigravity",
+            DEFAULT_MODEL_LABEL,
             parent_session_id=plan.parent_session_id,
-            title=_session_title(instruction, "ask_text"),
+            title=_session_title(instruction, "ask_antigravity"),
             conversation_id=plan.conversation_id,
             parent_run_id=plan.parent_run_id,
             branch_from_conversation_id=plan.branch_from_conversation_id,
             branch_from_run_id=plan.branch_from_run_id,
             project_root=str(plan.cwd) if plan.cwd is not None else None,
-            gemini_session_id=gemini_session_id,
-            native_resume_enabled=plan.native_resume_enabled,
-            native_resume_used=plan.native_session_mode == "resume",
+            agy_conversation_id=plan.native_conversation_id,
             fallback_used=plan.fallback_used,
             fallback_reason=plan.fallback_reason,
         )
@@ -273,37 +228,24 @@ class GemnessService:
         def run() -> None:
             with lock:
                 self._run_text_session(
-                    "ask_text",
+                    "ask_antigravity",
                     plan.prompt,
-                    _selected_model(model, self.config.model),
                     parent_session_id=plan.parent_session_id,
                     existing_session_id=session.session_id,
                     cwd=plan.cwd,
                     title_source=instruction,
-                    native_session_mode=plan.native_session_mode,
                     fallback_used=plan.fallback_used,
                     fallback_reason=plan.fallback_reason,
-                    resume_fallback_parent_run_id=plan.parent_run_id,
+                    native_conversation_id=plan.native_conversation_id,
                 )
 
         threading.Thread(target=run, daemon=True).start()
         return session.session_id
 
-    def _legacy_follow_up(self, parent_session_id: str, instruction: str, model: str | None = None) -> dict[str, Any]:
-        prompt = self.hub.build_follow_up_prompt(parent_session_id, instruction)
-        return self._run_text_session(
-            "ask_text",
-            prompt,
-            _selected_model(model, self.config.model),
-            parent_session_id=parent_session_id,
-            title_source=instruction,
-        )
-
     def _run_text_session(
         self,
         tool_name: str,
         prompt: str,
-        model: str | None,
         *,
         parent_session_id: str | None = None,
         existing_session_id: str | None = None,
@@ -313,40 +255,13 @@ class GemnessService:
         parent_run_id: str | None = None,
         branch_from_conversation_id: str | None = None,
         branch_from_run_id: str | None = None,
-        native_session_mode: str | None = None,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
-        resume_fallback_parent_run_id: str | None = None,
+        native_conversation_id: str | None = None,
     ) -> dict[str, Any]:
         title = _session_title(title_source or prompt, tool_name)
-        try:
-            native_resume_enabled, native_unavailable_reason = self._native_resume_available(cwd)
-        except _NativeResumeRequiredError as exc:
-            session = self._session(
-                tool_name,
-                _model_label(model),
-                parent_session_id,
-                existing_session_id,
-                title,
-                conversation_id=conversation_id,
-                parent_run_id=parent_run_id,
-                branch_from_conversation_id=branch_from_conversation_id,
-                branch_from_run_id=branch_from_run_id,
-                cwd=cwd,
-                native_resume_enabled=False,
-                native_resume_used=False,
-                fallback_used=False,
-                fallback_reason=None,
-            )
-            observer_url = self.hub.observer_url(session.session_id)
-            return self._runner_error(session.session_id, observer_url, GeminiRunResult.error(str(exc), exit_code=None))
-        if native_session_mode is None:
-            native_session_mode = "start" if native_resume_enabled else "none"
-        if native_unavailable_reason and native_session_mode == "none":
-            fallback_reason = fallback_reason or native_unavailable_reason
         session = self._session(
             tool_name,
-            _model_label(model),
             parent_session_id,
             existing_session_id,
             title,
@@ -355,8 +270,6 @@ class GemnessService:
             branch_from_conversation_id=branch_from_conversation_id,
             branch_from_run_id=branch_from_run_id,
             cwd=cwd,
-            native_resume_enabled=native_resume_enabled,
-            native_resume_used=native_session_mode == "resume",
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
         )
@@ -364,43 +277,19 @@ class GemnessService:
         if not session.title:
             self.hub.set_title(session_id, title)
         observer_url = self.hub.observer_url(session_id)
-        try:
-            prompt_to_send = self.hub.prepare_prompt(session_id, prompt)
-        except SessionCancelled as exc:
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "message": str(exc)}
+        prompt_to_send = self.hub.prepare_prompt(session_id, prompt)
 
         result = self.runner.run(
             prompt_to_send,
-            model=model,
-            output_format=self.config.gemini_output_format,
             session_id=session_id,
             hub=self.hub,
             cwd=cwd,
-            gemini_session_id=session.gemini_session_id if native_session_mode != "none" else None,
-            native_session_mode=native_session_mode,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
+            native_conversation_id=native_conversation_id,
         )
-        if result.status == "error" and native_session_mode == "resume" and resume_fallback_parent_run_id and _should_fallback_from_resume_error(result):
-            fallback_prompt = self.hub.build_follow_up_prompt(resume_fallback_parent_run_id, prompt)
-            rotated_session_id = _new_gemini_session_id()
-            self.hub.rotate_gemini_session(session_id, rotated_session_id, "resume_failed")
-            result = self.runner.run(
-                fallback_prompt,
-                model=model,
-                output_format=self.config.gemini_output_format,
-                session_id=session_id,
-                hub=self.hub,
-                cwd=cwd,
-                gemini_session_id=rotated_session_id if native_resume_enabled else None,
-                native_session_mode="start" if native_resume_enabled else "none",
-                fallback_used=True,
-                fallback_reason="resume_failed",
-            )
-            fallback_used = True
-            fallback_reason = "resume_failed"
         if result.status == "interrupted":
-            retry_result = self._retry_text(tool_name, session_id, prompt_to_send, result, model, cwd)
+            retry_result = self._retry_text(tool_name, session_id, prompt_to_send, result, cwd)
             self.hub.set_status(
                 session_id,
                 "cancelled",
@@ -410,15 +299,16 @@ class GemnessService:
             return retry_result
         if result.status == "cancelled":
             self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url}
+            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "metadata": result.metadata}
         if result.status == "error":
             return self._runner_error(session_id, observer_url, result)
 
         text, envelope = extract_cli_response(result.stdout)
         stats = _merged_stats(result.stats, envelope)
+        metadata = _result_metadata(result, envelope)
         envelope_error = _envelope_error(envelope)
         if envelope_error:
-            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats)
+            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata)
         payload = {
             "status": "completed",
             "text": text,
@@ -427,6 +317,7 @@ class GemnessService:
             "conversation_id": session.conversation_id,
             "observer_url": observer_url,
             "stats": stats,
+            "metadata": metadata,
         }
         if envelope is not None:
             payload["stats"] = stats | {"cli_envelope_keys": sorted(envelope.keys())}
@@ -438,99 +329,25 @@ class GemnessService:
         tool_name: str,
         prompt: str,
         schema: dict[str, Any],
-        model: str | None,
         *,
         parent_session_id: str | None = None,
         existing_session_id: str | None = None,
         warnings: list[str] | None = None,
         cwd: Path | None = None,
         title_source: str | None = None,
-        conversation_id: str | None = None,
-        parent_run_id: str | None = None,
-        branch_from_conversation_id: str | None = None,
-        branch_from_run_id: str | None = None,
-        native_session_mode: str | None = None,
-        fallback_used: bool = False,
-        fallback_reason: str | None = None,
     ) -> dict[str, Any]:
-        title = _session_title(title_source or prompt, tool_name)
-        try:
-            native_resume_enabled, native_unavailable_reason = self._native_resume_available(cwd)
-        except _NativeResumeRequiredError as exc:
-            session = self._session(
-                tool_name,
-                _model_label(model),
-                parent_session_id,
-                existing_session_id,
-                title,
-                conversation_id=conversation_id,
-                parent_run_id=parent_run_id,
-                branch_from_conversation_id=branch_from_conversation_id,
-                branch_from_run_id=branch_from_run_id,
-                cwd=cwd,
-                native_resume_enabled=False,
-                native_resume_used=False,
-                fallback_used=False,
-                fallback_reason=None,
-            )
-            observer_url = self.hub.observer_url(session.session_id)
-            return self._runner_error(session.session_id, observer_url, GeminiRunResult.error(str(exc), exit_code=None))
-        if native_session_mode is None:
-            native_session_mode = "start" if native_resume_enabled else "none"
-        if native_unavailable_reason and native_session_mode == "none":
-            fallback_reason = fallback_reason or native_unavailable_reason
-        session = self._session(
-            tool_name,
-            _model_label(model),
-            parent_session_id,
-            existing_session_id,
-            title,
-            conversation_id=conversation_id,
-            parent_run_id=parent_run_id,
-            branch_from_conversation_id=branch_from_conversation_id,
-            branch_from_run_id=branch_from_run_id,
-            cwd=cwd,
-            native_resume_enabled=native_resume_enabled,
-            native_resume_used=native_session_mode == "resume",
-            fallback_used=fallback_used,
-            fallback_reason=fallback_reason,
-        )
-        session_id = session.session_id
-        if not session.title:
-            self.hub.set_title(session_id, title)
-        observer_url = self.hub.observer_url(session_id)
         schema_error = validate_schema_definition(schema)
-        if schema_error is not None:
-            payload = {
-                "status": "error",
-                "session_id": session_id,
-                "run_id": session.run_id or session_id,
-                "conversation_id": session.conversation_id,
-                "observer_url": observer_url,
-                "message": f"Invalid JSON Schema: {schema_error}",
-            }
-            self.hub.set_status(session_id, "error", "session.error", payload)
-            return payload
-        full_prompt = _json_prompt(prompt, schema)
-        try:
-            prompt_to_send = self.hub.prepare_prompt(session_id, full_prompt)
-        except SessionCancelled as exc:
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "message": str(exc)}
+        if schema_error:
+            return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
+        title = _session_title(title_source or prompt, tool_name)
+        session = self._session(tool_name, parent_session_id, existing_session_id, title, cwd=cwd)
+        session_id = session.session_id
+        observer_url = self.hub.observer_url(session_id)
+        prompt_to_send = self.hub.prepare_prompt(session_id, _json_prompt(prompt, schema))
 
-        result = self.runner.run(
-            prompt_to_send,
-            model=model,
-            output_format=self.config.gemini_output_format,
-            session_id=session_id,
-            hub=self.hub,
-            cwd=cwd,
-            gemini_session_id=session.gemini_session_id if native_session_mode != "none" else None,
-            native_session_mode=native_session_mode,
-            fallback_used=fallback_used,
-            fallback_reason=fallback_reason,
-        )
+        result = self.runner.run(prompt_to_send, session_id=session_id, hub=self.hub, cwd=cwd)
         if result.status == "interrupted":
-            retry_result = self._retry_json(tool_name, session_id, prompt_to_send, result, schema, model, cwd)
+            retry_result = self._retry_json(tool_name, session_id, prompt_to_send, result, schema, cwd)
             self.hub.set_status(
                 session_id,
                 "cancelled",
@@ -540,159 +357,95 @@ class GemnessService:
             return retry_result
         if result.status == "cancelled":
             self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url}
+            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "metadata": result.metadata}
         if result.status == "error":
             return self._runner_error(session_id, observer_url, result)
 
         response_text, envelope = extract_cli_response(result.stdout)
         stats = _merged_stats(result.stats, envelope)
+        metadata = _result_metadata(result, envelope)
         envelope_error = _envelope_error(envelope)
+        if envelope_error:
+            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata)
+        data, parse_error, candidate = parse_json_candidate(response_text)
         self.hub.append_event(
             session_id,
             "json.extracted",
             "codex_mcp",
-            {"response": response_text, "cli_envelope": envelope, "stats": stats, "error": envelope_error},
+            {"candidate": candidate, "parse_error": parse_error, "stats": stats},
         )
-        if envelope_error:
-            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats)
-        data, parse_error, candidate = parse_json_candidate(response_text)
-        if parse_error is not None:
-            self.hub.append_event(session_id, "json.parse_failed", "codex_mcp", {"parse_error": parse_error, "candidate": candidate})
-            return self._repair_or_invalid(
-                session_id,
-                observer_url,
-                prompt_to_send,
-                schema,
-                response_text,
-                stats,
-                parse_error=parse_error,
-                validation_errors=None,
-                warnings=warnings,
-                model=model,
-                cwd=cwd,
-            )
-
-        validation_errors = validate_json_schema(data, schema)
-        if validation_errors:
-            self.hub.append_event(
-                session_id,
-                "json.validation_failed",
-                "codex_mcp",
-                {"validation_errors": validation_errors, "candidate": candidate},
-            )
-            return self._repair_or_invalid(
-                session_id,
-                observer_url,
-                prompt_to_send,
-                schema,
-                response_text,
-                stats,
-                parse_error=None,
-                validation_errors=validation_errors,
-                warnings=warnings,
-                model=model,
-                cwd=cwd,
-            )
-
-        self.hub.append_event(session_id, "json.validation_passed", "codex_mcp", {"data": data})
-        payload: dict[str, Any] = {
-            "status": "valid",
-            "data": data,
+        if parse_error is None:
+            validation_errors = validate_json_schema(data, schema)
+        else:
+            validation_errors = []
+        if parse_error is None and not validation_errors:
+            self.hub.append_event(session_id, "json.validation_passed", "codex_mcp", {"data": data})
+            payload = {
+                "status": "valid",
+                "data": data,
+                "raw_response": response_text,
+                "session_id": session_id,
+                "run_id": session.run_id or session_id,
+                "conversation_id": session.conversation_id,
+                "observer_url": observer_url,
+                "stats": stats,
+                "metadata": metadata,
+                "warnings": warnings or [],
+                "repaired": False,
+                "repair_attempted": False,
+                "repair_succeeded": False,
+            }
+            self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
+            return payload
+        repair = self._repair_or_invalid(session_id, schema, response_text, parse_error, validation_errors, cwd)
+        if repair["status"] == "valid":
+            payload = {
+                "status": "valid",
+                "data": repair["data"],
+                "raw_response": repair["raw_response"],
+                "session_id": session_id,
+                "run_id": session.run_id or session_id,
+                "conversation_id": session.conversation_id,
+                "observer_url": observer_url,
+                "stats": stats,
+                "metadata": metadata,
+                "warnings": warnings or [],
+                "repaired": True,
+                "repair_attempted": True,
+                "repair_succeeded": True,
+            }
+            self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
+            return payload
+        if repair["status"] == "error":
+            return self._runner_error(session_id, observer_url, repair["result"])
+        payload = {
+            "status": "invalid",
             "raw_response": response_text,
-            "repaired": False,
-            "repair_attempted": False,
-            "repair_succeeded": False,
+            "parse_error": parse_error,
+            "validation_errors": validation_errors,
             "session_id": session_id,
             "run_id": session.run_id or session_id,
             "conversation_id": session.conversation_id,
             "observer_url": observer_url,
             "stats": stats,
+            "metadata": metadata,
+            "warnings": warnings or [],
+            "repaired": False,
+            "repair_attempted": True,
+            "repair_succeeded": False,
         }
-        if warnings:
-            payload["warnings"] = warnings
-        self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
+        event_name = "json.parse_failed" if parse_error else "json.validation_failed"
+        self.hub.append_event(session_id, event_name, "codex_mcp", {"parse_error": parse_error, "validation_errors": validation_errors})
+        self.hub.set_status(session_id, "invalid", "session.completed", {"result": payload})
         return payload
 
     def _repair_or_invalid(
         self,
         session_id: str,
-        observer_url: str,
-        original_prompt: str,
         schema: dict[str, Any],
         raw_response: str,
-        stats: dict[str, Any],
-        *,
         parse_error: str | None,
-        validation_errors: list[dict[str, Any]] | None,
-        warnings: list[str] | None,
-        model: str | None,
-        cwd: Path | None,
-    ) -> dict[str, Any]:
-        session = self.hub.sessions.get(session_id)
-        repaired = self._repair_json_once(
-            session_id,
-            original_prompt,
-            schema,
-            raw_response,
-            parse_error=parse_error,
-            validation_errors=validation_errors,
-            model=model,
-            cwd=cwd,
-        )
-        if repaired["status"] == "valid":
-            payload: dict[str, Any] = {
-                "status": "valid",
-                "data": repaired["data"],
-                "raw_response": raw_response,
-                "repaired": True,
-                "repair_attempted": True,
-                "repair_succeeded": True,
-                "session_id": session_id,
-                "run_id": session.run_id if session else session_id,
-                "conversation_id": session.conversation_id if session else None,
-                "observer_url": observer_url,
-                "stats": stats,
-                "repair_raw_response": repaired["raw_response"],
-            }
-            if warnings:
-                payload["warnings"] = warnings
-            self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
-            return payload
-
-        if repaired["status"] == "error":
-            result = repaired["result"]
-            return self._runner_error(session_id, observer_url, result)
-
-        payload = {
-            "status": "invalid",
-            "raw_response": raw_response,
-            "repaired": False,
-            "repair_attempted": True,
-            "repair_succeeded": False,
-            "session_id": session_id,
-            "run_id": session.run_id if session else session_id,
-            "conversation_id": session.conversation_id if session else None,
-            "observer_url": observer_url,
-            "stats": stats,
-            "repair_raw_response": repaired.get("raw_response"),
-        }
-        if parse_error:
-            payload["parse_error"] = parse_error
-        if validation_errors:
-            payload["validation_errors"] = validation_errors
-        self.hub.set_status(session_id, "invalid", "session.completed", {"result": payload})
-        return payload
-
-    def _repair_json_once(
-        self,
-        session_id: str,
-        original_prompt: str,
-        schema: dict[str, Any],
-        raw_response: str,
-        *,
-        parse_error: str | None,
-        validation_errors: list[dict[str, Any]] | None,
-        model: str | None,
+        validation_errors: list[dict[str, Any]],
         cwd: Path | None,
     ) -> dict[str, Any]:
         self.hub.set_status(
@@ -701,29 +454,17 @@ class GemnessService:
             "repair.started",
             {"parse_error": parse_error, "validation_errors": validation_errors},
         )
-        prompt = _repair_prompt(original_prompt, schema, raw_response, parse_error, validation_errors)
-        self.hub.append_event(session_id, "repair.prompt_sent", "codex_mcp", {"prompt": prompt}, phase="repair")
-        result = self.runner.run(
-            prompt,
-            model=model,
-            output_format=self.config.gemini_output_format,
-            session_id=session_id,
-            hub=self.hub,
-            cwd=cwd,
-            phase="repair",
-            gemini_session_id=self.hub.sessions[session_id].gemini_session_id,
-            native_session_mode="resume" if self.hub.sessions[session_id].native_resume_enabled else "none",
-        )
+        repair_prompt = _repair_prompt(schema, raw_response, parse_error, validation_errors)
+        self.hub.append_event(session_id, "repair.prompt_sent", "codex_mcp", {"prompt": repair_prompt}, phase="repair")
+        result = self.runner.run(repair_prompt, session_id=session_id, hub=self.hub, cwd=cwd, phase="repair")
         if result.status == "error":
             return {"status": "error", "result": result}
         if result.status in {"cancelled", "interrupted"}:
             return {"status": "invalid", "raw_response": result.stdout}
-
         response_text, envelope = extract_cli_response(result.stdout)
-        stats = _merged_stats(result.stats, envelope)
         envelope_error = _envelope_error(envelope)
         if envelope_error:
-            return {"status": "error", "result": GeminiRunResult.error(envelope_error, exit_code=result.exit_code, stderr=result.stderr, stdout=result.stdout)}
+            return {"status": "error", "result": AgyRunResult.error(envelope_error, exit_code=result.exit_code, stderr=result.stderr, stdout=result.stdout, metadata=result.metadata)}
         self.hub.append_event(session_id, "repair.response", "gemness", {"response": response_text}, phase="repair")
         data, repair_parse_error, candidate = parse_json_candidate(response_text)
         if repair_parse_error is not None:
@@ -735,60 +476,28 @@ class GemnessService:
                 phase="repair",
             )
             return {"status": "invalid", "raw_response": response_text}
-        validation_errors = validate_json_schema(data, schema)
-        if validation_errors:
+        repair_validation_errors = validate_json_schema(data, schema)
+        if repair_validation_errors:
             self.hub.append_event(
                 session_id,
                 "repair.validation_failed",
                 "codex_mcp",
-                {"validation_errors": validation_errors, "candidate": candidate},
+                {"validation_errors": repair_validation_errors, "candidate": candidate},
                 phase="repair",
             )
             return {"status": "invalid", "raw_response": response_text}
         self.hub.append_event(session_id, "repair.validation_passed", "codex_mcp", {"data": data}, phase="repair")
         return {"status": "valid", "data": data, "raw_response": response_text}
 
-    def _retry_text(
-        self,
-        tool_name: str,
-        parent_session_id: str,
-        original_prompt: str,
-        result: GeminiRunResult,
-        model: str | None,
-        cwd: Path | None,
-    ) -> dict[str, Any]:
-        prompt = _interrupted_retry_prompt(original_prompt, result.stdout, result.interrupt_instruction or "")
-        return self._run_text_session(
-            tool_name,
-            prompt,
-            model,
-            parent_session_id=parent_session_id,
-            cwd=cwd,
-            title_source=result.interrupt_instruction or original_prompt,
-        )
+    def _retry_text(self, tool_name: str, parent_session_id: str, original_prompt: str, result: AgyRunResult, cwd: Path | None) -> dict[str, Any]:
+        prompt = _interrupted_retry_prompt(original_prompt, result.raw_stdout or result.stdout, result.interrupt_instruction or "")
+        return self._run_text_session(tool_name, prompt, parent_session_id=parent_session_id, cwd=cwd, title_source=result.interrupt_instruction or original_prompt)
 
-    def _retry_json(
-        self,
-        tool_name: str,
-        parent_session_id: str,
-        original_prompt: str,
-        result: GeminiRunResult,
-        schema: dict[str, Any],
-        model: str | None,
-        cwd: Path | None,
-    ) -> dict[str, Any]:
-        prompt = _interrupted_retry_prompt(original_prompt, result.stdout, result.interrupt_instruction or "")
-        return self._run_json_session(
-            tool_name,
-            prompt,
-            schema,
-            model,
-            parent_session_id=parent_session_id,
-            cwd=cwd,
-            title_source=result.interrupt_instruction or original_prompt,
-        )
+    def _retry_json(self, tool_name: str, parent_session_id: str, original_prompt: str, result: AgyRunResult, schema: dict[str, Any], cwd: Path | None) -> dict[str, Any]:
+        prompt = _interrupted_retry_prompt(original_prompt, result.raw_stdout or result.stdout, result.interrupt_instruction or "")
+        return self._run_json_session(tool_name, prompt, schema, parent_session_id=parent_session_id, cwd=cwd, title_source=result.interrupt_instruction or original_prompt)
 
-    def _runner_error(self, session_id: str, observer_url: str, result: GeminiRunResult) -> dict[str, Any]:
+    def _runner_error(self, session_id: str, observer_url: str, result: AgyRunResult) -> dict[str, Any]:
         session = self.hub.sessions.get(session_id)
         payload = {
             "status": "error",
@@ -800,6 +509,7 @@ class GemnessService:
             "stderr_tail": result.stderr[-4000:] if result.stderr else "",
             "message": result.message,
             "stats": result.stats,
+            "metadata": result.metadata,
         }
         self.hub.set_status(session_id, "error", "session.error", payload)
         return payload
@@ -809,8 +519,9 @@ class GemnessService:
         session_id: str,
         observer_url: str,
         message: str,
-        result: GeminiRunResult,
+        result: AgyRunResult,
         stats: dict[str, Any],
+        metadata: dict[str, Any],
     ) -> dict[str, Any]:
         session = self.hub.sessions.get(session_id)
         payload = {
@@ -821,8 +532,9 @@ class GemnessService:
             "conversation_id": session.conversation_id if session else None,
             "observer_url": observer_url,
             "stderr_tail": result.stderr[-4000:] if result.stderr else "",
-            "message": f"Gemini CLI envelope error: {message}",
+            "message": f"Antigravity CLI envelope error: {message}",
             "stats": stats,
+            "metadata": metadata,
         }
         self.hub.set_status(session_id, "error", "session.error", payload)
         return payload
@@ -830,7 +542,6 @@ class GemnessService:
     def _session(
         self,
         tool_name: str,
-        model: str,
         parent_session_id: str | None,
         existing_session_id: str | None,
         title: str | None = None,
@@ -840,8 +551,6 @@ class GemnessService:
         branch_from_conversation_id: str | None = None,
         branch_from_run_id: str | None = None,
         cwd: Path | None = None,
-        native_resume_enabled: bool = True,
-        native_resume_used: bool = False,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
     ):
@@ -849,7 +558,7 @@ class GemnessService:
             return self.hub.sessions[existing_session_id]
         return self.hub.create_session(
             tool_name,
-            model,
+            DEFAULT_MODEL_LABEL,
             parent_session_id=parent_session_id,
             title=title,
             conversation_id=conversation_id,
@@ -857,8 +566,6 @@ class GemnessService:
             branch_from_conversation_id=branch_from_conversation_id,
             branch_from_run_id=branch_from_run_id,
             project_root=str(cwd) if cwd is not None else None,
-            native_resume_enabled=native_resume_enabled,
-            native_resume_used=native_resume_used,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
         )
@@ -867,98 +574,68 @@ class GemnessService:
         parent = self.hub.sessions[parent_session_id]
         cwd = _session_cwd(parent.project_root)
         if parent.project_root and cwd is None:
-            if self.config.gemini_native_resume == "on":
-                raise _NativeResumeRequiredError(f"Stored project_root is unavailable: {parent.project_root}")
-            native_resume_enabled, native_reason = False, "project_root_unavailable"
+            fallback_reason = "project_root_unavailable"
         else:
-            native_resume_enabled, native_reason = self._native_resume_available(cwd)
+            fallback_reason = None
         latest = self.hub.is_latest_run(parent_session_id)
-        rotate = (
-            latest
-            and native_resume_enabled
-            and parent.conversation_id is not None
-            and self.hub.conversations[parent.conversation_id].turn_count >= self.config.gemini_native_resume_max_turns
-        )
-        if latest and not rotate:
-            prompt = instruction if native_resume_enabled else self.hub.build_follow_up_prompt(parent_session_id, instruction)
-            fallback_used = not native_resume_enabled and native_reason is not None
+        supports_conversation = self._native_conversation_supported(cwd)
+        native_conversation_id = self._native_agy_conversation_id(parent) if supports_conversation else None
+        if latest:
             root_run_id = self.hub.root_run_id(parent.conversation_id)
+            if native_conversation_id:
+                return _FollowUpPlan(
+                    prompt=instruction,
+                    conversation_id=parent.conversation_id,
+                    parent_session_id=root_run_id if root_run_id != parent_session_id else parent_session_id,
+                    parent_run_id=parent_session_id,
+                    branch_from_conversation_id=None,
+                    branch_from_run_id=None,
+                    cwd=cwd,
+                    native_conversation_id=native_conversation_id,
+                    fallback_used=fallback_reason is not None,
+                    fallback_reason=fallback_reason,
+                )
             return _FollowUpPlan(
-                prompt=prompt,
+                prompt=self.hub.build_follow_up_prompt(parent_session_id, instruction),
                 conversation_id=parent.conversation_id,
                 parent_session_id=root_run_id if root_run_id != parent_session_id else parent_session_id,
                 parent_run_id=parent_session_id,
                 branch_from_conversation_id=None,
                 branch_from_run_id=None,
                 cwd=cwd,
-                native_session_mode="resume" if native_resume_enabled else "none",
-                native_resume_enabled=native_resume_enabled,
-                fallback_used=fallback_used,
-                fallback_reason=native_reason if fallback_used else None,
-            )
-
-        fallback_reason = "session_rotation" if rotate else "branch_from_past_run"
-        if rotate and parent.conversation_id:
-            self.hub.update_conversation_summary(
-                parent.conversation_id,
-                self.hub.summarize_conversation(parent.conversation_id, through_run_id=parent_session_id),
-            )
-        prompt = self.hub.build_follow_up_prompt(parent_session_id, instruction)
-        if rotate:
-            return _FollowUpPlan(
-                prompt=prompt,
-                conversation_id=parent.conversation_id,
-                parent_session_id=self.hub.root_run_id(parent.conversation_id) or parent_session_id,
-                parent_run_id=parent_session_id,
-                branch_from_conversation_id=None,
-                branch_from_run_id=None,
-                cwd=cwd,
-                native_session_mode="start" if native_resume_enabled else "none",
-                native_resume_enabled=native_resume_enabled,
+                native_conversation_id=None,
                 fallback_used=True,
-                fallback_reason=fallback_reason,
+                fallback_reason=fallback_reason
+                or ("native_conversation_id_unavailable" if supports_conversation else "native_conversation_flag_unavailable"),
             )
         return _FollowUpPlan(
-            prompt=prompt,
+            prompt=self.hub.build_follow_up_prompt(parent_session_id, instruction),
             conversation_id=None,
             parent_session_id=parent_session_id,
             parent_run_id=parent_session_id,
             branch_from_conversation_id=parent.conversation_id,
             branch_from_run_id=parent_session_id,
             cwd=cwd,
-            native_session_mode="start" if native_resume_enabled else "none",
-            native_resume_enabled=native_resume_enabled,
+            native_conversation_id=None,
             fallback_used=True,
-            fallback_reason=fallback_reason,
+            fallback_reason=fallback_reason or "branch_from_past_run",
         )
 
-    def _native_resume_available(self, cwd: Path | None) -> tuple[bool, str | None]:
-        if self.config.gemini_native_resume == "off":
-            return False, "disabled_by_config"
-        probe_method = getattr(self.runner, "probe_native_resume", None)
-        if callable(probe_method):
-            probe = probe_method(cwd)
-            supported = bool(getattr(probe, "supported", False))
-            reason = getattr(probe, "reason", None)
-            if supported:
-                return True, None
-            if self.config.gemini_native_resume == "on":
-                raise _NativeResumeRequiredError(str(reason or "Gemini CLI native resume is not supported"))
-            return False, str(reason or "native_resume_unavailable")
-        return True, None
+    def _native_agy_conversation_id(self, parent) -> str | None:
+        for value in (
+            getattr(parent, "agy_conversation_id", None),
+            self.hub.conversations.get(parent.conversation_id).current_agy_conversation_id
+            if getattr(parent, "conversation_id", None) in self.hub.conversations
+            else None,
+        ):
+            if isinstance(value, str) and _is_uuid(value):
+                return value
+        return None
 
-    def _native_resume_probe(self, cwd: Path | None) -> dict[str, Any]:
-        if self.config.gemini_native_resume == "off":
-            return {"supported": False, "reason": "disabled_by_config", "missing": []}
-        probe_method = getattr(self.runner, "probe_native_resume", None)
-        if not callable(probe_method):
-            return {"supported": True, "reason": None, "missing": []}
-        probe = probe_method(cwd)
-        return {
-            "supported": bool(getattr(probe, "supported", False)),
-            "reason": getattr(probe, "reason", None),
-            "missing": list(getattr(probe, "missing", [])),
-        }
+    def _native_conversation_supported(self, cwd: Path | None) -> bool:
+        probe_method = getattr(self.runner, "probe_capabilities", None)
+        capabilities = probe_method(cwd) if callable(probe_method) else AgyCliRunner(self.config).probe_capabilities(cwd)
+        return bool(capabilities.supports_conversation)
 
     def _conversation_lock(self, conversation_id: str | None) -> threading.Lock:
         key = conversation_id or "__new_conversation__"
@@ -968,21 +645,6 @@ class GemnessService:
                 lock = threading.Lock()
                 self._conversation_locks[key] = lock
             return lock
-
-    def _git_diff(self, base_ref: str, cwd: Path) -> str:
-        completed = subprocess.run(
-            ["git", "diff", "--no-color", base_ref, "--"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or "git diff failed")
-        return completed.stdout
-
 
 def validate_base_ref(base_ref: str) -> str:
     ref = base_ref.strip()
@@ -999,9 +661,9 @@ def validate_base_ref(base_ref: str) -> str:
 
 def _session_title(prompt: str, tool_name: str, limit: int = 45) -> str:
     fallback = {
-        "ask_text": "텍스트 질문",
-        "ask_json": "JSON 질문",
-        "review_current_diff": "현재 diff 리뷰",
+        "ask_antigravity": "Antigravity 질문",
+        "ask_antigravity_json": "Antigravity JSON 질문",
+        "review_current_diff_with_antigravity": "현재 변경 리뷰",
     }.get(tool_name, "Gemness 세션")
     for line in _title_candidate_lines(prompt):
         cleaned = _clean_title_line(line)
@@ -1049,9 +711,9 @@ def _clean_title_line(line: str) -> str:
         "schema:",
         "previous session summary",
         "continue from this previous",
-        "이전 gemini 답변",
-        "gemini의 답변",
-        "gemini의 마지막 답변",
+        "이전 antigravity 답변",
+        "antigravity의 답변",
+        "antigravity의 마지막 답변",
     )
     if lower.startswith(skip_prefixes):
         return ""
@@ -1065,17 +727,6 @@ def _clip_title(text: str, limit: int) -> str:
     return f"{clipped}..."
 
 
-def _selected_model(requested: str | None, configured: str | None) -> str | None:
-    for value in (requested, configured):
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _model_label(model: str | None) -> str:
-    return model.strip() if isinstance(model, str) and model.strip() else DEFAULT_MODEL_LABEL
-
-
 def _json_prompt(prompt: str, schema: dict[str, Any]) -> str:
     return (
         f"{prompt}\n\n"
@@ -1085,33 +736,28 @@ def _json_prompt(prompt: str, schema: dict[str, Any]) -> str:
     )
 
 
-def _repair_prompt(
-    original_prompt: str,
-    schema: dict[str, Any],
-    raw_response: str,
-    parse_error: str | None,
-    validation_errors: list[dict[str, Any]] | None,
-) -> str:
+def _repair_prompt(schema: dict[str, Any], raw_response: str, parse_error: str | None, validation_errors: list[dict[str, Any]] | None) -> str:
     return (
-        "Repair the previous Gemini response so it conforms to the schema. Do not solve the task again, "
-        "do not add new analysis, and do not invent new facts. Preserve the meaning of the existing "
-        "response as much as possible and return only the repaired JSON.\n\n"
-        f"Original prompt:\n{original_prompt}\n\n"
+        "Repair only the previous Antigravity response so it conforms to the schema. Gemness is not resending "
+        "the original task, repository materials, diffs, file dumps, logs, or transcript payloads. Do not solve "
+        "the task again, do not add new analysis, and do not invent new facts. Preserve the meaning of the "
+        "existing response as much as possible and return only the repaired JSON.\n\n"
         f"Schema:\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n\n"
-        f"Previous response:\n{raw_response}\n\n"
+        f"Previous Antigravity response:\n{raw_response}\n\n"
         f"Parse error:\n{parse_error or 'none'}\n\n"
         f"Validation errors:\n{json.dumps(validation_errors or [], ensure_ascii=False, indent=2)}"
     )
 
 
-def _interrupted_retry_prompt(original_prompt: str, partial_response: str, instruction: str) -> str:
+def _interrupted_retry_prompt(original_prompt: str, _partial_response: str, instruction: str) -> str:
     return (
-        "A previous headless Gemini subprocess was interrupted by the user. Continue by re-answering "
-        "with the intervention applied. Do not assume live injection into the old process.\n\n"
+        "A previous headless Antigravity CLI subprocess was interrupted. Start a fresh answer with "
+        "the retry instruction applied. Gemness is not forwarding the interrupted partial output; use the "
+        "current working directory and Antigravity CLI's own tools as needed. Do not assume live injection "
+        "into the old process or rely on omitted partial content.\n\n"
         f"Original prompt:\n{original_prompt}\n\n"
-        f"Partial Gemini output, if any:\n{partial_response or '(none)'}\n\n"
-        f"User intervention:\n{instruction}\n\n"
-        "Re-answer with the intervention applied."
+        f"Retry instruction:\n{instruction}\n\n"
+        "Re-answer with the retry instruction applied."
     )
 
 
@@ -1119,7 +765,17 @@ def _merged_stats(result_stats: dict[str, Any], envelope: dict[str, Any] | None)
     stats = dict(result_stats)
     if isinstance(envelope, dict) and isinstance(envelope.get("stats"), dict):
         stats.update(envelope["stats"])
+    if isinstance(envelope, dict) and isinstance(envelope.get("metadata"), dict):
+        stats.setdefault("metadata", envelope["metadata"])
     return stats
+
+
+def _result_metadata(result: AgyRunResult, envelope: dict[str, Any] | None) -> dict[str, Any]:
+    if result.metadata:
+        return dict(result.metadata)
+    if isinstance(envelope, dict) and isinstance(envelope.get("metadata"), dict):
+        return dict(envelope["metadata"])
+    return {}
 
 
 def _envelope_error(envelope: dict[str, Any] | None) -> str | None:
@@ -1168,14 +824,12 @@ def _session_cwd(project_root: str | None) -> Path | None:
     return path.resolve()
 
 
-def _new_gemini_session_id() -> str:
-    return f"gemness_{uuid.uuid4()}"
-
-
-def _should_fallback_from_resume_error(result: GeminiRunResult) -> bool:
-    text = f"{result.message}\n{result.stderr}\n{result.stdout}".lower()
-    markers = ["resume", "session", "context", "maxsessionturns", "invalid session", "not found", "expired"]
-    return any(marker in text for marker in markers)
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 class _NullLock:
@@ -1188,31 +842,3 @@ class _NullLock:
 
 def _null_lock() -> _NullLock:
     return _NullLock()
-
-
-def _gemini_version(command_parts: list[str], cwd: Path | None, config: GemnessConfig) -> tuple[str | None, str | None]:
-    if not command_parts:
-        return None, "Gemini CLI command is empty"
-    executable = command_parts[0]
-    if not command_exists(executable) and not Path(executable).expanduser().exists():
-        return None, f"Gemini CLI not found: {executable}"
-    try:
-        completed = subprocess.run(
-            [*command_parts, "--version"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=False,
-            env=gemness_env(config),
-        )
-    except FileNotFoundError:
-        return None, f"Gemini CLI not found: {executable}"
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, f"Gemini CLI version check failed: {exc}"
-    output = (completed.stdout or completed.stderr).strip()
-    if completed.returncode != 0:
-        return None, f"Gemini CLI version check failed: {output or completed.returncode}"
-    return output, None

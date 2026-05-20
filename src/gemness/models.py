@@ -49,8 +49,7 @@ class ConversationRecord:
     project_root: str | None
     model: str
     approval_mode: str
-    current_gemini_session_id: str
-    native_resume_enabled: bool
+    current_agy_conversation_id: str
     fallback_mode: str = "none"
     summary: str | None = None
     turn_count: int = 0
@@ -77,9 +76,7 @@ class SessionRecord:
     branch_from_run_id: str | None = None
     turn_index: int | None = None
     project_root: str | None = None
-    gemini_session_id: str | None = None
-    native_resume_enabled: bool | None = None
-    native_resume_used: bool | None = None
+    agy_conversation_id: str | None = None
     fallback_used: bool = False
     fallback_reason: str | None = None
     command_argv: list[str] = field(default_factory=list)
@@ -96,16 +93,3 @@ class SessionRecord:
         data["run_id"] = self.run_id or self.session_id
         return data
 
-
-@dataclass(slots=True)
-class Intervention:
-    intervention_id: str
-    session_id: str
-    action: str
-    ts: str
-    instruction: str | None = None
-    prompt: str | None = None
-    status: str = "pending"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {key: value for key, value in asdict(self).items() if value is not None}

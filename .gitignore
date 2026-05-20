@@ -8,8 +8,8 @@ build/
 dist/
 *.zip
 
-# Gemini MCP observer runtime files
-.gemini-mcp/
+# Antigravity observer runtime files
+.agy-mcp/
 .gemness/
 .codex/
 .codex/live-observer*/
