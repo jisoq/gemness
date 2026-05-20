@@ -129,12 +129,25 @@ def test_dashboard_refresh_marks_dead_started_process_as_error(tmp_path, monkeyp
 def test_dashboard_refresh_marks_unupdated_open_session_as_error(tmp_path, monkeypatch) -> None:
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
     session = hub.create_session("ask_antigravity", "fake-model")
+    hub.set_status(session.session_id, "sending")
     monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 30.0)
 
     listed = hub.list_sessions()[0]
 
     assert listed["session_id"] == session.session_id
     assert listed["status"] == "error"
+
+
+def test_dashboard_refresh_keeps_queued_session_waiting_for_capacity(tmp_path, monkeypatch) -> None:
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
+    session = hub.create_session("ask_antigravity", "fake-model")
+    hub.append_event(session.session_id, "run.accepted", "system", {"run_id": session.session_id, "concurrency_limit": 1})
+    monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 3600.0)
+
+    listed = hub.list_sessions()[0]
+
+    assert listed["session_id"] == session.session_id
+    assert listed["status"] == "queued"
 
 
 def test_rename_conversation_updates_root_title_and_persists(tmp_path) -> None:

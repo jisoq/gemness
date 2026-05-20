@@ -66,6 +66,7 @@ class GemnessService:
         self.hub.attach_service(self)
         self.runner = runner or AgyCliRunner(self.config)
         self.run_manager = RunManager(self.config, self.hub)
+        self._idempotency_start_lock = threading.RLock()
         self._conversation_locks: dict[str, threading.Lock] = {}
         self._conversation_locks_guard = threading.RLock()
         if self.config.observer_enabled and self.config.observer_start_on_init:
@@ -180,139 +181,143 @@ class GemnessService:
         return self._await_blocking(str(started["run_id"]))
 
     def start_antigravity(self, prompt: str, cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        existing = self._existing_idempotent_run(idempotency_key)
-        if existing is not None:
-            return existing
-        try:
-            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-        except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
-        session = self._session("ask_antigravity", None, None, _session_title(prompt, "ask_antigravity"), cwd=resolved_cwd)
-        self.run_manager.start(
-            session.session_id,
-            lambda cancel_event, process_callback, heartbeat_callback: self._run_text_session(
-                "ask_antigravity",
-                prompt,
-                existing_session_id=session.session_id,
-                cwd=resolved_cwd,
-                title_source=prompt,
-                cancel_event=cancel_event,
-                process_callback=process_callback,
-                heartbeat_callback=heartbeat_callback,
-            ),
-            idempotency_key=idempotency_key,
-        )
-        return self._start_payload(session.session_id, idempotency_key=idempotency_key)
-
-    def start_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        existing = self._existing_idempotent_run(idempotency_key)
-        if existing is not None:
-            return existing
-        schema_error = validate_schema_definition(schema)
-        if schema_error:
-            return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
-        try:
-            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-        except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
-        session = self._session("ask_antigravity_json", None, None, _session_title(prompt, "ask_antigravity_json"), cwd=resolved_cwd)
-        self.run_manager.start(
-            session.session_id,
-            lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
-                "ask_antigravity_json",
-                prompt,
-                schema,
-                existing_session_id=session.session_id,
-                cwd=resolved_cwd,
-                title_source=prompt,
-                cancel_event=cancel_event,
-                process_callback=process_callback,
-                heartbeat_callback=heartbeat_callback,
-            ),
-            idempotency_key=idempotency_key,
-        )
-        return self._start_payload(session.session_id, idempotency_key=idempotency_key)
-
-    def start_review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        existing = self._existing_idempotent_run(idempotency_key)
-        if existing is not None:
-            return existing
-        try:
-            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            base_ref = validate_base_ref(base_ref)
-        except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
-        session = self.hub.create_session(
-            "review_current_diff_with_antigravity",
-            DEFAULT_MODEL_LABEL,
-            title=f"현재 변경 리뷰: {base_ref}",
-            project_root=str(resolved_cwd),
-        )
-        prompt = build_review_prompt(base_ref)
-        self.run_manager.start(
-            session.session_id,
-            lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
-                "review_current_diff_with_antigravity",
-                prompt,
-                REVIEW_SCHEMA,
-                existing_session_id=session.session_id,
-                cwd=resolved_cwd,
-                title_source=f"현재 변경 리뷰: {base_ref}",
-                cancel_event=cancel_event,
-                process_callback=process_callback,
-                heartbeat_callback=heartbeat_callback,
-            ),
-            idempotency_key=idempotency_key,
-        )
-        return self._start_payload(session.session_id, idempotency_key=idempotency_key)
-
-    def start_follow_up_antigravity(self, parent_session_id: str, instruction: str, idempotency_key: str | None = None) -> dict[str, Any]:
-        existing = self._existing_idempotent_run(idempotency_key)
-        if existing is not None:
-            return existing
-        self.hub.refresh_from_disk()
-        if parent_session_id not in self.hub.sessions:
-            return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
-        plan = self._follow_up_plan(parent_session_id, instruction)
-        create_lock = self._conversation_lock(plan.conversation_id) if plan.conversation_id else _null_lock()
-        with create_lock:
-            if self.hub.is_latest_run(parent_session_id):
-                plan = self._follow_up_plan(parent_session_id, instruction)
-            session = self.hub.create_session(
-                "ask_antigravity",
-                DEFAULT_MODEL_LABEL,
-                parent_session_id=plan.parent_session_id,
-                title=_session_title(instruction, "ask_antigravity"),
-                conversation_id=plan.conversation_id,
-                parent_run_id=plan.parent_run_id,
-                branch_from_conversation_id=plan.branch_from_conversation_id,
-                branch_from_run_id=plan.branch_from_run_id,
-                project_root=str(plan.cwd) if plan.cwd is not None else None,
-                agy_conversation_id=plan.native_conversation_id,
-                fallback_used=plan.fallback_used,
-                fallback_reason=plan.fallback_reason,
-            )
-        run_lock = self._conversation_lock(session.conversation_id)
-
-        def run(cancel_event, process_callback, heartbeat_callback) -> dict[str, Any]:
-            with run_lock:
-                return self._run_text_session(
+        with self._idempotency_start_lock:
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            try:
+                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
+            session = self._session("ask_antigravity", None, None, _session_title(prompt, "ask_antigravity"), cwd=resolved_cwd)
+            self.run_manager.start(
+                session.session_id,
+                lambda cancel_event, process_callback, heartbeat_callback: self._run_text_session(
                     "ask_antigravity",
-                    plan.prompt,
-                    parent_session_id=plan.parent_session_id,
+                    prompt,
                     existing_session_id=session.session_id,
-                    cwd=plan.cwd,
-                    title_source=instruction,
-                    fallback_used=plan.fallback_used,
-                    fallback_reason=plan.fallback_reason,
-                    native_conversation_id=plan.native_conversation_id,
+                    cwd=resolved_cwd,
+                    title_source=prompt,
                     cancel_event=cancel_event,
                     process_callback=process_callback,
                     heartbeat_callback=heartbeat_callback,
-                )
+                ),
+                idempotency_key=idempotency_key,
+            )
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
 
-        self.run_manager.start(session.session_id, run, idempotency_key=idempotency_key)
-        return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+    def start_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        with self._idempotency_start_lock:
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            schema_error = validate_schema_definition(schema)
+            if schema_error:
+                return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
+            try:
+                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
+            session = self._session("ask_antigravity_json", None, None, _session_title(prompt, "ask_antigravity_json"), cwd=resolved_cwd)
+            self.run_manager.start(
+                session.session_id,
+                lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
+                    "ask_antigravity_json",
+                    prompt,
+                    schema,
+                    existing_session_id=session.session_id,
+                    cwd=resolved_cwd,
+                    title_source=prompt,
+                    cancel_event=cancel_event,
+                    process_callback=process_callback,
+                    heartbeat_callback=heartbeat_callback,
+                ),
+                idempotency_key=idempotency_key,
+            )
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+
+    def start_review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        with self._idempotency_start_lock:
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            try:
+                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+                base_ref = validate_base_ref(base_ref)
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
+            session = self.hub.create_session(
+                "review_current_diff_with_antigravity",
+                DEFAULT_MODEL_LABEL,
+                title=f"현재 변경 리뷰: {base_ref}",
+                project_root=str(resolved_cwd),
+            )
+            prompt = build_review_prompt(base_ref)
+            self.run_manager.start(
+                session.session_id,
+                lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
+                    "review_current_diff_with_antigravity",
+                    prompt,
+                    REVIEW_SCHEMA,
+                    existing_session_id=session.session_id,
+                    cwd=resolved_cwd,
+                    title_source=f"현재 변경 리뷰: {base_ref}",
+                    cancel_event=cancel_event,
+                    process_callback=process_callback,
+                    heartbeat_callback=heartbeat_callback,
+                ),
+                idempotency_key=idempotency_key,
+            )
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+
+    def start_follow_up_antigravity(self, parent_session_id: str, instruction: str, idempotency_key: str | None = None) -> dict[str, Any]:
+        with self._idempotency_start_lock:
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            self.hub.refresh_from_disk()
+            if parent_session_id not in self.hub.sessions:
+                return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
+            plan = self._follow_up_plan(parent_session_id, instruction)
+            create_lock = self._conversation_lock(plan.conversation_id) if plan.conversation_id else _null_lock()
+            with create_lock:
+                if self.hub.is_latest_run(parent_session_id):
+                    plan = self._follow_up_plan(parent_session_id, instruction)
+                session = self.hub.create_session(
+                    "ask_antigravity",
+                    DEFAULT_MODEL_LABEL,
+                    parent_session_id=plan.parent_session_id,
+                    title=_session_title(instruction, "ask_antigravity"),
+                    conversation_id=plan.conversation_id,
+                    parent_run_id=plan.parent_run_id,
+                    branch_from_conversation_id=plan.branch_from_conversation_id,
+                    branch_from_run_id=plan.branch_from_run_id,
+                    project_root=str(plan.cwd) if plan.cwd is not None else None,
+                    agy_conversation_id=plan.native_conversation_id,
+                    fallback_used=plan.fallback_used,
+                    fallback_reason=plan.fallback_reason,
+                )
+            run_lock = self._conversation_lock(session.conversation_id)
+
+            def run(cancel_event, process_callback, heartbeat_callback) -> dict[str, Any]:
+                with run_lock:
+                    return self._run_text_session(
+                        "ask_antigravity",
+                        plan.prompt,
+                        parent_session_id=plan.parent_session_id,
+                        existing_session_id=session.session_id,
+                        cwd=plan.cwd,
+                        title_source=instruction,
+                        fallback_used=plan.fallback_used,
+                        fallback_reason=plan.fallback_reason,
+                        native_conversation_id=plan.native_conversation_id,
+                        cancel_event=cancel_event,
+                        process_callback=process_callback,
+                        heartbeat_callback=heartbeat_callback,
+                    )
+
+            self.run_manager.start(session.session_id, run, idempotency_key=idempotency_key)
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
 
     def get_antigravity_run(self, run_id: str, event_cursor: str | None = None, recent_event_limit: int = 20) -> dict[str, Any]:
         return self._run_status_payload(run_id, event_cursor=event_cursor, recent_event_limit=recent_event_limit)

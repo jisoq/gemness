@@ -621,6 +621,8 @@ class ObserverHub:
             for session in self.sessions.values():
                 if session.status not in OPEN_SESSION_STATUSES:
                     continue
+                if session.status == "queued":
+                    continue
                 age = _age_seconds(session.updated_at, now)
                 pid = _last_started_pid(self.events.get(session.session_id, []))
                 reason = ""

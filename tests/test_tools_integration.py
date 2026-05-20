@@ -459,6 +459,54 @@ def test_idempotency_key_reuses_existing_detached_run(tmp_path) -> None:
         service.shutdown()
 
 
+def test_idempotency_key_concurrent_start_creates_single_detached_run(tmp_path) -> None:
+    release = threading.Event()
+
+    def slow_response(session_id, **kwargs):  # noqa: ANN001, ANN003
+        release.wait(timeout=2)
+        stdout = json.dumps({"response": "once", "metadata": {"streaming": False, "run_id": session_id}})
+        return AgyRunResult.completed(stdout, metadata={"streaming": False, "run_id": session_id})
+
+    service = make_service(tmp_path, [slow_response])
+    original_find = service.run_manager.find_by_idempotency_key
+
+    def slow_find(idempotency_key):  # noqa: ANN001
+        found = original_find(idempotency_key)
+        if found is None:
+            time.sleep(0.05)
+        return found
+
+    service.run_manager.find_by_idempotency_key = slow_find  # type: ignore[method-assign]
+    try:
+        start_gate = threading.Barrier(2)
+        results: list[dict[str, Any]] = []
+        errors: list[BaseException] = []
+
+        def start() -> None:
+            try:
+                start_gate.wait(timeout=2)
+                results.append(service.start_antigravity("first", idempotency_key="same-request"))
+            except BaseException as exc:  # noqa: BLE001 - preserve thread failure for assertion.
+                errors.append(exc)
+
+        threads = [threading.Thread(target=start) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+        release.set()
+        done = service.await_antigravity_run(results[0]["run_id"], timeout_sec=2)
+
+        assert errors == []
+        assert len(results) == 2
+        assert {result["run_id"] for result in results} == {results[0]["run_id"]}
+        assert any(result.get("idempotent") is True for result in results)
+        assert done["result"]["text"] == "once"
+        assert len(service.runner.calls) == 1
+    finally:
+        service.shutdown()
+
+
 def test_get_antigravity_run_event_cursor_returns_only_later_events(tmp_path) -> None:
     release = threading.Event()
 

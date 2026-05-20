@@ -100,6 +100,7 @@
     <li><span class="tag">Subagent run</span>Subagent nickname: <code>Darwin</code>. 지시사항: <code>start/get/await/cancel</code> detached API를 쓰지 말고 final-result review tool을 호출해 완료 결과 요약을 parent에게 반환할 것.</li>
     <li><span class="tag">Accepted findings</span>Darwin의 advisory 중 진행문구 필터가 정상 조언을 지울 수 있다는 지적과 extensionless artifact 삭제 누락 가능성은 수용했다. 필터는 ellipsis가 있는 짧은 진행 라인 위주로 좁혔고, conversation/session 삭제는 <code>run_id.*</code> artifact 전체를 정리하도록 바꾸었다.</li>
     <li><span class="tag">PR review patch</span>최신 PR 리뷰 3건은 모두 수용했다. Repair phase의 cancel/interrupted 결과는 invalid로 낮추지 않고 terminal 상태로 전파하며, agy process 완료 뒤 늦게 들어온 cancel 신호는 정상 결과를 덮어쓰지 않게 했다. Observer transcript에서 <code>prompt_ref: "prompt.rendered"</code>가 있는 후속 <code>prompt.sent</code>는 같은 run일 때만 이전 rendered prompt를 숨긴다.</li>
+    <li><span class="tag">PR review patch 2A</span>Queued run은 concurrency capacity를 기다리는 정상 상태이므로 stale observer timeout 대상에서 제외했다. Idempotency race는 RunManager 내부 재설계보다 작고 검토 가능한 방식으로, 각 <code>start_*</code> 도구의 lookup, validation, session creation, run registration 구간을 GemnessService의 start lock으로 묶어 먼저 차단했다.</li>
   </ul>
 </body>
 </html>
