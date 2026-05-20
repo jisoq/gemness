@@ -34,6 +34,7 @@ def test_config_defaults_use_antigravity_env(monkeypatch) -> None:
 
     assert config.agy_command == "agy"
     assert config.agy_timeout_sec == 600
+    assert config.agy_queue_limit == 64
     assert config.agy_capture_mode == "auto"
     assert config.observer_port == 56755
     assert config.observer_start_on_init is True

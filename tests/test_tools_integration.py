@@ -530,6 +530,50 @@ def test_get_antigravity_run_event_cursor_returns_only_later_events(tmp_path) ->
         service.shutdown()
 
 
+def test_completed_detached_run_is_evictable_and_recovers_from_events(tmp_path) -> None:
+    service = make_service(tmp_path, ["once"])
+    try:
+        started = service.start_antigravity("first", idempotency_key="same-request")
+        done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
+        repeated = service.start_antigravity("first", idempotency_key="same-request")
+
+        assert done["status"] == "completed"
+        assert service.run_manager.get(started["run_id"]) is None
+        assert repeated["run_id"] == started["run_id"]
+        assert repeated["idempotent"] is True
+        assert repeated["result"]["text"] == "once"
+        assert len(service.runner.calls) == 1
+    finally:
+        service.shutdown()
+
+
+def test_start_antigravity_rejects_when_run_queue_is_full(tmp_path) -> None:
+    release = threading.Event()
+
+    def slow_response(session_id, **kwargs):  # noqa: ANN001, ANN003
+        release.wait(timeout=2)
+        stdout = json.dumps({"response": "done", "metadata": {"streaming": False, "run_id": session_id}})
+        return AgyRunResult.completed(stdout, metadata={"streaming": False, "run_id": session_id})
+
+    service = make_service(tmp_path, [slow_response, slow_response], agy_concurrency_limit=1, agy_queue_limit=1)
+    try:
+        first = service.start_antigravity("first")
+        _wait_for_session_status(service.hub, "running")
+        second = service.start_antigravity("second")
+        third = service.start_antigravity("third")
+        release.set()
+        first_done = service.await_antigravity_run(first["run_id"], timeout_sec=2)
+        second_done = service.await_antigravity_run(second["run_id"], timeout_sec=2)
+
+        assert first_done["status"] == "completed"
+        assert second_done["status"] == "completed"
+        assert third["status"] == "error"
+        assert third["result"]["reason"] == "run_queue_full"
+        assert len(service.runner.calls) == 2
+    finally:
+        service.shutdown()
+
+
 def test_cancel_antigravity_run_marks_run_cancelled(tmp_path) -> None:
     observed_cancel = threading.Event()
 

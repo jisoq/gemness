@@ -84,6 +84,7 @@ class GemnessConfig:
     agy_capture_mode: str = field(default_factory=lambda: _choice_env("GEMNESS_AGY_CAPTURE_MODE", "auto", AGY_CAPTURE_MODES))
     agy_heartbeat_interval_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_HEARTBEAT_INTERVAL", 5.0))
     agy_concurrency_limit: int = field(default_factory=lambda: _int_env("GEMNESS_AGY_CONCURRENCY_LIMIT", 4))
+    agy_queue_limit: int = field(default_factory=lambda: _int_env("GEMNESS_AGY_QUEUE_LIMIT", 64))
     workspace_root: Path | None = field(default_factory=lambda: _optional_path_env("GEMNESS_WORKSPACE_ROOT"))
     allowed_roots: tuple[Path, ...] = field(default_factory=lambda: _path_list_env("GEMNESS_ALLOWED_ROOTS"))
 

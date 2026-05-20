@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -37,7 +38,16 @@ class RunManager:
         self._runs: dict[str, ManagedRun] = {}
         self._idempotency: dict[str, str] = {}
         self._lock = threading.RLock()
-        self._semaphore = threading.BoundedSemaphore(max(1, int(config.agy_concurrency_limit or 1)))
+        self._concurrency_limit = max(1, int(config.agy_concurrency_limit or 1))
+        self._queue_limit = max(1, int(config.agy_queue_limit or self._concurrency_limit))
+        self._work_queue: queue.Queue[tuple[ManagedRun, RunCallable]] = queue.Queue(maxsize=self._queue_limit)
+        self._shutdown = threading.Event()
+        self._workers = [
+            threading.Thread(target=self._worker_loop, name=f"gemness-run-worker-{index + 1}", daemon=True)
+            for index in range(self._concurrency_limit)
+        ]
+        for worker in self._workers:
+            worker.start()
 
     def find_by_idempotency_key(self, idempotency_key: str | None) -> str | None:
         key = _clean_key(idempotency_key)
@@ -68,6 +78,11 @@ class RunManager:
             self._runs[run_id] = managed
             if managed.idempotency_key:
                 self._idempotency.setdefault(managed.idempotency_key, run_id)
+        try:
+            self._work_queue.put_nowait((managed, run_callable))
+        except queue.Full:
+            self._reject_queue_full(managed)
+            return managed
         self.hub.append_event(
             run_id,
             "run.accepted",
@@ -75,11 +90,10 @@ class RunManager:
             {
                 "run_id": run_id,
                 "idempotency_key": managed.idempotency_key,
-                "concurrency_limit": max(1, int(self.config.agy_concurrency_limit or 1)),
+                "concurrency_limit": self._concurrency_limit,
+                "queue_limit": self._queue_limit,
             },
         )
-        thread = threading.Thread(target=self._worker, args=(managed, run_callable), name=f"gemness-run-{run_id}", daemon=True)
-        thread.start()
         return managed
 
     def get(self, run_id: str) -> ManagedRun | None:
@@ -138,11 +152,24 @@ class RunManager:
             payload["cancel_requested"] = True
         self.hub.append_event(run_id, "antigravity.heartbeat", "gemness", payload)
 
-    def _worker(self, managed: ManagedRun, run_callable: RunCallable) -> None:
-        acquired = False
+    def shutdown(self) -> None:
+        self._shutdown.set()
+        for worker in self._workers:
+            worker.join(timeout=1)
+
+    def _worker_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                managed, run_callable = self._work_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                self._run_managed(managed, run_callable)
+            finally:
+                self._work_queue.task_done()
+
+    def _run_managed(self, managed: ManagedRun, run_callable: RunCallable) -> None:
         try:
-            self._semaphore.acquire()
-            acquired = True
             if managed.cancel_event.is_set():
                 managed.result = self._mark_cancelled(managed.run_id, "cancelled_before_start")
                 return
@@ -166,12 +193,40 @@ class RunManager:
             except Exception:
                 pass
         finally:
-            if acquired:
-                self._semaphore.release()
-            managed.completed_at = utc_now()
-            managed.done.set()
-            with managed.condition:
-                managed.condition.notify_all()
+            self._settle_managed(managed)
+
+    def _reject_queue_full(self, managed: ManagedRun) -> None:
+        payload = {
+            "status": "error",
+            "run_id": managed.run_id,
+            "session_id": managed.run_id,
+            "observer_url": self.hub.observer_url(managed.run_id),
+            "message": f"Antigravity run queue is full; queue_limit={self._queue_limit}.",
+            "reason": "run_queue_full",
+            "queue_limit": self._queue_limit,
+        }
+        managed.result = payload
+        self.hub.append_event(
+            managed.run_id,
+            "run.rejected",
+            "system",
+            {"run_id": managed.run_id, "idempotency_key": managed.idempotency_key, "reason": "run_queue_full", "queue_limit": self._queue_limit},
+        )
+        self.hub.set_status(managed.run_id, "error", "session.error", payload)
+        self._settle_managed(managed)
+
+    def _settle_managed(self, managed: ManagedRun) -> None:
+        managed.completed_at = utc_now()
+        managed.done.set()
+        with managed.condition:
+            managed.condition.notify_all()
+        self._evict(managed)
+
+    def _evict(self, managed: ManagedRun) -> None:
+        with self._lock:
+            self._runs.pop(managed.run_id, None)
+            if managed.idempotency_key and self._idempotency.get(managed.idempotency_key) == managed.run_id:
+                self._idempotency.pop(managed.idempotency_key, None)
 
     def _cancel_unmanaged(self, run_id: str) -> dict[str, Any]:
         try:

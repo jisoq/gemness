@@ -73,6 +73,7 @@ class GemnessService:
             self.hub.start_web_server()
 
     def shutdown(self) -> None:
+        self.run_manager.shutdown()
         self.hub.shutdown()
 
     def antigravity_health(self, *, cwd: str | None = None, check_antigravity: bool = True) -> dict[str, Any]:
@@ -351,15 +352,23 @@ class GemnessService:
 
     def _start_payload(self, run_id: str, *, idempotency_key: str | None = None) -> dict[str, Any]:
         session = self.hub.get_session(run_id, raw=True)
-        return {
-            "status": "accepted",
+        status = str(session["status"])
+        result = _event_result(self.hub.get_events(run_id, raw=True)) if status in FINAL_STATUSES else None
+        rejected = status == "error" and isinstance(result, dict) and result.get("reason") == "run_queue_full"
+        payload = {
+            "status": "error" if rejected else "accepted",
             "run_id": session["run_id"],
             "session_id": session["session_id"],
             "conversation_id": session.get("conversation_id"),
             "observer_url": session["observer_url"],
-            "session_status": session["status"],
+            "session_status": status,
             "idempotency_key": idempotency_key,
         }
+        if result is not None:
+            payload["result"] = result
+            if isinstance(result.get("message"), str):
+                payload["message"] = result["message"]
+        return payload
 
     def _run_status_payload(
         self,
@@ -469,8 +478,9 @@ class GemnessService:
             )
             return retry_result
         if result.status == "cancelled":
-            self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "metadata": result.metadata}
+            payload = {"status": "cancelled", "session_id": session_id, "run_id": session.run_id or session_id, "conversation_id": session.conversation_id, "observer_url": observer_url, "metadata": result.metadata}
+            self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled"})
+            return payload
         if result.status == "error":
             return self._runner_error(session_id, observer_url, result)
 
@@ -543,8 +553,9 @@ class GemnessService:
             )
             return retry_result
         if result.status == "cancelled":
-            self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "metadata": result.metadata}
+            payload = {"status": "cancelled", "session_id": session_id, "run_id": session.run_id or session_id, "conversation_id": session.conversation_id, "observer_url": observer_url, "metadata": result.metadata}
+            self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled"})
+            return payload
         if result.status == "error":
             return self._runner_error(session_id, observer_url, result)
 
@@ -637,7 +648,7 @@ class GemnessService:
                 "repair_attempted": True,
                 "repair_succeeded": False,
             }
-            self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled", "phase": "repair"}, phase="repair")
+            self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled", "phase": "repair"}, phase="repair")
             return payload
         payload = {
             "status": "invalid",

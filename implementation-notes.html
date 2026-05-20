@@ -102,6 +102,7 @@
     <li><span class="tag">PR review patch</span>최신 PR 리뷰 3건은 모두 수용했다. Repair phase의 cancel/interrupted 결과는 invalid로 낮추지 않고 terminal 상태로 전파하며, agy process 완료 뒤 늦게 들어온 cancel 신호는 정상 결과를 덮어쓰지 않게 했다. Observer transcript에서 <code>prompt_ref: "prompt.rendered"</code>가 있는 후속 <code>prompt.sent</code>는 같은 run일 때만 이전 rendered prompt를 숨긴다.</li>
     <li><span class="tag">PR review patch 2A</span>Queued run은 concurrency capacity를 기다리는 정상 상태이므로 stale observer timeout 대상에서 제외했다. Idempotency race는 RunManager 내부 재설계보다 작고 검토 가능한 방식으로, 각 <code>start_*</code> 도구의 lookup, validation, session creation, run registration 구간을 GemnessService의 start lock으로 묶어 먼저 차단했다.</li>
     <li><span class="tag">PR review patch 2B</span>Heartbeat stdout/stderr byte count는 poll loop에서 누적 문자열을 매번 재조합하지 않고, reader thread가 append 시점에 증분 counter를 갱신하도록 바꾸었다. Text assembly는 최종 stdout/stderr 회수 시점에만 수행한다.</li>
+    <li><span class="tag">PR review patch 2C</span>RunManager는 요청마다 대기 thread를 만들지 않고 <code>agy_concurrency_limit</code> 크기의 worker pool과 bounded queue를 사용한다. Queue overflow는 <code>run_queue_full</code> error로 즉시 기록한다. 완료/취소/오류 run은 transcript event를 canonical source로 남긴 뒤 in-memory <code>_runs</code>/<code>_idempotency</code> registry에서 제거한다.</li>
   </ul>
 </body>
 </html>
