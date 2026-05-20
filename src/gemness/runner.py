@@ -360,7 +360,7 @@ class AgyCliRunner:
         raw_stdout = running.stdout()
         stderr = running.stderr()
         exit_code = running.poll()
-        if cancel_event is not None and cancel_event.is_set():
+        if not cancelled and cancel_event is not None and cancel_event.is_set() and not (exit_code == 0 and raw_stdout.strip()):
             cancelled = True
         auth_status = detect_auth_status(raw_stdout, stderr, exit_code)
         if exit_code == 0 and not raw_stdout.strip():

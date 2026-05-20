@@ -551,6 +551,39 @@ console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.
     assert turns[0]["meta"]["단계"] == "전송 전 초안"
 
 
+def test_conversation_transcript_keeps_previous_run_rendered_prompt_when_later_run_sends_ref(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const events = [
+  {
+    session_id: "run_1",
+    type: "prompt.rendered",
+    ts: "2026-05-19T03:04:17Z",
+    role: "codex_mcp",
+    payload: { prompt: "첫 번째 실행 초안입니다." }
+  },
+  {
+    session_id: "run_2",
+    type: "prompt.sent",
+    ts: "2026-05-19T03:04:18Z",
+    role: "codex_mcp",
+    payload: { prompt_ref: "prompt.rendered", prompt_preview: "두 번째 실행 전송" }
+  }
+];
+const turns = buildConversationTranscript(events);
+console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.body, meta: turn.meta }))));
+"""
+    script_path = tmp_path / "cross-run-prompt-ref-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    turns = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert turns[0]["body"] == "첫 번째 실행 초안입니다."
+    assert turns[0]["meta"]["단계"] == "전송 전 초안"
+
+
 def test_markdown_renderer_formats_transcript_body_safely(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"

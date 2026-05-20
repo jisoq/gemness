@@ -1280,8 +1280,16 @@ INDEX_HTML = r"""<!doctype html>
       const prompt = event.payload?.prompt;
       if (!prompt) return false;
       return allEvents.slice(index + 1).some((candidate) =>
-        candidate.type === "prompt.sent" && (candidate.payload?.prompt === prompt || candidate.payload?.prompt_ref === "prompt.rendered")
+        candidate.type === "prompt.sent" && (
+          candidate.payload?.prompt === prompt ||
+          (candidate.payload?.prompt_ref === "prompt.rendered" && eventsShareRun(event, candidate))
+        )
       );
+    }
+    function eventsShareRun(left, right) {
+      const leftRun = left.session_id || left.payload?.run_id || left.payload?.session_id;
+      const rightRun = right.session_id || right.payload?.run_id || right.payload?.session_id;
+      return Boolean(leftRun && rightRun && leftRun === rightRun);
     }
     function turn(event, speaker, direction, title, body, meta = {}, severity = "") {
       return { speaker, direction, title, timestamp: event.ts, body, meta, severity, rawEvent: event };

@@ -238,6 +238,21 @@ def test_ask_antigravity_json_invalid_then_repair_fail_returns_invalid(tmp_path)
         service.shutdown()
 
 
+def test_ask_antigravity_json_cancel_during_repair_returns_cancelled(tmp_path) -> None:
+    service = make_service(tmp_path, ["not json", AgyRunResult.cancelled(metadata={"streaming": False, "cancelled": True})])
+    try:
+        result = service.ask_antigravity_json("Return answer", TEXT_SCHEMA)
+        events = service.hub.get_events(result["session_id"], raw=True)
+
+        assert result["status"] == "cancelled"
+        assert result["repair_attempted"] is True
+        assert result["repair_succeeded"] is False
+        assert service.hub.get_session(result["session_id"])["status"] == "cancelled"
+        assert any(event["type"] == "session.cancelled" and event.get("phase") == "repair" for event in events)
+    finally:
+        service.shutdown()
+
+
 def test_ask_antigravity_json_invalid_schema_returns_error_before_model_call(tmp_path) -> None:
     service = make_service(tmp_path, ['{"answer":"yes"}'])
     try:

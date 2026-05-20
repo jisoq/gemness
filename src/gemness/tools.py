@@ -610,6 +610,30 @@ class GemnessService:
             return payload
         if repair["status"] == "error":
             return self._runner_error(session_id, observer_url, repair["result"])
+        if repair["status"] == "interrupted":
+            retry_result = self._retry_json(tool_name, session_id, prompt_to_send, repair["result"], schema, cwd)
+            self.hub.set_status(
+                session_id,
+                "cancelled",
+                "session.cancelled",
+                {"reason": "repair_interrupted_and_retried", "child_session_id": retry_result.get("session_id")},
+                phase="repair",
+            )
+            return retry_result
+        if repair["status"] == "cancelled":
+            payload = {
+                "status": "cancelled",
+                "session_id": session_id,
+                "run_id": session.run_id or session_id,
+                "conversation_id": session.conversation_id,
+                "observer_url": observer_url,
+                "metadata": repair["result"].metadata,
+                "repaired": False,
+                "repair_attempted": True,
+                "repair_succeeded": False,
+            }
+            self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled", "phase": "repair"}, phase="repair")
+            return payload
         payload = {
             "status": "invalid",
             "response_preview": _preview_text(response_text),
@@ -672,7 +696,7 @@ class GemnessService:
         if result.status == "error":
             return {"status": "error", "result": result}
         if result.status in {"cancelled", "interrupted"}:
-            return {"status": "invalid", "raw_response": result.stdout}
+            return {"status": result.status, "result": result}
         response_text, envelope = extract_cli_response(result.stdout)
         envelope_error = _envelope_error(envelope)
         if envelope_error:
