@@ -21,7 +21,7 @@ from .review import REVIEW_SCHEMA, build_review_prompt
 from .run_manager import RunManager
 from .runner import AgyCliRunner, AgyRunResult, AgyRunner, agy_fallback_paths, command_exists, probe_auth, resolve_agy_command
 from .schema_validation import validate_json_schema, validate_schema_definition
-from .workspace import normalized_allowed_roots, resolve_workspace_cwd
+from .workspace import WorkspaceAccessError, inspect_workspace_policy, normalized_allowed_roots, resolve_workspace_cwd
 
 
 RESPONSE_PREVIEW_CHARS = 4000
@@ -79,13 +79,12 @@ class GemnessService:
 
     def antigravity_health(self, *, cwd: str | None = None, check_antigravity: bool = True) -> dict[str, Any]:
         warnings: list[str] = []
-        try:
-            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            cwd_error: str | None = None
-        except ValueError as exc:
-            resolved_cwd = None
-            cwd_error = str(exc)
+        workspace_decision = inspect_workspace_policy(self.config, cwd)
+        resolved_cwd = workspace_decision.cwd if workspace_decision.allowed else None
+        cwd_error = workspace_decision.message if not workspace_decision.allowed else None
+        if cwd_error:
             warnings.append(cwd_error)
+        warnings.extend(workspace_decision.diagnostics)
 
         transcript_dir = Path(self.config.transcript_dir).expanduser().resolve()
         transcript_writable = _is_writable_dir(transcript_dir)
@@ -104,7 +103,7 @@ class GemnessService:
             "streaming": False,
             "model_selection": "Use Antigravity CLI settings or `/model`; Gemness does not pass model flags.",
         }
-        if check_antigravity:
+        if check_antigravity and resolved_cwd is not None:
             probe_method = getattr(self.runner, "probe_capabilities", None)
             capabilities = probe_method(resolved_cwd) if callable(probe_method) else AgyCliRunner(self.config).probe_capabilities(resolved_cwd)
             antigravity["capabilities"] = capabilities.to_dict()
@@ -122,15 +121,13 @@ class GemnessService:
                 auth_probe = probe_auth(capabilities.command, capabilities.print_flag, resolved_cwd, self.config).to_dict()
                 if auth_probe["status"] in {"auth_required", "unknown"}:
                     warnings.append(auth_probe["message"])
+        elif check_antigravity:
+            warnings.append("Antigravity CLI active probe skipped because the workspace cwd is not allowed.")
         antigravity["auth"] = auth_probe
 
-        workspace = {
-            "cwd": str(resolved_cwd) if resolved_cwd is not None else None,
-            "is_git_repo": _is_git_repo(resolved_cwd) if resolved_cwd is not None else False,
-            "allowed": cwd_error is None,
-            "workspace_root": str(Path(self.config.workspace_root).expanduser().resolve()) if self.config.workspace_root else None,
+        workspace = workspace_decision.to_workspace_payload() | {
+            "is_git_repo": _is_git_repo(workspace_decision.cwd) if workspace_decision.exists and workspace_decision.is_dir else False,
             "allowed_roots": [str(root) for root in normalized_allowed_roots(self.config)],
-            "error": cwd_error,
         }
         observer_url = self.hub.base_url if self.config.observer_enabled else ""
         observer = {
@@ -141,7 +138,7 @@ class GemnessService:
             "running": self.hub.web_server_running,
             "url": observer_url,
         }
-        status = "error" if cwd_error else "warning" if warnings else "ok"
+        status = "warning" if warnings else "ok"
         return {
             "status": status,
             "server": {
@@ -189,8 +186,8 @@ class GemnessService:
                 return existing
             try:
                 resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            except ValueError as exc:
-                return {"status": "error", "message": str(exc)}
+            except WorkspaceAccessError as exc:
+                return exc.to_payload()
             session = self._session("ask_antigravity", None, None, _session_title(prompt, "ask_antigravity"), cwd=resolved_cwd)
             self.run_manager.start(
                 session.session_id,
@@ -218,8 +215,8 @@ class GemnessService:
                 return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
             try:
                 resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            except ValueError as exc:
-                return {"status": "error", "message": str(exc)}
+            except WorkspaceAccessError as exc:
+                return exc.to_payload()
             session = self._session("ask_antigravity_json", None, None, _session_title(prompt, "ask_antigravity_json"), cwd=resolved_cwd)
             self.run_manager.start(
                 session.session_id,
@@ -245,6 +242,9 @@ class GemnessService:
                 return existing
             try:
                 resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+            except WorkspaceAccessError as exc:
+                return exc.to_payload()
+            try:
                 base_ref = validate_base_ref(base_ref)
             except ValueError as exc:
                 return {"status": "error", "message": str(exc)}
@@ -280,11 +280,17 @@ class GemnessService:
             self.hub.refresh_from_disk()
             if parent_session_id not in self.hub.sessions:
                 return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
-            plan = self._follow_up_plan(parent_session_id, instruction)
+            try:
+                plan = self._with_allowed_plan_cwd(self._follow_up_plan(parent_session_id, instruction))
+            except WorkspaceAccessError as exc:
+                return exc.to_payload()
             create_lock = self._conversation_lock(plan.conversation_id) if plan.conversation_id else _null_lock()
             with create_lock:
                 if self.hub.is_latest_run(parent_session_id):
-                    plan = self._follow_up_plan(parent_session_id, instruction)
+                    try:
+                        plan = self._with_allowed_plan_cwd(self._follow_up_plan(parent_session_id, instruction))
+                    except WorkspaceAccessError as exc:
+                        return exc.to_payload()
                 session = self.hub.create_session(
                     "ask_antigravity",
                     DEFAULT_MODEL_LABEL,
@@ -889,6 +895,21 @@ class GemnessService:
             native_conversation_id=None,
             fallback_used=True,
             fallback_reason=fallback_reason or "branch_from_past_run",
+        )
+
+    def _with_allowed_plan_cwd(self, plan: _FollowUpPlan) -> _FollowUpPlan:
+        resolved_cwd = resolve_workspace_cwd(self.config, str(plan.cwd) if plan.cwd is not None else None)
+        return _FollowUpPlan(
+            prompt=plan.prompt,
+            conversation_id=plan.conversation_id,
+            parent_session_id=plan.parent_session_id,
+            parent_run_id=plan.parent_run_id,
+            branch_from_conversation_id=plan.branch_from_conversation_id,
+            branch_from_run_id=plan.branch_from_run_id,
+            cwd=resolved_cwd,
+            native_conversation_id=plan.native_conversation_id,
+            fallback_used=plan.fallback_used,
+            fallback_reason=plan.fallback_reason,
         )
 
     def _native_agy_conversation_id(self, parent) -> str | None:

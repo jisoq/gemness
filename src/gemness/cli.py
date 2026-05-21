@@ -29,12 +29,16 @@ def main(argv: list[str] | None = None) -> None:
         help="Remote git source for this MCP package, for example git+https://github.com/jisoq/gemness. Inferred when this CLI itself was installed from a git URL.",
     )
     bootstrap.add_argument("--python", default=None, help="Optional Python version for uvx, for example 3.11.")
-    bootstrap.add_argument("--workspace-root", default=None, help="Optional workspace root Gemness may operate on. Omitted by default for portable config.")
+    bootstrap.add_argument(
+        "--workspace-root",
+        default=None,
+        help="Optional default cwd and implicit root. Omitted by default; use --allowed-root as well when strict allowlist mode is desired.",
+    )
     bootstrap.add_argument(
         "--allowed-root",
         action="append",
         default=[],
-        help="Allowed workspace root. May be repeated. Defaults to --workspace-root.",
+        help="Strict allowed workspace root. May be repeated. When set, Codex trusted-project automatic mode is disabled.",
     )
     bootstrap.add_argument("--agy-command", default=None, help="Antigravity CLI command/path. Defaults to resolving agy from PATH.")
     bootstrap.add_argument("--skip-trigger", action="store_true", help="Do not install the gemness skill guidance.")

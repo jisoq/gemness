@@ -64,6 +64,21 @@ def test_build_uvx_config_can_pin_workspace_when_explicit(tmp_path) -> None:
     assert server["env"]["GEMNESS_AGY_COMMAND"] == "agy"
 
 
+def test_workspace_root_without_allowed_root_is_implicit_not_strict(tmp_path) -> None:
+    options = build_uvx_options(
+        server_source="git+https://example.test/gemness",
+        workspace_root=tmp_path,
+        allowed_roots=(),
+        agy_command=None,
+    )
+    parsed = tomllib.loads(build_codex_config(options))
+
+    server = parsed["mcp_servers"]["gemness"]
+    assert server["cwd"] == str(tmp_path.resolve())
+    assert server["env"]["GEMNESS_WORKSPACE_ROOT"] == str(tmp_path.resolve())
+    assert "GEMNESS_ALLOWED_ROOTS" not in server["env"]
+
+
 def test_build_uvx_config_requires_remote_source_when_not_git_installed(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="source is required|remote git URL"):
         build_uvx_options(

@@ -21,7 +21,7 @@ class ServerFakeRunner:
 
 
 def test_service_starts_observer_before_first_tool_call(tmp_path) -> None:
-    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0), runner=ServerFakeRunner())
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
     try:
         assert service.hub.web_server_running
         with urlopen(f"{service.hub.base_url}/", timeout=2) as response:
@@ -33,7 +33,7 @@ def test_service_starts_observer_before_first_tool_call(tmp_path) -> None:
 
 def test_service_can_defer_observer_until_antigravity_probe(tmp_path) -> None:
     service = GemnessService(
-        GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, observer_start_on_init=False),
+        GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, observer_start_on_init=False, workspace_root=tmp_path),
         runner=ServerFakeRunner(),
     )
     try:
@@ -47,13 +47,13 @@ def test_service_can_defer_observer_until_antigravity_probe(tmp_path) -> None:
 
 
 def test_second_observer_on_same_port_reuses_existing_dashboard_url(tmp_path) -> None:
-    first = GemnessService(GemnessConfig(transcript_dir=tmp_path / "one", observer_enabled=True, observer_port=0), runner=ServerFakeRunner())
+    first = GemnessService(GemnessConfig(transcript_dir=tmp_path / "one", observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
     second = None
     try:
         port = urlparse(first.hub.base_url).port
         assert port is not None
         second = GemnessService(
-            GemnessConfig(transcript_dir=tmp_path / "two", observer_enabled=True, observer_port=port),
+            GemnessConfig(transcript_dir=tmp_path / "two", observer_enabled=True, observer_port=port, workspace_root=tmp_path),
             runner=ServerFakeRunner(),
         )
 
@@ -68,7 +68,7 @@ def test_second_observer_on_same_port_reuses_existing_dashboard_url(tmp_path) ->
 
 
 def test_server_tools_list_and_call(tmp_path) -> None:
-    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0), runner=ServerFakeRunner())
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
     try:
         listed = _handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, service)
         names = [tool["name"] for tool in listed["result"]["tools"]]
@@ -162,7 +162,7 @@ def test_server_still_reads_content_length_for_legacy_smoke_clients() -> None:
 
 
 def test_server_empty_resources_and_prompts(tmp_path) -> None:
-    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, workspace_root=tmp_path))
     try:
         resources = _handle_message({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}, service)
         prompts = _handle_message({"jsonrpc": "2.0", "id": 2, "method": "prompts/list"}, service)
