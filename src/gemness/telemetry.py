@@ -207,9 +207,12 @@ def workspace_fingerprint(cwd: Path | None) -> WorkspaceFingerprint:
         if inside != "true":
             return _degraded_workspace_fingerprint(f"cwd:{resolved}:not-git")
         root = _git(resolved, "rev-parse", "--show-toplevel").strip()
+        root_path = Path(root).expanduser().resolve()
         head = _git(resolved, "rev-parse", "HEAD").strip()
         status = _git(resolved, "status", "--porcelain=v1", "--untracked-files=all")
         diff = _git(resolved, "diff", "--no-ext-diff", "--binary", "HEAD", "--")
+        untracked = _git(root_path, "ls-files", "--others", "--exclude-standard", "-z")
+        untracked_content_hash = _untracked_content_hash(root_path, untracked)
     except (OSError, subprocess.SubprocessError, UnicodeError):
         return _degraded_workspace_fingerprint(f"cwd:{resolved}:git-failed")
 
@@ -219,6 +222,7 @@ def workspace_fingerprint(cwd: Path | None) -> WorkspaceFingerprint:
         "head": head,
         "porcelain_status_hash": _hash_text(status),
         "diff_hash": _hash_text(diff),
+        "untracked_content_hash": untracked_content_hash,
     }
     return WorkspaceFingerprint(f"git:{_hash_json(payload)}", degraded=False)
 
@@ -276,6 +280,19 @@ def _is_number(value: Any) -> bool:
 
 def _normalize_key(value: str) -> str:
     return value.strip().lower().replace("-", "_")
+
+
+def _untracked_content_hash(root: Path, listing: str) -> str:
+    hasher = hashlib.sha256()
+    for relative in sorted(path for path in listing.split("\0") if path):
+        candidate = (root / relative).resolve()
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            continue
+        hasher.update(relative.replace("\\", "/").encode("utf-8", errors="replace"))
+        hasher.update(b"\0")
+        hasher.update(hashlib.sha256(candidate.read_bytes()).hexdigest().encode("ascii"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()
 
 
 def _git(cwd: Path, *args: str) -> str:

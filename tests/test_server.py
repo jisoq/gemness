@@ -180,6 +180,8 @@ def test_start_antigravity_schema_declares_mode_requirements() -> None:
     assert not validator.is_valid({"mode": "ask"})
     assert validator.is_valid({"prompt": "hello"})
     assert validator.is_valid({"mode": "ask", "prompt": "hello"})
+    assert not validator.is_valid({"prompt": "hello", "schema": {"type": "object"}})
+    assert not validator.is_valid({"mode": "ask", "prompt": "hello", "schema": {"type": "object"}})
     assert not validator.is_valid({"mode": "json", "prompt": "hello"})
     assert validator.is_valid({"mode": "json", "prompt": "hello", "schema": {"type": "object"}})
     assert validator.is_valid({"mode": "review_current_diff"})
@@ -266,10 +268,21 @@ def test_start_antigravity_mode_validation_errors(tmp_path) -> None:
         )
         assert "schema is required" in missing_schema["error"]["message"]
 
-        invalid_mode = _handle_message(
+        schema_without_json_mode = _handle_message(
             {
                 "jsonrpc": "2.0",
                 "id": 2,
+                "method": "tools/call",
+                "params": {"name": "start_antigravity", "arguments": {"prompt": "json please", "schema": {"type": "object"}}},
+            },
+            service,
+        )
+        assert "schema requires start_antigravity mode 'json'" in schema_without_json_mode["error"]["message"]
+
+        invalid_mode = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
                 "method": "tools/call",
                 "params": {"name": "start_antigravity", "arguments": {"mode": "unknown", "prompt": "hello"}},
             },
@@ -280,7 +293,7 @@ def test_start_antigravity_mode_validation_errors(tmp_path) -> None:
         non_string_prompt = _handle_message(
             {
                 "jsonrpc": "2.0",
-                "id": 3,
+                "id": 4,
                 "method": "tools/call",
                 "params": {"name": "start_antigravity", "arguments": {"mode": "ask", "prompt": 7}},
             },
@@ -291,7 +304,7 @@ def test_start_antigravity_mode_validation_errors(tmp_path) -> None:
         missing_parent = _handle_message(
             {
                 "jsonrpc": "2.0",
-                "id": 4,
+                "id": 5,
                 "method": "tools/call",
                 "params": {"name": "start_antigravity", "arguments": {"mode": "follow_up", "prompt": "continue"}},
             },

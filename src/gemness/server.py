@@ -41,7 +41,7 @@ TOOLS = [
             "type": "object",
             "additionalProperties": False,
             "oneOf": [
-                {"required": ["prompt"], "properties": {"mode": {"enum": ["ask"]}}},
+                {"required": ["prompt"], "not": {"required": ["schema"]}, "properties": {"mode": {"enum": ["ask"]}}},
                 {"required": ["mode", "prompt", "schema"], "properties": {"mode": {"const": "json"}}},
                 {"required": ["mode"], "properties": {"mode": {"const": "review_current_diff"}}},
                 {"required": ["mode", "parent_session_id", "prompt"], "properties": {"mode": {"const": "follow_up"}}},
@@ -241,6 +241,8 @@ def _call_start_antigravity(service: GemnessService, arguments: dict[str, Any]) 
     mode = str(arguments.get("mode") or "ask").strip().lower()
     idempotency_key = arguments.get("idempotency_key")
     if mode in {"ask", "text", "advisory"}:
+        if "schema" in arguments:
+            raise ValueError("schema requires start_antigravity mode 'json'")
         return service.start_antigravity(
             _required_string(arguments, "prompt", mode=mode),
             cwd=arguments.get("cwd"),

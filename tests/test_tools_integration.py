@@ -574,6 +574,35 @@ def test_workspace_fingerprint_changes_when_workspace_changes(tmp_path) -> None:
         service.shutdown()
 
 
+def test_workspace_fingerprint_changes_when_untracked_file_content_changes(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    untracked = repo / "notes.txt"
+    untracked.write_text("before\n", encoding="utf-8")
+
+    service = make_service(tmp_path / "transcripts", ["before", "after"], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        before = service.ask_antigravity("fingerprint", cwd=str(repo))
+        untracked.write_text("after UNTRACKED_CONTENT_SHOULD_NOT_LEAK\n", encoding="utf-8")
+        after = service.ask_antigravity("fingerprint", cwd=str(repo))
+        payload = json.dumps({"before": before, "after": after}, ensure_ascii=False)
+
+        assert before["workspace_fingerprint_degraded"] is False
+        assert after["workspace_fingerprint_degraded"] is False
+        assert before["workspace_fingerprint"] != after["workspace_fingerprint"]
+        assert before["request_fingerprint"] != after["request_fingerprint"]
+        assert "UNTRACKED_CONTENT_SHOULD_NOT_LEAK" not in payload
+    finally:
+        service.shutdown()
+
+
 def test_raw_git_diff_is_not_exposed_in_result_or_observer_payloads(tmp_path) -> None:
     _require_git()
     repo = tmp_path / "repo"
