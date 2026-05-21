@@ -8,12 +8,8 @@ TOOL_NAMES = [
     "ask_antigravity",
     "start_antigravity",
     "follow_up_antigravity",
-    "start_follow_up_antigravity",
     "ask_antigravity_json",
-    "start_antigravity_json",
     "review_current_diff_with_antigravity",
-    "start_review_current_diff_with_antigravity",
-    "get_antigravity_run",
     "await_antigravity_run",
     "cancel_antigravity_run",
 ]

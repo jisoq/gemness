@@ -33,6 +33,10 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert "start_antigravity" in server["enabled_tools"]
     assert "await_antigravity_run" in server["enabled_tools"]
     assert "cancel_antigravity_run" in server["enabled_tools"]
+    assert "start_antigravity_json" not in server["enabled_tools"]
+    assert "start_review_current_diff_with_antigravity" not in server["enabled_tools"]
+    assert "start_follow_up_antigravity" not in server["enabled_tools"]
+    assert "get_antigravity_run" not in server["enabled_tools"]
     assert server["env"]["GEMNESS_OBSERVER_PORT"] == "56755"
     assert server["env"]["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(server["env"]["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()

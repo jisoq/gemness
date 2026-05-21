@@ -70,7 +70,9 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert text.startswith("---\n")
     assert "\n---\n\n# Gemness Skill" in text
     assert "antigravity reviewer" in text
-    assert "advanced detached/background APIs" in text
+    assert "start Gemness work with `start_antigravity`" in text
+    assert "wait or poll with `await_antigravity_run`" in text
+    assert "blocking convenience wrappers" in text
     assert "Pass this cwd to `antigravity_health`" in text
     assert "Do not omit cwd" in text
     assert "//" not in text.split("---", 2)[1]

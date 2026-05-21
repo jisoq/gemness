@@ -10,20 +10,20 @@ Use this skill when the user says `use gemness`, mentions Gemness, or asks to co
 ## Procedure
 
 1. Spawn or delegate to an `antigravity reviewer` subagent when the environment supports subagents. Prefer a lightweight high-reasoning reviewer profile such as `gpt-5.5-mini` with `xhigh` reasoning when available. Keep the main Codex context focused on orchestration and verification.
-2. The reviewer subagent should call Gemness, wait for completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status.
+2. The reviewer subagent should start Gemness work with `start_antigravity`, wait or poll with `await_antigravity_run` until completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status.
 3. Before any Gemness tool call, determine the current workspace cwd as an absolute path:
    - Prefer `git rev-parse --show-toplevel` when the current directory is inside a git repository.
    - If that fails, use the current working directory's absolute path.
-   - Pass this cwd to `antigravity_health`, `ask_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`, and any `start_*` tool call.
+   - Pass this cwd to `antigravity_health`, `ask_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`, and `start_antigravity`.
    - Do not omit cwd and fall back to the MCP server process start directory.
    - `follow_up_antigravity` has no cwd argument; it should continue from the parent session's stored `project_root`.
 4. If connection status is uncertain and `antigravity_health` exists, the reviewer may call it first with cwd.
-5. Select the final-result tool:
-   - `review_current_diff_with_antigravity` for current workspace change review.
-   - `ask_antigravity_json` for schema-constrained structured output.
-   - `ask_antigravity` for general second opinion or reasoning review.
-   - `follow_up_antigravity` for continuing the same Gemness observer conversation.
-6. Treat `start_*`, `get_antigravity_run`, `await_antigravity_run`, and `cancel_antigravity_run` as advanced detached/background APIs. Use them only when the user explicitly asks for that mode.
+5. Select the `start_antigravity` mode:
+   - `mode="review_current_diff"` for current workspace change review.
+   - `mode="json"` for schema-constrained structured output.
+   - `mode="ask"` for general second opinion or reasoning review.
+   - `mode="follow_up"` for continuing the same Gemness observer conversation.
+6. Use `ask_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`, or `follow_up_antigravity` only as blocking convenience wrappers when a simpler one-shot call is more appropriate than explicit start/poll handling.
 7. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
 8. Do not include secrets or credentials.
 9. Treat Antigravity's result as advisory.

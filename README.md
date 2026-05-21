@@ -2,22 +2,22 @@
 
 Gemness는 Codex가 Antigravity CLI(`agy`)의 조언을 구하고, 브라우저 기반의 Observer UI를 통해 각 분석 실행(run) 과정을 검사할 수 있도록 지원하는 로컬 MCP(Model Context Protocol) 서버입니다.
 
-이 서버는 다음과 같은 MCP 도구를 제공합니다:
+이 서버는 다음 8개의 MCP 도구를 제공합니다. Codex 연동의 기본 흐름은 main agent가 `antigravity reviewer` subagent를 띄우고, 그 subagent가 `start_antigravity`로 백그라운드 run을 시작한 뒤 `await_antigravity_run`으로 결과를 기다려 최종 advisory만 parent에게 돌려주는 방식입니다.
 
-- `antigravity_health`
-- `ask_antigravity`
-- `start_antigravity`
-- `follow_up_antigravity`
-- `start_follow_up_antigravity`
-- `ask_antigravity_json`
-- `start_antigravity_json`
-- `review_current_diff_with_antigravity`
-- `start_review_current_diff_with_antigravity`
-- `get_antigravity_run`
-- `await_antigravity_run`
-- `cancel_antigravity_run`
+| 도구 | 쉽게 말하면 | 언제 쓰나 | 꼭 필요한가 |
+| :--- | :--- | :--- | :--- |
+| `antigravity_health` | Gemness, 워크스페이스, Observer, `agy` CLI가 준비됐는지 확인 | 설치 직후, 연결이 이상할 때 | 필수 |
+| `start_antigravity` | 백그라운드 run을 시작하고 바로 `run_id`를 받음 | subagent가 Antigravity 작업을 시작할 때 | 기본 흐름 |
+| `await_antigravity_run` | 백그라운드 run 상태나 결과를 확인 | `run_id`로 결과를 기다리거나 `timeout_sec=0`으로 즉시 조회 | 기본 흐름 |
+| `cancel_antigravity_run` | 실행 중인 백그라운드 run 중단 요청 | 잘못 시작했거나 너무 오래 걸릴 때 | 중단용 |
+| `ask_antigravity` | 일반 질문을 시작부터 완료까지 한 번에 처리 | 단순 second opinion이 필요하고 별도 polling이 필요 없을 때 | 편의 도구 |
+| `follow_up_antigravity` | 이전 Gemness 실행에 이어서 후속 질문 | 같은 대화의 맥락을 간단히 이어갈 때 | 편의 도구 |
+| `ask_antigravity_json` | 답변을 JSON Schema에 맞춰 한 번에 받음 | 자동화, 분류, 구조화된 리뷰 결과가 필요할 때 | 편의 도구 |
+| `review_current_diff_with_antigravity` | 현재 워크스페이스 변경사항 리뷰를 한 번에 요청 | 커밋/PR 전 변경 검토 | 편의 도구 |
 
-각 루트 도구 호출은 Gemness 실행(run)과 Gemness 대화(conversation)를 생성합니다. Codex 연동의 기본 UX는 main agent가 Antigravity 작업을 직접 붙잡는 방식이 아니라, `antigravity reviewer` subagent가 `ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity` 같은 blocking final-result 도구를 호출하고 최종 advisory만 parent에게 돌려주는 방식입니다. `start_*`, `get_antigravity_run`, `await_antigravity_run`, `cancel_antigravity_run` 도구는 명시적인 background/batch 작업을 위한 advanced API로 유지됩니다.
+`start_antigravity`는 `mode`로 작업 종류를 고릅니다. 일반 질문은 `mode="ask"`, JSON 결과는 `mode="json"`, 현재 diff 리뷰는 `mode="review_current_diff"`, 후속 질문은 `mode="follow_up"`을 사용합니다. `ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`는 같은 작업을 blocking final-result 형태로 감싼 편의 도구입니다.
+
+각 루트 도구 호출은 Gemness 실행(run)과 Gemness 대화(conversation)를 생성합니다. main agent는 Antigravity 작업을 직접 오래 점유하지 않고, subagent가 백그라운드 run을 관리한 뒤 정리된 요약, 주요 findings, `observer_url`을 parent에게 반환하는 흐름을 권장합니다.
 
 ---
 
@@ -95,7 +95,7 @@ uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 - `default_tools_approval_mode = "prompt"`
 - `GEMNESS_AGY_TIMEOUT = "600"`
 
-`use gemness` 트리거 가이던스는 Codex main agent가 Gemness MCP 도구를 직접 오래 점유하지 않도록 설계되어 있습니다. main agent는 reviewer subagent에 Antigravity 검토를 위임하고, reviewer subagent가 Gemness의 blocking final-result 도구 안에서 대기한 뒤 정제된 요약, 주요 findings, `observer_url`을 parent에게 반환합니다.
+`use gemness` 트리거 가이던스는 Codex main agent가 Gemness MCP 도구를 직접 오래 점유하지 않도록 설계되어 있습니다. main agent는 reviewer subagent에 Antigravity 검토를 위임하고, reviewer subagent가 `start_antigravity`와 `await_antigravity_run`으로 백그라운드 run을 관리한 뒤 정제된 요약, 주요 findings, `observer_url`을 parent에게 반환합니다.
 
 특정 경로의 Antigravity CLI 실행 파일을 고정하여 사용하려면 다음과 같이 실행하십시오:
 
@@ -118,23 +118,27 @@ http://127.0.0.1:56755
 
 ---
 
-## Advanced Detached Run Workflow
+## 기본 Background Run Workflow
 
-명시적인 background 또는 batch 작업이 필요할 때만 아래 detached 흐름을 사용합니다:
+subagent가 Antigravity 검토를 맡을 때는 아래 흐름을 기본으로 사용합니다:
 
-1. `start_antigravity`, `start_antigravity_json`, `start_review_current_diff_with_antigravity` 또는 `start_follow_up_antigravity`를 호출합니다.
-2. 반환된 `run_id`와 `observer_url`을 사용자에게 알려주고, 호출자는 다른 작업을 계속할 수 있습니다.
-3. `get_antigravity_run(run_id)`으로 즉시 상태를 보거나 `await_antigravity_run(run_id, timeout_sec=5)`으로 짧게만 기다립니다.
+1. `start_antigravity`를 호출합니다.
+   - 일반 질문: `mode="ask"`, `prompt`
+   - JSON 결과: `mode="json"`, `prompt`, `schema`
+   - 현재 diff 리뷰: `mode="review_current_diff"`, 선택적으로 `base_ref`
+   - 후속 질문: `mode="follow_up"`, `parent_session_id`, `prompt`
+2. 반환된 `run_id`와 `observer_url`을 보관합니다.
+3. `await_antigravity_run(run_id, timeout_sec=5)`처럼 짧은 대기 호출을 반복해 완료 상태를 확인합니다. 즉시 상태만 보려면 `timeout_sec=0`을 사용합니다.
 4. 필요하면 `event_cursor`를 넘겨 새 이벤트만 조회합니다.
 5. 중단이 필요하면 `cancel_antigravity_run(run_id)`을 호출합니다.
 
-`start_*` 도구는 선택적으로 `idempotency_key`를 받을 수 있습니다. 같은 key가 다시 들어오면 기존 run을 재사용하여 중복 실행을 줄입니다.
+`start_antigravity`는 선택적으로 `idempotency_key`를 받을 수 있습니다. 같은 key가 다시 들어오면 기존 run을 재사용하여 중복 실행을 줄입니다.
 
 ---
 
 ## 대화 관리 (Conversation Management)
 
-이전 실행의 문맥을 이어서 대화를 진행하려면 MCP 도구인 `follow_up_antigravity` 또는 detached 방식의 `start_follow_up_antigravity`를 사용하십시오. Observer UI는 기본적으로 읽기 전용(read-mostly) 화면으로 설계되어 있어, UI 상에서 대기 중인 프롬프트를 수정할 수는 없습니다. 실행 중인 하위 프로세스 중단은 MCP 도구 `cancel_antigravity_run(run_id)`이 담당합니다. 대시보드 내 세션 목록 편집 기능은 로컬 대화 기록 정리(이름 변경 및 삭제) 목적으로만 제공됩니다.
+이전 실행의 문맥을 이어서 대화를 진행하려면 `start_antigravity`에 `mode="follow_up"`과 `parent_session_id`를 넘깁니다. 짧은 후속 질문을 한 번에 처리하고 싶을 때는 편의 도구인 `follow_up_antigravity`를 사용할 수 있습니다. Observer UI는 기본적으로 읽기 전용(read-mostly) 화면으로 설계되어 있어, UI 상에서 대기 중인 프롬프트를 수정할 수는 없습니다. 실행 중인 하위 프로세스 중단은 MCP 도구 `cancel_antigravity_run(run_id)`이 담당합니다. 대시보드 내 세션 목록 편집 기능은 로컬 대화 기록 정리(이름 변경 및 삭제) 목적으로만 제공됩니다.
 
 ---
 

@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
+from gemness.mcp_metadata import TOOL_NAMES
 from gemness.runner import AgyRunResult
 from gemness.server import _handle_message, _read_message, _write_message
 from gemness.tools import GemnessService
@@ -72,18 +73,11 @@ def test_server_tools_list_and_call(tmp_path) -> None:
     try:
         listed = _handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, service)
         names = [tool["name"] for tool in listed["result"]["tools"]]
-        assert "antigravity_health" in names
-        assert "ask_antigravity" in names
-        assert "start_antigravity" in names
-        assert "follow_up_antigravity" in names
-        assert "start_follow_up_antigravity" in names
-        assert "ask_antigravity_json" in names
-        assert "start_antigravity_json" in names
-        assert "review_current_diff_with_antigravity" in names
-        assert "start_review_current_diff_with_antigravity" in names
-        assert "get_antigravity_run" in names
-        assert "await_antigravity_run" in names
-        assert "cancel_antigravity_run" in names
+        assert names == TOOL_NAMES
+        assert "start_follow_up_antigravity" not in names
+        assert "start_antigravity_json" not in names
+        assert "start_review_current_diff_with_antigravity" not in names
+        assert "get_antigravity_run" not in names
 
         called = _handle_message(
             {
@@ -136,6 +130,157 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         await_result = awaited["result"]["structuredContent"]
         assert await_result["status"] == "completed"
         assert await_result["result"]["text"] == "server ok"
+
+        started_json = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "start_antigravity",
+                    "arguments": {"mode": "json", "prompt": "detached json", "schema": {"type": "object"}},
+                },
+            },
+            service,
+        )
+        started_json_result = started_json["result"]["structuredContent"]
+        assert started_json_result["status"] == "accepted"
+        awaited_json = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "await_antigravity_run", "arguments": {"run_id": started_json_result["run_id"], "timeout_sec": 2}},
+            },
+            service,
+        )
+        assert awaited_json["result"]["structuredContent"]["status"] == "invalid"
+
+        legacy_status = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {"name": "get_antigravity_run", "arguments": {"run_id": start_result["run_id"]}},
+            },
+            service,
+        )
+        assert legacy_status["result"]["structuredContent"]["status"] == "completed"
+    finally:
+        service.shutdown()
+
+
+def test_start_antigravity_consolidated_modes_route_to_detached_runs(tmp_path) -> None:
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
+    try:
+        parent = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "ask_antigravity", "arguments": {"prompt": "parent"}},
+            },
+            service,
+        )["result"]["structuredContent"]
+
+        review_started = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "start_antigravity", "arguments": {"mode": "review_current_diff", "base_ref": "HEAD"}},
+            },
+            service,
+        )["result"]["structuredContent"]
+        assert review_started["status"] == "accepted"
+        assert service.hub.get_session(review_started["run_id"])["tool_name"] == "review_current_diff_with_antigravity"
+
+        review_done = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "await_antigravity_run", "arguments": {"run_id": review_started["run_id"], "timeout_sec": 2}},
+            },
+            service,
+        )["result"]["structuredContent"]
+        assert review_done["status"] == "invalid"
+
+        follow_started = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "start_antigravity",
+                    "arguments": {"mode": "follow_up", "parent_session_id": parent["session_id"], "prompt": "continue"},
+                },
+            },
+            service,
+        )["result"]["structuredContent"]
+        assert follow_started["status"] == "accepted"
+
+        follow_done = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "await_antigravity_run", "arguments": {"run_id": follow_started["run_id"], "timeout_sec": 2}},
+            },
+            service,
+        )["result"]["structuredContent"]
+        assert follow_done["status"] == "completed"
+        assert follow_done["result"]["conversation_id"] == parent["conversation_id"]
+    finally:
+        service.shutdown()
+
+
+def test_start_antigravity_mode_validation_errors(tmp_path) -> None:
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, workspace_root=tmp_path), runner=ServerFakeRunner())
+    try:
+        missing_schema = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "start_antigravity", "arguments": {"mode": "json", "prompt": "json please"}},
+            },
+            service,
+        )
+        assert "schema is required" in missing_schema["error"]["message"]
+
+        invalid_mode = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "start_antigravity", "arguments": {"mode": "unknown", "prompt": "hello"}},
+            },
+            service,
+        )
+        assert "Unknown start_antigravity mode" in invalid_mode["error"]["message"]
+
+        non_string_prompt = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "start_antigravity", "arguments": {"mode": "ask", "prompt": 7}},
+            },
+            service,
+        )
+        assert "prompt must be a string" in non_string_prompt["error"]["message"]
+
+        missing_parent = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "start_antigravity", "arguments": {"mode": "follow_up", "prompt": "continue"}},
+            },
+            service,
+        )
+        assert "parent_session_id is required" in missing_parent["error"]["message"]
     finally:
         service.shutdown()
 
