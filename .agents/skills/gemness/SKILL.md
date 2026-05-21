@@ -9,17 +9,20 @@ Use this skill when the user says `use gemness`, mentions Gemness, or asks to co
 
 ## Procedure
 
-1. If connection status is uncertain and `antigravity_health` exists, call it first.
-2. Select the right tool:
+1. Spawn or delegate to an `antigravity reviewer` subagent when the environment supports subagents. Prefer a lightweight high-reasoning reviewer profile such as `gpt-5.5-mini` with `xhigh` reasoning when available. Keep the main Codex context focused on orchestration and verification.
+2. The reviewer subagent should call Gemness, wait for completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status.
+3. If connection status is uncertain and `antigravity_health` exists, the reviewer may call it first.
+4. Select the final-result tool:
    - `review_current_diff_with_antigravity` for current workspace change review.
    - `ask_antigravity_json` for schema-constrained structured output.
    - `ask_antigravity` for general second opinion or reasoning review.
    - `follow_up_antigravity` for continuing the same Gemness observer conversation.
-3. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
-4. Do not include secrets or credentials.
-5. Treat Antigravity's result as advisory.
-6. Verify before applying changes.
-7. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
+5. Treat `start_*`, `get_antigravity_run`, `await_antigravity_run`, and `cancel_antigravity_run` as advanced detached/background APIs. Use them only when the user explicitly asks for that mode.
+6. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
+7. Do not include secrets or credentials.
+8. Treat Antigravity's result as advisory.
+9. Verify before applying changes.
+10. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
 
 ## Failure behavior
 

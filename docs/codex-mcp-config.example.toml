@@ -8,9 +8,16 @@ required = false
 enabled_tools = [
   "antigravity_health",
   "ask_antigravity",
+  "start_antigravity",
   "follow_up_antigravity",
+  "start_follow_up_antigravity",
   "ask_antigravity_json",
+  "start_antigravity_json",
   "review_current_diff_with_antigravity",
+  "start_review_current_diff_with_antigravity",
+  "get_antigravity_run",
+  "await_antigravity_run",
+  "cancel_antigravity_run",
 ]
 default_tools_approval_mode = "prompt"
 
@@ -20,13 +27,34 @@ approval_mode = "approve"
 [mcp_servers.gemness.tools."ask_antigravity"]
 approval_mode = "approve"
 
+[mcp_servers.gemness.tools."start_antigravity"]
+approval_mode = "prompt"
+
 [mcp_servers.gemness.tools."follow_up_antigravity"]
 approval_mode = "approve"
+
+[mcp_servers.gemness.tools."start_follow_up_antigravity"]
+approval_mode = "prompt"
 
 [mcp_servers.gemness.tools."ask_antigravity_json"]
 approval_mode = "prompt"
 
+[mcp_servers.gemness.tools."start_antigravity_json"]
+approval_mode = "prompt"
+
 [mcp_servers.gemness.tools."review_current_diff_with_antigravity"]
+approval_mode = "prompt"
+
+[mcp_servers.gemness.tools."start_review_current_diff_with_antigravity"]
+approval_mode = "prompt"
+
+[mcp_servers.gemness.tools."get_antigravity_run"]
+approval_mode = "approve"
+
+[mcp_servers.gemness.tools."await_antigravity_run"]
+approval_mode = "approve"
+
+[mcp_servers.gemness.tools."cancel_antigravity_run"]
 approval_mode = "prompt"
 
 [mcp_servers.gemness.env]
@@ -38,6 +66,8 @@ GEMNESS_TRANSCRIPT_DIR = "~/.gemness/transcripts"
 GEMNESS_REDACT_RAW_BY_DEFAULT = "true"
 GEMNESS_AGY_TIMEOUT = "600"
 GEMNESS_AGY_CAPTURE_MODE = "auto"
+GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"
+GEMNESS_AGY_CONCURRENCY_LIMIT = "4"
 # Optional:
 # GEMNESS_AGY_COMMAND = "agy"
 # gemness-mcp:end

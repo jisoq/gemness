@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,11 +16,27 @@ from typing import Any
 from .config import DEFAULT_MODEL_LABEL, GemnessConfig
 from .json_utils import extract_cli_response, parse_json_candidate
 from .mcp_metadata import SERVER_NAME, SERVER_VERSION, TOOL_NAMES
-from .observer import ObserverHub
+from .observer import FINAL_STATUSES, ObserverHub
 from .review import REVIEW_SCHEMA, build_review_prompt
+from .run_manager import RunManager
 from .runner import AgyCliRunner, AgyRunResult, AgyRunner, agy_fallback_paths, command_exists, probe_auth, resolve_agy_command
 from .schema_validation import validate_json_schema, validate_schema_definition
 from .workspace import normalized_allowed_roots, resolve_workspace_cwd
+
+
+RESPONSE_PREVIEW_CHARS = 4000
+PROGRESS_NOISE_PATTERNS = (
+    re.compile(r"^\s*(?:Searching|Reading|Inspecting|Scanning|Running|Waiting)\b.{0,160}(?:\.\.\.|…)\s*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:I(?:'|’)ll|I will|I(?:'|’)m going to|Let me)\s+"
+        r"(?:inspect|search|check|look|scan|review|find|run|open|read)\b.{0,160}(?:\.\.\.|…)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*.*(?:background task|background job).*(?:wait|waiting|complete|finished).*$", re.IGNORECASE),
+    re.compile(r"^\s*.*백그라운드\s*작업.*(?:대기|기다|완료|종료).*$"),
+    re.compile(r"^\s*.*(?:파일|코드|워크스페이스|리포지토리|저장소).*(?:검색|확인|살펴보|찾아보).*(?:중|겠습니다|볼게요).*$"),
+    re.compile(r"^\s*(?:잠시\s*)?(?:대기|기다리)겠(?:습니다|어요)\.?\s*$"),
+)
 
 
 @dataclass(slots=True)
@@ -47,12 +65,16 @@ class GemnessService:
         self.hub = hub or ObserverHub(self.config)
         self.hub.attach_service(self)
         self.runner = runner or AgyCliRunner(self.config)
+        self.run_manager = RunManager(self.config, self.hub)
+        self._idempotency_locks: dict[str, threading.Lock] = {}
+        self._idempotency_locks_guard = threading.RLock()
         self._conversation_locks: dict[str, threading.Lock] = {}
         self._conversation_locks_guard = threading.RLock()
         if self.config.observer_enabled and self.config.observer_start_on_init:
             self.hub.start_web_server()
 
     def shutdown(self) -> None:
+        self.run_manager.shutdown()
         self.hub.shutdown()
 
     def antigravity_health(self, *, cwd: str | None = None, check_antigravity: bool = True) -> dict[str, Any]:
@@ -137,110 +159,273 @@ class GemnessService:
         }
 
     def ask_antigravity(self, prompt: str, cwd: str | None = None) -> dict[str, Any]:
-        try:
-            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-        except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
-        return self._run_text_session("ask_antigravity", prompt, cwd=resolved_cwd, title_source=prompt)
+        started = self.start_antigravity(prompt, cwd=cwd)
+        if started.get("status") == "error":
+            return started
+        return self._await_blocking(str(started["run_id"]))
 
     def ask_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None) -> dict[str, Any]:
-        try:
-            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-        except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
-        return self._run_json_session("ask_antigravity_json", prompt, schema, cwd=resolved_cwd, title_source=prompt)
+        started = self.start_antigravity_json(prompt, schema, cwd=cwd)
+        if started.get("status") == "error":
+            return started
+        return self._await_blocking(str(started["run_id"]))
 
     def review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None) -> dict[str, Any]:
-        try:
-            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            base_ref = validate_base_ref(base_ref)
-        except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
-        session = self.hub.create_session(
-            "review_current_diff_with_antigravity",
-            DEFAULT_MODEL_LABEL,
-            title=f"현재 변경 리뷰: {base_ref}",
-            project_root=str(resolved_cwd),
-        )
-        prompt = build_review_prompt(base_ref)
-        return self._run_json_session(
-            "review_current_diff_with_antigravity",
-            prompt,
-            REVIEW_SCHEMA,
-            existing_session_id=session.session_id,
-            cwd=resolved_cwd,
-            title_source=f"현재 변경 리뷰: {base_ref}",
-        )
+        started = self.start_review_current_diff_with_antigravity(base_ref=base_ref, cwd=cwd)
+        if started.get("status") == "error":
+            return started
+        return self._await_blocking(str(started["run_id"]))
 
     def follow_up_antigravity(self, parent_session_id: str, instruction: str) -> dict[str, Any]:
-        self.hub.refresh_from_disk()
-        if parent_session_id not in self.hub.sessions:
-            return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
-        plan = self._follow_up_plan(parent_session_id, instruction)
-        lock = self._conversation_lock(plan.conversation_id) if plan.conversation_id else _null_lock()
-        with lock:
-            if self.hub.is_latest_run(parent_session_id):
-                plan = self._follow_up_plan(parent_session_id, instruction)
-            session = self.hub.create_session(
-                "ask_antigravity",
-                DEFAULT_MODEL_LABEL,
-                parent_session_id=plan.parent_session_id,
-                title=_session_title(instruction, "ask_antigravity"),
-                conversation_id=plan.conversation_id,
-                parent_run_id=plan.parent_run_id,
-                branch_from_conversation_id=plan.branch_from_conversation_id,
-                branch_from_run_id=plan.branch_from_run_id,
-                project_root=str(plan.cwd) if plan.cwd is not None else None,
-                agy_conversation_id=plan.native_conversation_id,
-                fallback_used=plan.fallback_used,
-                fallback_reason=plan.fallback_reason,
-            )
-            return self._run_text_session(
-                "ask_antigravity",
-                plan.prompt,
-                parent_session_id=plan.parent_session_id,
-                existing_session_id=session.session_id,
-                cwd=plan.cwd,
-                title_source=instruction,
-                fallback_used=plan.fallback_used,
-                fallback_reason=plan.fallback_reason,
-                native_conversation_id=plan.native_conversation_id,
-            )
+        started = self.start_follow_up_antigravity(parent_session_id, instruction)
+        if started.get("status") == "error":
+            return started
+        return self._await_blocking(str(started["run_id"]))
 
-    def start_follow_up(self, parent_session_id: str, instruction: str) -> str:
-        plan = self._follow_up_plan(parent_session_id, instruction)
-        session = self.hub.create_session(
-            "ask_antigravity",
-            DEFAULT_MODEL_LABEL,
-            parent_session_id=plan.parent_session_id,
-            title=_session_title(instruction, "ask_antigravity"),
-            conversation_id=plan.conversation_id,
-            parent_run_id=plan.parent_run_id,
-            branch_from_conversation_id=plan.branch_from_conversation_id,
-            branch_from_run_id=plan.branch_from_run_id,
-            project_root=str(plan.cwd) if plan.cwd is not None else None,
-            agy_conversation_id=plan.native_conversation_id,
-            fallback_used=plan.fallback_used,
-            fallback_reason=plan.fallback_reason,
-        )
-        lock = self._conversation_lock(session.conversation_id)
-
-        def run() -> None:
-            with lock:
-                self._run_text_session(
+    def start_antigravity(self, prompt: str, cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        with self._idempotency_scope(idempotency_key):
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            try:
+                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
+            session = self._session("ask_antigravity", None, None, _session_title(prompt, "ask_antigravity"), cwd=resolved_cwd)
+            self.run_manager.start(
+                session.session_id,
+                lambda cancel_event, process_callback, heartbeat_callback: self._run_text_session(
                     "ask_antigravity",
-                    plan.prompt,
-                    parent_session_id=plan.parent_session_id,
+                    prompt,
                     existing_session_id=session.session_id,
-                    cwd=plan.cwd,
-                    title_source=instruction,
+                    cwd=resolved_cwd,
+                    title_source=prompt,
+                    cancel_event=cancel_event,
+                    process_callback=process_callback,
+                    heartbeat_callback=heartbeat_callback,
+                ),
+                idempotency_key=idempotency_key,
+            )
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+
+    def start_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        with self._idempotency_scope(idempotency_key):
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            schema_error = validate_schema_definition(schema)
+            if schema_error:
+                return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
+            try:
+                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
+            session = self._session("ask_antigravity_json", None, None, _session_title(prompt, "ask_antigravity_json"), cwd=resolved_cwd)
+            self.run_manager.start(
+                session.session_id,
+                lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
+                    "ask_antigravity_json",
+                    prompt,
+                    schema,
+                    existing_session_id=session.session_id,
+                    cwd=resolved_cwd,
+                    title_source=prompt,
+                    cancel_event=cancel_event,
+                    process_callback=process_callback,
+                    heartbeat_callback=heartbeat_callback,
+                ),
+                idempotency_key=idempotency_key,
+            )
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+
+    def start_review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+        with self._idempotency_scope(idempotency_key):
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            try:
+                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+                base_ref = validate_base_ref(base_ref)
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
+            session = self.hub.create_session(
+                "review_current_diff_with_antigravity",
+                DEFAULT_MODEL_LABEL,
+                title=f"현재 변경 리뷰: {base_ref}",
+                project_root=str(resolved_cwd),
+            )
+            prompt = build_review_prompt(base_ref)
+            self.run_manager.start(
+                session.session_id,
+                lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
+                    "review_current_diff_with_antigravity",
+                    prompt,
+                    REVIEW_SCHEMA,
+                    existing_session_id=session.session_id,
+                    cwd=resolved_cwd,
+                    title_source=f"현재 변경 리뷰: {base_ref}",
+                    cancel_event=cancel_event,
+                    process_callback=process_callback,
+                    heartbeat_callback=heartbeat_callback,
+                ),
+                idempotency_key=idempotency_key,
+            )
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+
+    def start_follow_up_antigravity(self, parent_session_id: str, instruction: str, idempotency_key: str | None = None) -> dict[str, Any]:
+        with self._idempotency_scope(idempotency_key):
+            existing = self._existing_idempotent_run(idempotency_key)
+            if existing is not None:
+                return existing
+            self.hub.refresh_from_disk()
+            if parent_session_id not in self.hub.sessions:
+                return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
+            plan = self._follow_up_plan(parent_session_id, instruction)
+            create_lock = self._conversation_lock(plan.conversation_id) if plan.conversation_id else _null_lock()
+            with create_lock:
+                if self.hub.is_latest_run(parent_session_id):
+                    plan = self._follow_up_plan(parent_session_id, instruction)
+                session = self.hub.create_session(
+                    "ask_antigravity",
+                    DEFAULT_MODEL_LABEL,
+                    parent_session_id=plan.parent_session_id,
+                    title=_session_title(instruction, "ask_antigravity"),
+                    conversation_id=plan.conversation_id,
+                    parent_run_id=plan.parent_run_id,
+                    branch_from_conversation_id=plan.branch_from_conversation_id,
+                    branch_from_run_id=plan.branch_from_run_id,
+                    project_root=str(plan.cwd) if plan.cwd is not None else None,
+                    agy_conversation_id=plan.native_conversation_id,
                     fallback_used=plan.fallback_used,
                     fallback_reason=plan.fallback_reason,
-                    native_conversation_id=plan.native_conversation_id,
                 )
+            run_lock = self._conversation_lock(session.conversation_id)
 
-        threading.Thread(target=run, daemon=True).start()
-        return session.session_id
+            def run(cancel_event, process_callback, heartbeat_callback) -> dict[str, Any]:
+                with run_lock:
+                    return self._run_text_session(
+                        "ask_antigravity",
+                        plan.prompt,
+                        parent_session_id=plan.parent_session_id,
+                        existing_session_id=session.session_id,
+                        cwd=plan.cwd,
+                        title_source=instruction,
+                        fallback_used=plan.fallback_used,
+                        fallback_reason=plan.fallback_reason,
+                        native_conversation_id=plan.native_conversation_id,
+                        cancel_event=cancel_event,
+                        process_callback=process_callback,
+                        heartbeat_callback=heartbeat_callback,
+                    )
+
+            self.run_manager.start(session.session_id, run, idempotency_key=idempotency_key)
+            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+
+    def get_antigravity_run(self, run_id: str, event_cursor: str | None = None, recent_event_limit: int = 20) -> dict[str, Any]:
+        return self._run_status_payload(run_id, event_cursor=event_cursor, recent_event_limit=recent_event_limit)
+
+    def await_antigravity_run(self, run_id: str, timeout_sec: float = 5.0, event_cursor: str | None = None, recent_event_limit: int = 20) -> dict[str, Any]:
+        self.run_manager.await_run(run_id, timeout_sec)
+        return self._run_status_payload(run_id, event_cursor=event_cursor, recent_event_limit=recent_event_limit)
+
+    def cancel_antigravity_run(self, run_id: str) -> dict[str, Any]:
+        cancelled = self.run_manager.cancel(run_id)
+        return self._run_status_payload(run_id) | {"cancel": cancelled}
+
+    def start_follow_up(self, parent_session_id: str, instruction: str) -> str:
+        return str(self.start_follow_up_antigravity(parent_session_id, instruction)["run_id"])
+
+    def _await_blocking(self, run_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + max(10.0, (self.config.agy_timeout_sec * 2) + 60.0)
+        while True:
+            status = self.await_antigravity_run(run_id, timeout_sec=5, recent_event_limit=0)
+            if status.get("status") in FINAL_STATUSES:
+                result = status.get("result")
+                return result if isinstance(result, dict) else status
+            if time.monotonic() >= deadline:
+                return status | {"message": "Blocking compatibility wait reached its safety deadline."}
+
+    def _existing_idempotent_run(self, idempotency_key: str | None) -> dict[str, Any] | None:
+        existing_run_id = self.run_manager.find_by_idempotency_key(idempotency_key)
+        if existing_run_id is None:
+            return None
+        return self._run_status_payload(existing_run_id) | {"idempotent": True}
+
+    def _idempotency_scope(self, idempotency_key: str | None) -> Any:
+        key = _clean_idempotency_key(idempotency_key)
+        if key is None:
+            return _null_lock()
+        with self._idempotency_locks_guard:
+            lock = self._idempotency_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._idempotency_locks[key] = lock
+            return lock
+
+    def _start_payload(self, run_id: str, *, idempotency_key: str | None = None) -> dict[str, Any]:
+        session = self.hub.get_session(run_id, raw=True)
+        status = str(session["status"])
+        result = _event_result(self.hub.get_events(run_id, raw=True)) if status in FINAL_STATUSES else None
+        rejected = status == "error" and isinstance(result, dict) and result.get("reason") == "run_queue_full"
+        payload = {
+            "status": "error" if rejected else "accepted",
+            "run_id": session["run_id"],
+            "session_id": session["session_id"],
+            "conversation_id": session.get("conversation_id"),
+            "observer_url": session["observer_url"],
+            "session_status": status,
+            "idempotency_key": idempotency_key,
+        }
+        if result is not None:
+            payload["result"] = result
+            if isinstance(result.get("message"), str):
+                payload["message"] = result["message"]
+        return payload
+
+    def _run_status_payload(
+        self,
+        run_id: str,
+        *,
+        event_cursor: str | None = None,
+        recent_event_limit: int = 20,
+    ) -> dict[str, Any]:
+        try:
+            session = self.hub.get_session(run_id, raw=True)
+        except KeyError:
+            return {"status": "error", "run_id": run_id, "message": f"Unknown run_id: {run_id}"}
+        raw_events = self.hub.get_events(run_id, raw=True)
+        public_events = self.hub.get_events(run_id, raw=False)
+        events = _events_after_cursor(public_events, event_cursor)
+        recent_event_limit = max(0, min(int(recent_event_limit), 100))
+        if recent_event_limit:
+            events = events[-recent_event_limit:]
+        else:
+            events = []
+        managed = self.run_manager.get(run_id)
+        result = managed.result if managed is not None and managed.result is not None else _event_result(raw_events)
+        next_cursor = raw_events[-1]["event_id"] if raw_events else event_cursor
+        payload = {
+            "status": session["status"],
+            "run_id": session["run_id"],
+            "session_id": session["session_id"],
+            "conversation_id": session.get("conversation_id"),
+            "observer_url": session["observer_url"],
+            "terminal": session["status"] in FINAL_STATUSES,
+            "events": events,
+            "next_event_cursor": next_cursor,
+        }
+        if result is not None:
+            payload["result"] = result
+        return payload
+
+    def _call_runner(self, prompt: str, **kwargs: Any) -> AgyRunResult:
+        run = self.runner.run
+        signature = inspect.signature(run)
+        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+            return run(prompt, **kwargs)
+        accepted = {name for name, parameter in signature.parameters.items() if parameter.kind in {inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}}
+        filtered = {key: value for key, value in kwargs.items() if key in accepted}
+        return run(prompt, **filtered)
 
     def _run_text_session(
         self,
@@ -258,6 +443,9 @@ class GemnessService:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Any = None,
+        heartbeat_callback: Any = None,
     ) -> dict[str, Any]:
         title = _session_title(title_source or prompt, tool_name)
         session = self._session(
@@ -279,7 +467,7 @@ class GemnessService:
         observer_url = self.hub.observer_url(session_id)
         prompt_to_send = self.hub.prepare_prompt(session_id, prompt)
 
-        result = self.runner.run(
+        result = self._call_runner(
             prompt_to_send,
             session_id=session_id,
             hub=self.hub,
@@ -287,6 +475,10 @@ class GemnessService:
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             native_conversation_id=native_conversation_id,
+            cancel_event=cancel_event,
+            process_callback=process_callback,
+            heartbeat_callback=heartbeat_callback,
+            heartbeat_interval_sec=self.config.agy_heartbeat_interval_sec,
         )
         if result.status == "interrupted":
             retry_result = self._retry_text(tool_name, session_id, prompt_to_send, result, cwd)
@@ -298,12 +490,14 @@ class GemnessService:
             )
             return retry_result
         if result.status == "cancelled":
-            self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "metadata": result.metadata}
+            payload = {"status": "cancelled", "session_id": session_id, "run_id": session.run_id or session_id, "conversation_id": session.conversation_id, "observer_url": observer_url, "metadata": result.metadata}
+            self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled"})
+            return payload
         if result.status == "error":
             return self._runner_error(session_id, observer_url, result)
 
         text, envelope = extract_cli_response(result.stdout)
+        clean_text = clean_advisory_text(text)
         stats = _merged_stats(result.stats, envelope)
         metadata = _result_metadata(result, envelope)
         envelope_error = _envelope_error(envelope)
@@ -311,7 +505,8 @@ class GemnessService:
             return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata)
         payload = {
             "status": "completed",
-            "text": text,
+            "text": clean_text,
+            "summary": _advisory_summary(clean_text),
             "session_id": session_id,
             "run_id": session.run_id or session_id,
             "conversation_id": session.conversation_id,
@@ -319,6 +514,8 @@ class GemnessService:
             "stats": stats,
             "metadata": metadata,
         }
+        if clean_text != text:
+            payload["filtered_progress"] = True
         if envelope is not None:
             payload["stats"] = stats | {"cli_envelope_keys": sorted(envelope.keys())}
         self.hub.set_status(session_id, "completed", "session.completed", {"result": payload})
@@ -335,6 +532,9 @@ class GemnessService:
         warnings: list[str] | None = None,
         cwd: Path | None = None,
         title_source: str | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Any = None,
+        heartbeat_callback: Any = None,
     ) -> dict[str, Any]:
         schema_error = validate_schema_definition(schema)
         if schema_error:
@@ -345,7 +545,16 @@ class GemnessService:
         observer_url = self.hub.observer_url(session_id)
         prompt_to_send = self.hub.prepare_prompt(session_id, _json_prompt(prompt, schema))
 
-        result = self.runner.run(prompt_to_send, session_id=session_id, hub=self.hub, cwd=cwd)
+        result = self._call_runner(
+            prompt_to_send,
+            session_id=session_id,
+            hub=self.hub,
+            cwd=cwd,
+            cancel_event=cancel_event,
+            process_callback=process_callback,
+            heartbeat_callback=heartbeat_callback,
+            heartbeat_interval_sec=self.config.agy_heartbeat_interval_sec,
+        )
         if result.status == "interrupted":
             retry_result = self._retry_json(tool_name, session_id, prompt_to_send, result, schema, cwd)
             self.hub.set_status(
@@ -356,8 +565,9 @@ class GemnessService:
             )
             return retry_result
         if result.status == "cancelled":
-            self.hub.set_status(session_id, "cancelled", "session.cancelled", {"reason": "user_cancelled"})
-            return {"status": "cancelled", "session_id": session_id, "observer_url": observer_url, "metadata": result.metadata}
+            payload = {"status": "cancelled", "session_id": session_id, "run_id": session.run_id or session_id, "conversation_id": session.conversation_id, "observer_url": observer_url, "metadata": result.metadata}
+            self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled"})
+            return payload
         if result.status == "error":
             return self._runner_error(session_id, observer_url, result)
 
@@ -383,7 +593,7 @@ class GemnessService:
             payload = {
                 "status": "valid",
                 "data": data,
-                "raw_response": response_text,
+                "response_preview": _preview_text(response_text),
                 "session_id": session_id,
                 "run_id": session.run_id or session_id,
                 "conversation_id": session.conversation_id,
@@ -397,12 +607,22 @@ class GemnessService:
             }
             self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
             return payload
-        repair = self._repair_or_invalid(session_id, schema, response_text, parse_error, validation_errors, cwd)
+        repair = self._repair_or_invalid(
+            session_id,
+            schema,
+            response_text,
+            parse_error,
+            validation_errors,
+            cwd,
+            cancel_event=cancel_event,
+            process_callback=process_callback,
+            heartbeat_callback=heartbeat_callback,
+        )
         if repair["status"] == "valid":
             payload = {
                 "status": "valid",
                 "data": repair["data"],
-                "raw_response": repair["raw_response"],
+                "response_preview": _preview_text(repair["raw_response"]),
                 "session_id": session_id,
                 "run_id": session.run_id or session_id,
                 "conversation_id": session.conversation_id,
@@ -418,9 +638,33 @@ class GemnessService:
             return payload
         if repair["status"] == "error":
             return self._runner_error(session_id, observer_url, repair["result"])
+        if repair["status"] == "interrupted":
+            retry_result = self._retry_json(tool_name, session_id, prompt_to_send, repair["result"], schema, cwd)
+            self.hub.set_status(
+                session_id,
+                "cancelled",
+                "session.cancelled",
+                {"reason": "repair_interrupted_and_retried", "child_session_id": retry_result.get("session_id")},
+                phase="repair",
+            )
+            return retry_result
+        if repair["status"] == "cancelled":
+            payload = {
+                "status": "cancelled",
+                "session_id": session_id,
+                "run_id": session.run_id or session_id,
+                "conversation_id": session.conversation_id,
+                "observer_url": observer_url,
+                "metadata": repair["result"].metadata,
+                "repaired": False,
+                "repair_attempted": True,
+                "repair_succeeded": False,
+            }
+            self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled", "phase": "repair"}, phase="repair")
+            return payload
         payload = {
             "status": "invalid",
-            "raw_response": response_text,
+            "response_preview": _preview_text(response_text),
             "parse_error": parse_error,
             "validation_errors": validation_errors,
             "session_id": session_id,
@@ -447,6 +691,10 @@ class GemnessService:
         parse_error: str | None,
         validation_errors: list[dict[str, Any]],
         cwd: Path | None,
+        *,
+        cancel_event: threading.Event | None = None,
+        process_callback: Any = None,
+        heartbeat_callback: Any = None,
     ) -> dict[str, Any]:
         self.hub.set_status(
             session_id,
@@ -455,17 +703,39 @@ class GemnessService:
             {"parse_error": parse_error, "validation_errors": validation_errors},
         )
         repair_prompt = _repair_prompt(schema, raw_response, parse_error, validation_errors)
-        self.hub.append_event(session_id, "repair.prompt_sent", "codex_mcp", {"prompt": repair_prompt}, phase="repair")
-        result = self.runner.run(repair_prompt, session_id=session_id, hub=self.hub, cwd=cwd, phase="repair")
+        self.hub.append_event(
+            session_id,
+            "repair.prompt_sent",
+            "codex_mcp",
+            {"prompt_preview": _preview_text(repair_prompt), "prompt_chars": len(repair_prompt)},
+            phase="repair",
+        )
+        result = self._call_runner(
+            repair_prompt,
+            session_id=session_id,
+            hub=self.hub,
+            cwd=cwd,
+            phase="repair",
+            cancel_event=cancel_event,
+            process_callback=process_callback,
+            heartbeat_callback=heartbeat_callback,
+            heartbeat_interval_sec=self.config.agy_heartbeat_interval_sec,
+        )
         if result.status == "error":
             return {"status": "error", "result": result}
         if result.status in {"cancelled", "interrupted"}:
-            return {"status": "invalid", "raw_response": result.stdout}
+            return {"status": result.status, "result": result}
         response_text, envelope = extract_cli_response(result.stdout)
         envelope_error = _envelope_error(envelope)
         if envelope_error:
             return {"status": "error", "result": AgyRunResult.error(envelope_error, exit_code=result.exit_code, stderr=result.stderr, stdout=result.stdout, metadata=result.metadata)}
-        self.hub.append_event(session_id, "repair.response", "gemness", {"response": response_text}, phase="repair")
+        self.hub.append_event(
+            session_id,
+            "repair.response",
+            "gemness",
+            {"response_preview": _preview_text(response_text), "response_chars": len(response_text)},
+            phase="repair",
+        )
         data, repair_parse_error, candidate = parse_json_candidate(response_text)
         if repair_parse_error is not None:
             self.hub.append_event(
@@ -792,6 +1062,36 @@ def _envelope_error(envelope: dict[str, Any] | None) -> str | None:
     return str(error)
 
 
+def _events_after_cursor(events: list[dict[str, Any]], event_cursor: str | None) -> list[dict[str, Any]]:
+    if not event_cursor:
+        return events
+    for index, event in enumerate(events):
+        if event.get("event_id") == event_cursor:
+            return events[index + 1 :]
+    return events
+
+
+def _event_result(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in reversed(events):
+        event_type = event.get("type")
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        if event_type == "session.completed":
+            result = payload.get("result")
+            return result if isinstance(result, dict) else payload
+        if event_type in {"session.error", "session.cancelled"}:
+            return payload
+    return None
+
+
+def _clean_idempotency_key(idempotency_key: str | None) -> str | None:
+    if idempotency_key is None:
+        return None
+    key = " ".join(str(idempotency_key).split())
+    return key or None
+
+
 def _is_writable_dir(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -830,6 +1130,34 @@ def _is_uuid(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def clean_advisory_text(text: str) -> str:
+    lines = str(text or "").splitlines()
+    kept = [line for line in lines if not _is_progress_noise_line(line)]
+    cleaned = "\n".join(kept).strip()
+    return cleaned or str(text or "").strip()
+
+
+def _is_progress_noise_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return any(pattern.match(stripped) for pattern in PROGRESS_NOISE_PATTERNS)
+
+
+def _advisory_summary(text: str) -> str:
+    stripped = " ".join(str(text or "").split())
+    if len(stripped) <= 400:
+        return stripped
+    return stripped[:400].rstrip() + "..."
+
+
+def _preview_text(text: str, limit: int = RESPONSE_PREVIEW_CHARS) -> str:
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + f"\n...[truncated {len(value) - limit} chars]"
 
 
 class _NullLock:

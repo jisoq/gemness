@@ -37,11 +37,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Allowed workspace root. May be repeated. Defaults to --workspace-root.",
     )
     bootstrap.add_argument("--agy-command", default=None, help="Antigravity CLI command/path. Defaults to resolving agy from PATH.")
-    bootstrap.add_argument("--skip-trigger", action="store_true", help="Do not install the use-gemness trigger guidance.")
+    bootstrap.add_argument("--skip-trigger", action="store_true", help="Do not install the gemness skill guidance.")
     bootstrap.add_argument("--skip-smoke-test", action="store_true", help="Write config without launching the configured MCP command.")
     bootstrap.add_argument("--smoke-timeout", type=float, default=60.0)
 
-    trigger = subparsers.add_parser("install-trigger", help="Install or refresh the use-gemness trigger guidance.")
+    trigger = subparsers.add_parser("install-trigger", help="Install or refresh the gemness skill guidance.")
     trigger.add_argument("--scope", choices=["project", "user", "both"], default="user")
     trigger.add_argument("--project-root", default=".")
 

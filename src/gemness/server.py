@@ -23,7 +23,7 @@ TOOLS = [
     },
     {
         "name": "ask_antigravity",
-        "description": "Ask Antigravity CLI for advisory text and expose the call in the local observer UI.",
+        "description": "Blocking final-result Antigravity advisory tool. Intended for an antigravity reviewer subagent in the default Codex flow; returns a cleaned final result and observer URL, not raw transcript.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -35,8 +35,22 @@ TOOLS = [
         },
     },
     {
+        "name": "start_antigravity",
+        "description": "Advanced background API: start a detached Antigravity CLI advisory run and return immediately with a run id.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["prompt"],
+            "properties": {
+                "prompt": {"type": "string"},
+                "cwd": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+        },
+    },
+    {
         "name": "follow_up_antigravity",
-        "description": "Continue a previous Antigravity observer conversation from a parent session id.",
+        "description": "Blocking final-result follow-up for a previous Antigravity observer conversation. Intended for reviewer subagents in the default Codex flow.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -48,8 +62,22 @@ TOOLS = [
         },
     },
     {
+        "name": "start_follow_up_antigravity",
+        "description": "Advanced background API: start a detached follow-up Antigravity run from a previous observer run id.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["parent_session_id", "prompt"],
+            "properties": {
+                "parent_session_id": {"type": "string"},
+                "prompt": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+        },
+    },
+    {
         "name": "ask_antigravity_json",
-        "description": "Ask Antigravity CLI for JSON, validate it against a schema, and expose parse/repair events.",
+        "description": "Blocking final-result Antigravity JSON tool. Validates the final response against a schema and returns data plus observer URL without raw transcript.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -62,14 +90,83 @@ TOOLS = [
         },
     },
     {
+        "name": "start_antigravity_json",
+        "description": "Advanced background API: start a detached Antigravity JSON run and validate the final response in the background.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["prompt", "schema"],
+            "properties": {
+                "prompt": {"type": "string"},
+                "schema": {"type": "object"},
+                "cwd": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+        },
+    },
+    {
         "name": "review_current_diff_with_antigravity",
-        "description": "Ask Antigravity CLI to inspect the current workspace and review repository changes itself.",
+        "description": "Blocking final-result current-diff review. Intended for an antigravity reviewer subagent; Antigravity inspects the workspace itself and Gemness returns cleaned advisory data plus observer URL.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "base_ref": {"type": "string", "default": "HEAD"},
                 "cwd": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "start_review_current_diff_with_antigravity",
+        "description": "Advanced background API: start a detached Antigravity current-diff review run.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "base_ref": {"type": "string", "default": "HEAD"},
+                "cwd": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "get_antigravity_run",
+        "description": "Advanced background API: return current state, final result when available, and recent observer events for a detached Antigravity run.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["run_id"],
+            "properties": {
+                "run_id": {"type": "string"},
+                "event_cursor": {"type": "string"},
+                "recent_event_limit": {"type": "integer", "default": 20, "minimum": 0, "maximum": 100},
+            },
+        },
+    },
+    {
+        "name": "await_antigravity_run",
+        "description": "Advanced background API: wait briefly for a detached Antigravity run, then return completion or the current running state.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["run_id"],
+            "properties": {
+                "run_id": {"type": "string"},
+                "timeout_sec": {"type": "number", "default": 5, "minimum": 0, "maximum": 30},
+                "event_cursor": {"type": "string"},
+                "recent_event_limit": {"type": "integer", "default": 20, "minimum": 0, "maximum": 100},
+            },
+        },
+    },
+    {
+        "name": "cancel_antigravity_run",
+        "description": "Advanced background API: request cancellation for a detached Antigravity run by run id.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["run_id"],
+            "properties": {
+                "run_id": {"type": "string"},
             },
         },
     },
@@ -131,12 +228,48 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
         result = service.antigravity_health(cwd=arguments.get("cwd"), check_antigravity=bool(arguments.get("check_antigravity", True)))
     elif name == "ask_antigravity":
         result = service.ask_antigravity(str(arguments["prompt"]), cwd=arguments.get("cwd"))
+    elif name == "start_antigravity":
+        result = service.start_antigravity(str(arguments["prompt"]), cwd=arguments.get("cwd"), idempotency_key=arguments.get("idempotency_key"))
     elif name == "follow_up_antigravity":
         result = service.follow_up_antigravity(str(arguments["parent_session_id"]), str(arguments["prompt"]))
+    elif name == "start_follow_up_antigravity":
+        result = service.start_follow_up_antigravity(
+            str(arguments["parent_session_id"]),
+            str(arguments["prompt"]),
+            idempotency_key=arguments.get("idempotency_key"),
+        )
     elif name == "ask_antigravity_json":
         result = service.ask_antigravity_json(str(arguments["prompt"]), arguments["schema"], cwd=arguments.get("cwd"))
+    elif name == "start_antigravity_json":
+        result = service.start_antigravity_json(
+            str(arguments["prompt"]),
+            arguments["schema"],
+            cwd=arguments.get("cwd"),
+            idempotency_key=arguments.get("idempotency_key"),
+        )
     elif name == "review_current_diff_with_antigravity":
         result = service.review_current_diff_with_antigravity(base_ref=str(arguments.get("base_ref") or "HEAD"), cwd=arguments.get("cwd"))
+    elif name == "start_review_current_diff_with_antigravity":
+        result = service.start_review_current_diff_with_antigravity(
+            base_ref=str(arguments.get("base_ref") or "HEAD"),
+            cwd=arguments.get("cwd"),
+            idempotency_key=arguments.get("idempotency_key"),
+        )
+    elif name == "get_antigravity_run":
+        result = service.get_antigravity_run(
+            str(arguments["run_id"]),
+            event_cursor=arguments.get("event_cursor"),
+            recent_event_limit=int(arguments.get("recent_event_limit", 20)),
+        )
+    elif name == "await_antigravity_run":
+        result = service.await_antigravity_run(
+            str(arguments["run_id"]),
+            timeout_sec=float(arguments.get("timeout_sec", 5)),
+            event_cursor=arguments.get("event_cursor"),
+            recent_event_limit=int(arguments.get("recent_event_limit", 20)),
+        )
+    elif name == "cancel_antigravity_run":
+        result = service.cancel_antigravity_run(str(arguments["run_id"]))
     else:
         raise ValueError(f"Unknown tool: {params.get('name')}")
     return {

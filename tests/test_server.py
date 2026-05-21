@@ -74,9 +74,16 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         names = [tool["name"] for tool in listed["result"]["tools"]]
         assert "antigravity_health" in names
         assert "ask_antigravity" in names
+        assert "start_antigravity" in names
         assert "follow_up_antigravity" in names
+        assert "start_follow_up_antigravity" in names
         assert "ask_antigravity_json" in names
+        assert "start_antigravity_json" in names
         assert "review_current_diff_with_antigravity" in names
+        assert "start_review_current_diff_with_antigravity" in names
+        assert "get_antigravity_run" in names
+        assert "await_antigravity_run" in names
+        assert "cancel_antigravity_run" in names
 
         called = _handle_message(
             {
@@ -104,6 +111,31 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         follow_up_result = followed["result"]["structuredContent"]
         assert follow_up_result["status"] == "completed"
         assert follow_up_result["conversation_id"] == result["conversation_id"]
+
+        started = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "start_antigravity", "arguments": {"prompt": "detached"}},
+            },
+            service,
+        )
+        start_result = started["result"]["structuredContent"]
+        assert start_result["status"] == "accepted"
+
+        awaited = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "await_antigravity_run", "arguments": {"run_id": start_result["run_id"], "timeout_sec": 2}},
+            },
+            service,
+        )
+        await_result = awaited["result"]["structuredContent"]
+        assert await_result["status"] == "completed"
+        assert await_result["result"]["text"] == "server ok"
     finally:
         service.shutdown()
 

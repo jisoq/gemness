@@ -137,6 +137,11 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "buildReadableTranscript" in INDEX_HTML
     assert "isTerminalStatus" in INDEX_HTML
     assert "isBenignAntigravityStderr" in INDEX_HTML
+    assert "runtimeSignal" in INDEX_HTML
+    assert "function runTelemetry" in INDEX_HTML
+    assert "function selectSession" in INDEX_HTML
+    assert "function bindSessionListEvents" in INDEX_HTML
+    assert ".status-dot.live" in INDEX_HTML
     assert "conversation id" in INDEX_HTML
     assert "run id" in INDEX_HTML
     assert "256-color support not detected" in INDEX_HTML
@@ -345,6 +350,94 @@ console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.
     assert turns[0]["meta"]["metadata"]["streaming"] is False
 
 
+def test_heartbeat_events_update_runtime_signal_without_chat_turns(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const heartbeat = {
+  event_id: "heartbeat-1",
+  session_id: "run_1",
+  type: "antigravity.heartbeat",
+  ts: new Date().toISOString(),
+  role: "gemness",
+  payload: {
+    run_id: "run_1",
+    elapsed_ms: 3210,
+    timeout_remaining_ms: 96000,
+    pid: 123,
+    capture_mode: "winpty",
+    stdout_bytes: 42,
+    stderr_bytes: 0,
+    last_activity_ms_ago: 120
+  }
+};
+const otherRunHeartbeat = {
+  ...heartbeat,
+  event_id: "heartbeat-2",
+  session_id: "run_2",
+  payload: { ...heartbeat.payload, run_id: "run_2", pid: 999 }
+};
+const completedHeartbeat = {
+  ...heartbeat,
+  ts: "2026-05-19T03:04:18.000Z"
+};
+const exited = {
+  session_id: "run_1",
+  type: "antigravity.exited",
+  ts: "2026-05-19T03:04:22.560Z",
+  payload: { duration_ms: 4560, exit_code: 0 }
+};
+const completed = {
+  session_id: "run_1",
+  type: "session.completed",
+  ts: "2026-05-19T03:04:22.560Z",
+  payload: { status: "completed" }
+};
+const runningSession = { session_id: "run_1", status: "running" };
+const completedSession = { session_id: "run_1", status: "completed", duration_ms: 5000 };
+const turns = buildConversationTranscript([heartbeat]);
+const telemetry = runTelemetry(runningSession, [otherRunHeartbeat, heartbeat]);
+const completedTelemetry = runTelemetry(completedSession, [completedHeartbeat, exited, completed]);
+const signalHtml = renderRuntimeSignal(runningSession, [otherRunHeartbeat, heartbeat]);
+const debugHtml = renderRawEvent(heartbeat);
+console.log(JSON.stringify({
+  turnCount: turns.length,
+  state: telemetry.state,
+  label: telemetry.label,
+  details: telemetry.details,
+  completedState: completedTelemetry.state,
+  completedDetails: completedTelemetry.details,
+  completedUsesFrozenHeartbeat: completedTelemetry.details.some((item) => item.startsWith("마지막 heartbeat")),
+  completedUsesTerminalDelta: completedTelemetry.details.includes("종료 4.6초 전"),
+  completedHasLiveRecency: completedTelemetry.details.some((item) => item.startsWith("최근 heartbeat")),
+  signalHasLiveDot: signalHtml.includes("status-dot live"),
+  signalHasPid: signalHtml.includes("pid 123"),
+  signalUsesActiveRun: !signalHtml.includes("pid 999"),
+  debugKeepsRawHeartbeat: debugHtml.includes("antigravity.heartbeat")
+}));
+"""
+    script_path = tmp_path / "heartbeat-runtime-signal-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert data["turnCount"] == 0
+    assert data["state"] == "live"
+    assert data["label"] == "Live"
+    assert "pid 123" in data["details"]
+    assert "경과 3.2초" in data["details"]
+    assert data["completedState"] == "completed"
+    assert data["completedUsesFrozenHeartbeat"] is True
+    assert data["completedUsesTerminalDelta"] is True
+    assert data["completedHasLiveRecency"] is False
+    assert "프로세스 4.6초" in data["completedDetails"]
+    assert data["signalHasLiveDot"] is True
+    assert data["signalHasPid"] is True
+    assert data["signalUsesActiveRun"] is True
+    assert data["debugKeepsRawHeartbeat"] is True
+
+
 def test_live_session_picker_prefers_newest_non_terminal_session(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"
@@ -458,6 +551,39 @@ console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.
     assert turns[0]["meta"]["단계"] == "전송 전 초안"
 
 
+def test_conversation_transcript_keeps_previous_run_rendered_prompt_when_later_run_sends_ref(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const events = [
+  {
+    session_id: "run_1",
+    type: "prompt.rendered",
+    ts: "2026-05-19T03:04:17Z",
+    role: "codex_mcp",
+    payload: { prompt: "첫 번째 실행 초안입니다." }
+  },
+  {
+    session_id: "run_2",
+    type: "prompt.sent",
+    ts: "2026-05-19T03:04:18Z",
+    role: "codex_mcp",
+    payload: { prompt_ref: "prompt.rendered", prompt_preview: "두 번째 실행 전송" }
+  }
+];
+const turns = buildConversationTranscript(events);
+console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.body, meta: turn.meta }))));
+"""
+    script_path = tmp_path / "cross-run-prompt-ref-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    turns = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert turns[0]["body"] == "첫 번째 실행 초안입니다."
+    assert turns[0]["meta"]["단계"] == "전송 전 초안"
+
+
 def test_markdown_renderer_formats_transcript_body_safely(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"
@@ -503,6 +629,80 @@ console.log(JSON.stringify({ active, inactive }));
     data = json.loads(completed.stdout.strip().splitlines()[-1])
 
     assert data == {"active": True, "inactive": False}
+
+
+def test_session_selection_discards_stale_transcript_responses(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+(async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const elements = new Map();
+  document.getElementById = (id) => {
+    if (!elements.has(id)) elements.set(id, { id, checked: false, value: "", innerHTML: "", textContent: "", onclick: null, onchange: null });
+    return elements.get(id);
+  };
+  document.querySelectorAll = () => [];
+  const response = (payload) => ({ ok: true, json: async () => payload, text: async () => "" });
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  const oldRequest = deferred();
+  const newRequest = deferred();
+  global.fetch = async (path) => {
+    const url = String(path);
+    if (url.includes("/api/sessions/run_old")) return await oldRequest.promise;
+    if (url.includes("/api/sessions/run_new")) return await newRequest.promise;
+    return response({ sessions: [] });
+  };
+
+  const oldSelection = selectSession("run_old");
+  const loadingTitle = elements.get("title").textContent;
+  const loadingFlow = elements.get("transcriptFlow").innerHTML;
+  const newSelection = selectSession("run_new");
+  newRequest.resolve(response({
+    session: { session_id: "run_new", title: "새 세션", status: "completed", tool_name: "ask_antigravity" },
+    events: [{ type: "prompt.sent", ts: "2026-05-19T03:04:20Z", role: "codex_mcp", payload: { prompt: "새 본문" } }]
+  }));
+  await newSelection;
+  const titleAfterNew = elements.get("title").textContent;
+  const flowAfterNew = elements.get("transcriptFlow").innerHTML;
+
+  oldRequest.resolve(response({
+    session: { session_id: "run_old", title: "이전 세션", status: "completed", tool_name: "ask_antigravity" },
+    events: [{ type: "prompt.sent", ts: "2026-05-19T03:04:18Z", role: "codex_mcp", payload: { prompt: "이전 본문" } }]
+  }));
+  await oldSelection;
+  console.log(JSON.stringify({
+    loadingTitle,
+    loadingFlow,
+    titleAfterNew,
+    flowAfterNew,
+    finalTitle: elements.get("title").textContent,
+    finalFlow: elements.get("transcriptFlow").innerHTML
+  }));
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+    script_path = tmp_path / "stale-selection-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    data = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert "불러오는 중" in data["loadingTitle"]
+    assert "대화 기록을 불러오는 중입니다." in data["loadingFlow"]
+    assert data["titleAfterNew"] == "새 세션 · 완료"
+    assert "새 본문" in data["flowAfterNew"]
+    assert data["finalTitle"] == "새 세션 · 완료"
+    assert "새 본문" in data["finalFlow"]
+    assert "이전 본문" not in data["finalFlow"]
 
 
 def test_observer_ui_marks_and_restores_raw_event_details(tmp_path) -> None:

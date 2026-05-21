@@ -18,6 +18,8 @@ from .redaction import redact_payload, redact_text
 
 FINAL_STATUSES = {"valid", "invalid", "error", "cancelled", "completed"}
 STALE_PROCESS_GRACE_SEC = 15
+PUBLIC_TEXT_PREVIEW_CHARS = 4000
+PUBLIC_COMMAND_ARG_PREVIEW_CHARS = 240
 SESSION_STATUSES = {
     "queued",
     "waiting_for_user_approval",
@@ -236,9 +238,10 @@ class ObserverHub:
         model_source: str | None = None,
         phase: str | None = None,
     ) -> None:
+        safe_command_argv = _redact_prompt_argv(command_argv)
         with self._lock:
             session = self.sessions[session_id]
-            session.command_argv = list(command_argv)
+            session.command_argv = safe_command_argv
             if fallback_used is not None:
                 session.fallback_used = fallback_used
             if fallback_reason is not None:
@@ -255,7 +258,7 @@ class ObserverHub:
             "system",
             {
                 "run_id": session_id,
-                "command_argv": command_argv,
+                "command_argv": safe_command_argv,
                 "agy_conversation_id": agy_conversation_id,
                 "native_session_mode": native_session_mode,
                 "fallback_used": fallback_used,
@@ -461,15 +464,18 @@ class ObserverHub:
 
     def prepare_prompt(self, session_id: str, prompt: str, *, force_approval: bool | None = None) -> str:
         self.append_event(session_id, "prompt.rendered", "codex_mcp", {"prompt": prompt})
+        self.set_status(session_id, "sending")
         self.append_event(
             session_id,
-            "prompt.redacted",
-            "system",
-            {"prompt": redact_text(prompt)},
-            redacted=True,
+            "prompt.sent",
+            "codex_mcp",
+            {
+                "prompt_ref": "prompt.rendered",
+                "prompt_preview": _clip_with_marker(redact_text(prompt), PUBLIC_TEXT_PREVIEW_CHARS),
+                "prompt_chars": len(prompt),
+                "force_approval": bool(force_approval),
+            },
         )
-        self.set_status(session_id, "sending")
-        self.append_event(session_id, "prompt.sent", "codex_mcp", {"prompt": prompt})
         return prompt
 
     def list_sessions(self) -> list[dict[str, Any]]:
@@ -523,6 +529,18 @@ class ObserverHub:
             "runs": [self._session_dict(run, raw=raw) for run in runs],
             "events": events,
             "raw": raw,
+        }
+
+    def write_text_artifact(self, session_id: str, name: str, content: str) -> dict[str, Any]:
+        safe_name = _safe_artifact_name(name)
+        path = self.transcript_dir / f"{session_id}.{safe_name}"
+        path.write_text(content, encoding="utf-8")
+        return {
+            "kind": "text",
+            "name": safe_name,
+            "path": str(path),
+            "bytes": len(content.encode("utf-8", errors="replace")),
+            "encoding": "utf-8",
         }
 
     def conversation_runs(self, conversation_id: str) -> list[SessionRecord]:
@@ -606,6 +624,8 @@ class ObserverHub:
                 age = _age_seconds(session.updated_at, now)
                 pid = _last_started_pid(self.events.get(session.session_id, []))
                 reason = ""
+                if session.status == "queued" and _is_managed_run(self.service, session.session_id):
+                    continue
                 if pid is not None and age > STALE_PROCESS_GRACE_SEC and not _process_is_running(pid):
                     reason = f"process {pid} is no longer running"
                 elif age > self.config.agy_timeout_sec + STALE_PROCESS_GRACE_SEC:
@@ -627,7 +647,7 @@ class ObserverHub:
     def _public_event(self, event: ObserverEvent, *, raw: bool) -> dict[str, Any]:
         data = event.to_dict()
         if not raw:
-            data["payload"] = redact_payload(data.get("payload", {}))
+            data["payload"] = _compact_public_payload(event.type, redact_payload(data.get("payload", {})))
             data["redacted"] = True
         return data
 
@@ -644,7 +664,7 @@ class ObserverHub:
                 data["conversation_title"] = redact_text(data["conversation_title"])
             data.pop("agy_conversation_id", None)
             if "command_argv" in data:
-                data["command_argv"] = redact_payload(data["command_argv"])
+                data["command_argv"] = _compact_command_argv(redact_payload(data["command_argv"]))
         return data
 
     def delete_conversation(self, conversation_id: str) -> dict[str, Any]:
@@ -695,6 +715,7 @@ class ObserverHub:
         candidates = [self.transcript_dir / f"{session.session_id}.jsonl"]
         if session.stream_events_path:
             candidates.append(Path(session.stream_events_path))
+        candidates.extend(self.transcript_dir.glob(f"{session.session_id}.*"))
         paths: list[Path] = []
         seen: set[Path] = set()
         for candidate in candidates:
@@ -1021,6 +1042,12 @@ def _observer_base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
+def _is_managed_run(service: Any, session_id: str) -> bool:
+    run_manager = getattr(service, "run_manager", None)
+    is_managed = getattr(run_manager, "is_managed", None)
+    return bool(callable(is_managed) and is_managed(session_id))
+
+
 def _validated_title(title: str) -> str:
     cleaned = " ".join(str(title or "").split())
     if not cleaned:
@@ -1034,6 +1061,97 @@ def _root_run(runs: list[SessionRecord]) -> SessionRecord | None:
     if not runs:
         return None
     return min(runs, key=lambda item: (item.turn_index or 0, item.started_at))
+
+
+def _safe_artifact_name(name: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name.strip())
+    return cleaned or "artifact.txt"
+
+
+def _compact_public_payload(event_type: str, payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return _compact_public_value(payload)
+    compacted = {key: _compact_public_value(value) for key, value in payload.items()}
+    if "result" in compacted:
+        compacted["result"] = _compact_public_value(compacted["result"])
+    if "stdout_artifact" in compacted:
+        compacted["stdout_artifact"] = _public_artifact_ref(compacted["stdout_artifact"])
+    if event_type == "antigravity.response" and isinstance(payload.get("response"), str):
+        compacted["response"] = _compact_response_envelope(payload["response"])
+    compacted = _compact_command_fields(compacted)
+    return compacted
+
+
+def _compact_public_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _clip_with_marker(value, PUBLIC_TEXT_PREVIEW_CHARS)
+    if isinstance(value, list):
+        return [_compact_public_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_compact_public_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _compact_public_value(item) for key, item in value.items()}
+    return value
+
+
+def _compact_command_argv(argv: Any) -> Any:
+    if not isinstance(argv, list):
+        return _compact_public_value(argv)
+    return [_clip_with_marker(str(item), PUBLIC_COMMAND_ARG_PREVIEW_CHARS) for item in _redact_prompt_argv(argv)]
+
+
+def _compact_command_fields(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_compact_command_fields(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    compacted: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {"command", "command_argv"} and isinstance(item, list):
+            compacted[key] = _compact_command_argv(item)
+        else:
+            compacted[key] = _compact_command_fields(item)
+    return compacted
+
+
+def _public_artifact_ref(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key in {"kind", "name", "bytes", "encoding"}}
+
+
+def _redact_prompt_argv(argv: Any) -> Any:
+    if not isinstance(argv, list):
+        return argv
+    redacted: list[str] = []
+    redact_next = False
+    for item in argv:
+        value = str(item)
+        if redact_next:
+            redacted.append("[PROMPT_REDACTED]")
+            redact_next = False
+            continue
+        redacted.append(value)
+        if value in {"-p", "--print", "--prompt"}:
+            redact_next = True
+    return redacted
+
+
+def _compact_response_envelope(value: str) -> str:
+    try:
+        envelope = json.loads(value)
+    except json.JSONDecodeError:
+        return _clip_with_marker(value, PUBLIC_TEXT_PREVIEW_CHARS)
+    if not isinstance(envelope, dict):
+        return _clip_with_marker(value, PUBLIC_TEXT_PREVIEW_CHARS)
+    compacted = _compact_command_fields(_compact_public_value(envelope))
+    return json.dumps(compacted, ensure_ascii=False)
+
+
+def _clip_with_marker(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + f"\n...[truncated {len(value) - limit} chars]"
 
 
 def _unlink_paths(paths: list[Path]) -> None:
@@ -1051,7 +1169,7 @@ def _new_prefixed_id(prefix: str) -> str:
 def _result_text(result: Any) -> str:
     if not isinstance(result, dict):
         return str(result) if result is not None else ""
-    for key in ("text", "raw_response", "message"):
+    for key in ("text", "response_preview", "raw_response", "message"):
         value = result.get(key)
         if isinstance(value, str) and value:
             return value
@@ -1073,6 +1191,8 @@ def _last_event_text(events: list[dict[str, Any]], event_types: set[str], payloa
 def _last_antigravity_response(events: list[dict[str, Any]]) -> str:
     response = _last_event_text(events, {"antigravity.response", "repair.response"}, "response")
     if not response:
+        response = _last_event_text(events, {"antigravity.response", "repair.response"}, "response_preview")
+    if not response:
         return ""
     try:
         envelope = json.loads(response)
@@ -1090,7 +1210,7 @@ def _last_final_result(events: list[dict[str, Any]]) -> str:
         result = event.get("payload", {}).get("result")
         if not isinstance(result, dict):
             continue
-        for key in ("text", "data", "raw_response", "message"):
+        for key in ("text", "data", "response_preview", "raw_response", "message"):
             value = result.get(key)
             if value:
                 return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)

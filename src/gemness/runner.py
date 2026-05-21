@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -29,6 +30,7 @@ AUTH_REQUIRED_MARKERS = (
 
 WINPTY_ROWS = 48
 WINPTY_COLS = 160
+RESPONSE_PREVIEW_CHARS = 4000
 CAPTURE_MODE_PIPE = "pipe"
 CAPTURE_MODE_WINPTY = "winpty"
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -173,15 +175,21 @@ class _RunningAgyCommand:
     capture_mode: str
     stdout_parts: list[str]
     stderr_parts: list[str]
+    stdout_byte_count: list[int]
+    stderr_byte_count: list[int]
+    capture_lock: threading.Lock
     stdout_thread: threading.Thread | None
     stderr_thread: threading.Thread | None
     poll_fn: Callable[[], int | None]
     terminate_fn: Callable[[], None]
+    terminate_requested: bool = False
 
     def poll(self) -> int | None:
         return self.poll_fn()
 
     def terminate(self) -> None:
+        if self.poll() is None:
+            self.terminate_requested = True
         self.terminate_fn()
 
     def join(self) -> None:
@@ -191,13 +199,15 @@ class _RunningAgyCommand:
             self.stderr_thread.join(timeout=1)
 
     def stdout(self) -> str:
-        value = "".join(self.stdout_parts)
+        with self.capture_lock:
+            value = "".join(self.stdout_parts)
         if self.capture_mode == CAPTURE_MODE_WINPTY:
             return clean_console_output(value)
         return value
 
     def stderr(self) -> str:
-        return "".join(self.stderr_parts)
+        with self.capture_lock:
+            return "".join(self.stderr_parts)
 
 
 @dataclass(slots=True)
@@ -222,6 +232,10 @@ class AgyRunner(Protocol):
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[Any], None] | None = None,
+        heartbeat_callback: Callable[[dict[str, Any]], None] | None = None,
+        heartbeat_interval_sec: float | None = None,
     ) -> AgyRunResult:
         ...
 
@@ -242,6 +256,10 @@ class AgyCliRunner:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
+        cancel_event: threading.Event | None = None,
+        process_callback: Callable[[Any], None] | None = None,
+        heartbeat_callback: Callable[[dict[str, Any]], None] | None = None,
+        heartbeat_interval_sec: float | None = None,
     ) -> AgyRunResult:
         capabilities = self.probe_capabilities(cwd)
         if not capabilities.available:
@@ -254,10 +272,11 @@ class AgyCliRunner:
             prompt,
             native_conversation_id=native_conversation_id,
         )
+        recorded_command = _redact_prompt_argument(command, capabilities.print_flag)
         capture_mode = _resolve_capture_mode(self.config)
         hub.record_run_command(
             session_id,
-            command,
+            recorded_command,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             agy_conversation_id=native_conversation_id,
@@ -276,6 +295,8 @@ class AgyCliRunner:
             return AgyRunResult.error(str(exc), exit_code=None)
         except RuntimeError as exc:
             return AgyRunResult.error(str(exc), exit_code=None)
+        if process_callback is not None:
+            process_callback(running)
 
         conversation_id = _conversation_id(hub, session_id)
         hub.set_status(
@@ -300,9 +321,45 @@ class AgyCliRunner:
         )
 
         timed_out = False
+        cancelled = False
+        last_stdout_bytes, last_stderr_bytes = _captured_bytes(running)
+        last_activity_monotonic = started
+        heartbeat_every = max(0.1, float(heartbeat_interval_sec or self.config.agy_heartbeat_interval_sec or 5.0))
+        next_heartbeat = started + heartbeat_every
         while running.poll() is None:
+            now = time.monotonic()
+            stdout_bytes, stderr_bytes = _captured_bytes(running)
+            if (stdout_bytes, stderr_bytes) != (last_stdout_bytes, last_stderr_bytes):
+                last_stdout_bytes, last_stderr_bytes = stdout_bytes, stderr_bytes
+                last_activity_monotonic = now
+            if heartbeat_callback is not None and now >= next_heartbeat:
+                heartbeat_callback(
+                    {
+                        "elapsed_ms": int((now - started) * 1000),
+                        "timeout_remaining_ms": max(0, int((self.config.agy_timeout_sec - (now - started)) * 1000)),
+                        "pid": running.pid,
+                        "capture_mode": running.capture_mode,
+                        "stdout_bytes": stdout_bytes,
+                        "stderr_bytes": stderr_bytes,
+                        "last_activity_ms_ago": int((now - last_activity_monotonic) * 1000),
+                        "streaming": False,
+                    }
+                )
+                next_heartbeat = now + heartbeat_every
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                hub.append_event(session_id, "antigravity.cancel_requested", "gemness", {"pid": running.pid, "phase": phase}, phase=phase)
+                running.terminate()
+                break
             if time.monotonic() - started > self.config.agy_timeout_sec:
                 timed_out = True
+                hub.append_event(
+                    session_id,
+                    "antigravity.timeout",
+                    "gemness",
+                    {"timeout_sec": self.config.agy_timeout_sec, "pid": running.pid, "phase": phase},
+                    phase=phase,
+                )
                 running.terminate()
                 break
             time.sleep(0.05)
@@ -311,13 +368,15 @@ class AgyCliRunner:
         raw_stdout = running.stdout()
         stderr = running.stderr()
         exit_code = running.poll()
+        if not cancelled and not timed_out and cancel_event is not None and cancel_event.is_set() and running.terminate_requested:
+            cancelled = True
         auth_status = detect_auth_status(raw_stdout, stderr, exit_code)
         if exit_code == 0 and not raw_stdout.strip():
             auth_status = "unknown"
         metadata = _metadata(
             session_id=session_id,
             conversation_id=conversation_id,
-            command=command,
+            command=recorded_command,
             cwd=cwd,
             duration_ms=int((time.monotonic() - started) * 1000),
             exit_code=exit_code,
@@ -326,19 +385,32 @@ class AgyCliRunner:
             agy_conversation_id=native_conversation_id,
             native_session_mode=native_session_mode,
         )
+        if timed_out:
+            metadata["timed_out"] = True
+        if cancelled:
+            metadata["cancelled"] = True
         envelope = _response_envelope(raw_stdout, metadata)
         if raw_stdout:
+            stdout_artifact = hub.write_text_artifact(session_id, "stdout.txt" if phase is None else f"{phase}.stdout.txt", raw_stdout)
             hub.append_event(
                 session_id,
                 "antigravity.response",
                 "gemness",
-                {"response": envelope, "stdout": raw_stdout, "metadata": metadata, "streaming": False},
+                {
+                    "response_preview": _preview(raw_stdout),
+                    "stdout_artifact": stdout_artifact,
+                    "stdout_bytes": stdout_artifact["bytes"],
+                    "metadata": metadata,
+                    "streaming": False,
+                },
                 phase=phase,
             )
         if stderr:
             hub.append_event(session_id, "antigravity.stderr", "gemness", {"stderr": _tail(stderr)}, phase=phase)
         hub.append_event(session_id, "antigravity.exited", "gemness", metadata, phase=phase)
 
+        if cancelled:
+            return AgyRunResult.cancelled(stdout=envelope, stderr=stderr, metadata=metadata)
         if timed_out:
             return AgyRunResult.error("Antigravity CLI timed out", exit_code=exit_code, stderr=stderr, stdout=envelope, metadata=metadata, raw_stdout=raw_stdout)
         if auth_status == "auth_required":
@@ -492,6 +564,7 @@ def _start_agy_command(command: list[str], cwd: Path | None, env: dict[str, str]
 
 
 def _start_pipe_command(command: list[str], cwd: Path | None, env: dict[str, str]) -> _RunningAgyCommand:
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -502,17 +575,25 @@ def _start_pipe_command(command: list[str], cwd: Path | None, env: dict[str, str
         errors="replace",
         cwd=str(cwd) if cwd is not None else None,
         env=env,
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
     )
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
-    stdout_thread = _reader_thread(process.stdout, stdout_parts)
-    stderr_thread = _reader_thread(process.stderr, stderr_parts)
+    stdout_byte_count = [0]
+    stderr_byte_count = [0]
+    capture_lock = threading.Lock()
+    stdout_thread = _reader_thread(process.stdout, stdout_parts, stdout_byte_count, capture_lock)
+    stderr_thread = _reader_thread(process.stderr, stderr_parts, stderr_byte_count, capture_lock)
     return _RunningAgyCommand(
         process=process,
         pid=process.pid,
         capture_mode=CAPTURE_MODE_PIPE,
         stdout_parts=stdout_parts,
         stderr_parts=stderr_parts,
+        stdout_byte_count=stdout_byte_count,
+        stderr_byte_count=stderr_byte_count,
+        capture_lock=capture_lock,
         stdout_thread=stdout_thread,
         stderr_thread=stderr_thread,
         poll_fn=process.poll,
@@ -533,7 +614,10 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
         dimensions=(WINPTY_ROWS, WINPTY_COLS),
     )
     stdout_parts: list[str] = []
-    stdout_thread = _winpty_reader_thread(process, stdout_parts)
+    stdout_byte_count = [0]
+    stderr_byte_count = [0]
+    capture_lock = threading.Lock()
+    stdout_thread = _winpty_reader_thread(process, stdout_parts, stdout_byte_count, capture_lock)
 
     def poll() -> int | None:
         if process.isalive():
@@ -549,6 +633,9 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
         capture_mode=CAPTURE_MODE_WINPTY,
         stdout_parts=stdout_parts,
         stderr_parts=[],
+        stdout_byte_count=stdout_byte_count,
+        stderr_byte_count=stderr_byte_count,
+        capture_lock=capture_lock,
         stdout_thread=stdout_thread,
         stderr_thread=None,
         poll_fn=poll,
@@ -556,7 +643,7 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
     )
 
 
-def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
+def _reader_thread(pipe: Any, parts: list[str], byte_count: list[int], lock: threading.Lock) -> threading.Thread:
     def read_pipe() -> None:
         if pipe is None:
             return
@@ -565,7 +652,9 @@ def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
                 value = pipe.readline()
                 if value == "":
                     break
-                parts.append(value)
+                with lock:
+                    parts.append(value)
+                    byte_count[0] += len(value.encode("utf-8", errors="replace"))
         finally:
             try:
                 pipe.close()
@@ -577,7 +666,7 @@ def _reader_thread(pipe: Any, parts: list[str]) -> threading.Thread:
     return thread
 
 
-def _winpty_reader_thread(process: Any, parts: list[str]) -> threading.Thread:
+def _winpty_reader_thread(process: Any, parts: list[str], byte_count: list[int], lock: threading.Lock) -> threading.Thread:
     def read_console() -> None:
         while True:
             try:
@@ -591,17 +680,52 @@ def _winpty_reader_thread(process: Any, parts: list[str]) -> threading.Thread:
                     break
                 time.sleep(0.05)
                 continue
-            parts.append(value)
+            with lock:
+                parts.append(value)
+                byte_count[0] += len(value.encode("utf-8", errors="replace"))
 
     thread = threading.Thread(target=read_console, daemon=True)
     thread.start()
     return thread
 
 
+def _captured_bytes(running: _RunningAgyCommand) -> tuple[int, int]:
+    with running.capture_lock:
+        return running.stdout_byte_count[0], running.stderr_byte_count[0]
+
+
 def _terminate_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
-    process.terminate()
+    if os.name == "nt":
+        _terminate_windows_process_tree(process)
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+        process.wait(timeout=2)
+
+
+def _terminate_windows_process_tree(process: subprocess.Popen[str]) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        process.terminate()
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
@@ -624,6 +748,12 @@ def _terminate_winpty_process(process: Any) -> None:
 
 def _tail(value: str, limit: int = 4000) -> str:
     return value[-limit:]
+
+
+def _preview(value: str, limit: int = RESPONSE_PREVIEW_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + f"\n...[truncated {len(value) - limit} chars]"
 
 
 def clean_console_output(value: str) -> str:
@@ -678,6 +808,23 @@ def _build_agy_command(
         native_session_mode = "new"
     command.extend([capabilities.print_flag or "-p", prompt])
     return command, native_session_mode
+
+
+def _redact_prompt_argument(command: list[str], print_flag: str | None) -> list[str]:
+    safe: list[str] = []
+    redact_next = False
+    prompt_flags = {"-p", "--print", "--prompt"}
+    if print_flag:
+        prompt_flags.add(print_flag)
+    for item in command:
+        if redact_next:
+            safe.append("[PROMPT_REDACTED]")
+            redact_next = False
+            continue
+        safe.append(item)
+        if item in prompt_flags:
+            redact_next = True
+    return safe
 
 
 def _response_envelope(raw_stdout: str, metadata: dict[str, Any]) -> str:

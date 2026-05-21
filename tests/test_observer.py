@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+from pathlib import Path
 
 from gemness.config import GemnessConfig
 from gemness.observer import ObserverHub
@@ -128,12 +129,54 @@ def test_dashboard_refresh_marks_dead_started_process_as_error(tmp_path, monkeyp
 def test_dashboard_refresh_marks_unupdated_open_session_as_error(tmp_path, monkeypatch) -> None:
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
     session = hub.create_session("ask_antigravity", "fake-model")
+    hub.set_status(session.session_id, "sending")
     monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 30.0)
 
     listed = hub.list_sessions()[0]
 
     assert listed["session_id"] == session.session_id
     assert listed["status"] == "error"
+
+
+def test_dashboard_refresh_keeps_queued_session_waiting_for_capacity(tmp_path, monkeypatch) -> None:
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
+    session = hub.create_session("ask_antigravity", "fake-model")
+    hub.append_event(session.session_id, "run.accepted", "system", {"run_id": session.session_id, "concurrency_limit": 1})
+    hub.attach_service(_ServiceWithManagedRun(session.session_id))
+    monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 3600.0)
+
+    listed = hub.list_sessions()[0]
+
+    assert listed["session_id"] == session.session_id
+    assert listed["status"] == "queued"
+
+
+def test_dashboard_refresh_marks_orphaned_queued_session_as_error(tmp_path, monkeypatch) -> None:
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
+    session = hub.create_session("ask_antigravity", "fake-model")
+    hub.append_event(session.session_id, "run.accepted", "system", {"run_id": session.session_id, "concurrency_limit": 1})
+    monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 3600.0)
+
+    listed = hub.list_sessions()[0]
+    events = hub.get_events(session.session_id, raw=True)
+    error_event = next(event for event in events if event["type"] == "session.error")
+
+    assert listed["session_id"] == session.session_id
+    assert listed["status"] == "error"
+    assert error_event["payload"]["reason"] == "stale_observer_session"
+
+
+class _ServiceWithManagedRun:
+    def __init__(self, run_id: str) -> None:
+        self.run_manager = _ManagedRunSet({run_id})
+
+
+class _ManagedRunSet:
+    def __init__(self, run_ids: set[str]) -> None:
+        self.run_ids = run_ids
+
+    def is_managed(self, run_id: str) -> bool:
+        return run_id in self.run_ids
 
 
 def test_rename_conversation_updates_root_title_and_persists(tmp_path) -> None:
@@ -150,6 +193,8 @@ def test_rename_conversation_updates_root_title_and_persists(tmp_path) -> None:
 def test_delete_conversation_removes_terminal_runs_and_transcript_files(tmp_path) -> None:
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
     session = hub.create_session("ask_antigravity", "fake-model", title="삭제할 대화")
+    artifact = hub.write_text_artifact(session.session_id, "stdout.txt", "raw output")
+    extensionless_artifact = hub.write_text_artifact(session.session_id, "raw-output", "raw output")
     hub.set_status(session.session_id, "completed", "session.completed", {"result": {"status": "completed", "text": "done"}})
 
     result = hub.delete_conversation(session.conversation_id)
@@ -159,6 +204,8 @@ def test_delete_conversation_removes_terminal_runs_and_transcript_files(tmp_path
     assert session.session_id not in [item["session_id"] for item in restored.list_sessions()]
     assert session.conversation_id not in [item["conversation_id"] for item in restored.list_conversations()]
     assert not (tmp_path / f"{session.session_id}.jsonl").exists()
+    assert not Path(artifact["path"]).exists()
+    assert not Path(extensionless_artifact["path"]).exists()
 
 
 def test_follow_up_prompt_uses_summary_not_prior_turn_payloads(tmp_path) -> None:

@@ -322,6 +322,32 @@ INDEX_HTML = r"""<!doctype html>
     .badge.valid, .badge.completed { color: var(--good); }
     .badge.invalid, .badge.error, .badge.cancelled { color: var(--bad); }
     .badge.repairing, .badge.running, .badge.sending { color: var(--warn); }
+    .session-heading { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: var(--muted);
+      box-shadow: 0 0 0 1px color-mix(in srgb, currentColor, transparent 72%);
+    }
+    .status-dot.live {
+      color: var(--good);
+      background: var(--good);
+      animation: statusPulse 1.15s ease-in-out infinite;
+    }
+    .status-dot.completed, .status-dot.valid { color: var(--good); background: var(--good); }
+    .status-dot.stale, .status-dot.starting, .status-dot.running, .status-dot.sending, .status-dot.repairing, .status-dot.queued, .status-dot.loading {
+      color: var(--warn);
+      background: var(--warn);
+    }
+    .status-dot.stale { animation: statusPulse 1.8s ease-in-out infinite; }
+    .status-dot.error, .status-dot.invalid, .status-dot.timeout { color: var(--bad); background: var(--bad); }
+    .status-dot.cancelled { color: var(--muted); background: var(--muted); }
+    @keyframes statusPulse {
+      0%, 100% { opacity: 0.45; transform: scale(0.88); box-shadow: 0 0 0 1px color-mix(in srgb, currentColor, transparent 70%); }
+      50% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 6px color-mix(in srgb, currentColor, transparent 86%); }
+    }
     .summary-bar {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -334,6 +360,28 @@ INDEX_HTML = r"""<!doctype html>
     .summary-grid { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
     .summary-item { min-width: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .summary-item strong { color: var(--text); font-weight: 600; }
+    .runtime-signal {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      min-width: 0;
+    }
+    .runtime-copy { display: grid; gap: 4px; min-width: 0; }
+    .runtime-title { font-weight: 700; font-size: 13px; }
+    .runtime-details { display: flex; flex-wrap: wrap; gap: 6px; }
+    .runtime-chip {
+      color: var(--muted);
+      font-size: 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel);
+      overflow-wrap: anywhere;
+    }
     .transcript-shell {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -417,6 +465,7 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12px;
     }
     .turn-body a { color: var(--accent); }
+    .loading-message { color: var(--muted); }
     .turn-meta {
       display: flex;
       flex-wrap: wrap;
@@ -476,6 +525,7 @@ INDEX_HTML = r"""<!doctype html>
           <button id="copy">기록 복사</button>
           <button id="export">JSON 내보내기</button>
         </div>
+        <div id="runtimeSignal"></div>
         <div id="summaryGrid" class="summary-grid"></div>
       </div>
       <div id="review" class="findings"></div>
@@ -500,6 +550,8 @@ INDEX_HTML = r"""<!doctype html>
     let source = null;
     let pollTimer = null;
     let refreshInFlight = null;
+    let transcriptRequestSeq = 0;
+    let loadingSessionId = "";
     if (explicitSessionPath) canonicalizeDashboardUrl();
 
     const statusLabels = {
@@ -508,6 +560,7 @@ INDEX_HTML = r"""<!doctype html>
       sending: "전송 중",
       running: "실행 중",
       repairing: "복구 중",
+      loading: "불러오는 중",
       valid: "유효함",
       invalid: "유효하지 않음",
       error: "오류",
@@ -610,10 +663,10 @@ INDEX_HTML = r"""<!doctype html>
     function refreshDashboard(options = {}) {
       if (options.automatic && hasActiveTextSelection()) return Promise.resolve();
       if (refreshInFlight) return refreshInFlight;
-      refreshInFlight = loadSessions().finally(() => { refreshInFlight = null; });
+      refreshInFlight = loadSessions(options).finally(() => { refreshInFlight = null; });
       return refreshInFlight;
     }
-    async function loadSessions() {
+    async function loadSessions(options = {}) {
       const data = await getJson("/api/sessions");
       sessions = data.sessions || [];
       if (liveMode) {
@@ -636,8 +689,12 @@ INDEX_HTML = r"""<!doctype html>
         currentSessionId = preferred?.session_id || "";
       }
       renderSessions();
-      if (currentSessionId) await loadTranscript();
-      else renderTranscript();
+      if (currentSessionId) await loadTranscript(currentSessionId, { showLoading: !options.automatic });
+      else {
+        transcript = null;
+        loadingSessionId = "";
+        renderTranscript();
+      }
     }
     function preferredLiveSession(sessionItems) {
       return (sessionItems || []).find((session) => !isTerminalStatus(session.status)) || sessionItems?.[0] || null;
@@ -645,11 +702,63 @@ INDEX_HTML = r"""<!doctype html>
     function shouldHonorRequestedSession(requested, preferred) {
       return !!requested && (!preferred || isTerminalStatus(preferred.status));
     }
-    async function loadTranscript() {
+    async function loadTranscript(targetSessionId = currentSessionId, options = {}) {
+      const targetId = targetSessionId || "";
+      if (!targetId) {
+        transcript = null;
+        loadingSessionId = "";
+        renderTranscript();
+        return false;
+      }
+      const requestSeq = ++transcriptRequestSeq;
       const raw = qs("raw").checked ? "1" : "0";
-      const baseTranscript = await getJson(`/api/sessions/${currentSessionId}?raw=${raw}`);
-      transcript = await loadConversationBundle(baseTranscript, raw);
-      renderTranscript();
+      if (options.showLoading !== false) {
+        loadingSessionId = targetId;
+        renderLoadingTranscript(targetId);
+      }
+      try {
+        const baseTranscript = await getJson(`/api/sessions/${targetId}?raw=${raw}`);
+        const nextTranscript = await loadConversationBundle(baseTranscript, raw);
+        if (!isCurrentTranscriptRequest(requestSeq, targetId)) return false;
+        transcript = nextTranscript;
+        loadingSessionId = "";
+        renderTranscript();
+        return true;
+      } catch (error) {
+        if (isCurrentTranscriptRequest(requestSeq, targetId)) {
+          loadingSessionId = "";
+          renderTranscriptError(targetId, error);
+        }
+        return false;
+      }
+    }
+    function isCurrentTranscriptRequest(requestSeq, targetSessionId) {
+      return requestSeq === transcriptRequestSeq && targetSessionId === currentSessionId;
+    }
+    function selectedSessionById(sessionId) {
+      return (sessions || []).find((session) => session.session_id === sessionId)
+        || (transcript?.related_sessions || []).find((session) => session?.session_id === sessionId)
+        || (transcript?.session?.session_id === sessionId ? transcript.session : null)
+        || null;
+    }
+    function renderLoadingTranscript(sessionId) {
+      const selected = selectedSessionById(sessionId) || {};
+      const session = { ...selected, session_id: sessionId, status: selected.status || "loading" };
+      qs("title").textContent = `${sessionTitle(session)} · ${statusLabel("loading")}`;
+      renderReview([]);
+      renderSessionSummary(session, []);
+      setInnerHtmlIfChanged("transcriptFlow", `<p class="prose loading-message">대화 기록을 불러오는 중입니다.</p>`);
+      setInnerHtmlIfChanged("debugEvents", "");
+    }
+    function renderTranscriptError(sessionId, error) {
+      const selected = selectedSessionById(sessionId) || {};
+      const session = { ...selected, session_id: sessionId, status: "error" };
+      const message = error?.message || "알 수 없는 오류";
+      qs("title").textContent = `${sessionTitle(session)} · 불러오기 실패`;
+      renderReview([]);
+      renderSessionSummary(session, []);
+      setInnerHtmlIfChanged("transcriptFlow", `<p class="prose error">대화 기록을 불러오지 못했습니다.\n${escapeHtml(message)}</p>`);
+      setInnerHtmlIfChanged("debugEvents", "");
     }
     async function loadConversationBundle(baseTranscript, raw) {
       const activeSession = baseTranscript.session || {};
@@ -692,22 +801,33 @@ INDEX_HTML = r"""<!doctype html>
         renderSessionGroup("Live", liveSessions, "실행 중인 세션이 없습니다."),
         renderSessionGroup("History", historySessions, "이전 세션이 없습니다.")
       ].join("");
-      if (!setInnerHtmlIfChanged("sessionList", html)) return;
-      document.querySelectorAll("[data-session]").forEach((button) => {
-        button.onclick = async () => {
-          liveMode = false;
-          currentSessionId = button.dataset.session;
-          canonicalizeDashboardUrl();
-          renderSessions();
-          await loadTranscript();
-        };
-      });
-      document.querySelectorAll("[data-rename-kind]").forEach((button) => {
-        button.onclick = () => renameSessionListItem(button);
-      });
-      document.querySelectorAll("[data-delete-kind]").forEach((button) => {
-        button.onclick = () => deleteSessionListItem(button);
-      });
+      setInnerHtmlIfChanged("sessionList", html);
+    }
+    function bindSessionListEvents() {
+      qs("sessionList").onclick = async (event) => {
+        const target = event.target?.closest ? event.target : event.target?.parentElement;
+        if (!target) return;
+        const renameButton = target.closest?.("[data-rename-kind]");
+        if (renameButton) {
+          await renameSessionListItem(renameButton);
+          return;
+        }
+        const deleteButton = target.closest?.("[data-delete-kind]");
+        if (deleteButton) {
+          await deleteSessionListItem(deleteButton);
+          return;
+        }
+        const sessionButton = target.closest?.("[data-session]");
+        if (sessionButton) await selectSession(sessionButton.dataset.session);
+      };
+    }
+    async function selectSession(sessionId) {
+      if (!sessionId) return false;
+      liveMode = false;
+      currentSessionId = sessionId;
+      canonicalizeDashboardUrl();
+      renderSessions();
+      return await loadTranscript(sessionId);
     }
     function groupSessionsByConversation(sessionItems) {
       const groups = new Map();
@@ -763,10 +883,11 @@ INDEX_HTML = r"""<!doctype html>
       const title = sessionTitle(s);
       const deleteDisabled = isTerminalStatus(s.status) ? "" : "disabled";
       const deleteTitle = isTerminalStatus(s.status) ? "기록 제거" : "실행 중인 항목은 제거할 수 없습니다.";
+      const telemetry = runTelemetry(s, []);
       return `
         <article class="session ${s._active || s.session_id === currentSessionId ? "active" : ""}">
           <button class="session-main" data-session="${escapeHtml(s.session_id)}">
-            <span><span class="session-title">${escapeHtml(title)}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span>
+            <span class="session-heading">${statusDotHtml(telemetry)}<span><span class="session-title">${escapeHtml(title)}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span></span>
             <span class="meta">${escapeHtml(toolMeta)}</span>
             <span class="meta">${escapeHtml(s.model || "")}</span>
             <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
@@ -823,7 +944,8 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderSessionSummary(session, events) {
       const cwd = findCwd(events);
-      const conversation = transcript?.conversation || {};
+      const conversation = session?.session_id === transcript?.session?.session_id ? transcript?.conversation || {} : {};
+      setInnerHtmlIfChanged("runtimeSignal", renderRuntimeSignal(session, events));
       const html = [
         ["제목", sessionTitle(session)],
         ["도구", toolLabel(session.tool_name)],
@@ -838,6 +960,20 @@ INDEX_HTML = r"""<!doctype html>
         ["raw 보기", qs("raw").checked ? "켜짐" : "꺼짐"]
       ].map(([label, value]) => `<span class="summary-item"><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</span>`).join("");
       setInnerHtmlIfChanged("summaryGrid", html);
+    }
+    function renderRuntimeSignal(session, events) {
+      if (!session?.session_id) return "";
+      const telemetry = runTelemetry(session, events);
+      const details = telemetry.details.map((item) => `<span class="runtime-chip">${escapeHtml(item)}</span>`).join("");
+      return `
+        <div class="runtime-signal ${escapeHtml(telemetry.state)}">
+          ${statusDotHtml(telemetry)}
+          <div class="runtime-copy">
+            <div class="runtime-title">${escapeHtml(telemetry.label)}</div>
+            <div class="runtime-details">${details}</div>
+          </div>
+        </div>
+      `;
     }
     function renderConversationTurn(turn) {
       const meta = Object.entries(turn.meta || {})
@@ -1028,6 +1164,8 @@ INDEX_HTML = r"""<!doctype html>
     function describeEventAsConversationTurn(event, index = 0, allEvents = []) {
       const payload = event.payload || {};
       switch (event.type) {
+        case "antigravity.heartbeat":
+          return null;
         case "session.created":
           return {
             speaker: "observer",
@@ -1070,7 +1208,7 @@ INDEX_HTML = r"""<!doctype html>
             direction: "agents_to_antigravity",
             title: "Agents -> Antigravity",
             timestamp: event.ts,
-            body: payload.prompt || "프롬프트가 Antigravity CLI로 전송되었습니다.",
+            body: payload.prompt || payload.prompt_preview || "프롬프트가 Antigravity CLI로 전송되었습니다.",
             meta: { 단계: "Antigravity에 전송됨" },
             rawEvent: event
           };
@@ -1086,14 +1224,15 @@ INDEX_HTML = r"""<!doctype html>
           };
         case "antigravity.response": {
           const parsed = parseAntigravityEnvelope(payload.response || "");
-          const body = parsed.response ?? payload.response ?? "";
+          const body = parsed.response ?? payload.response_preview ?? payload.response ?? "";
+          const metadata = parsed.metadata ?? payload.metadata;
           return {
             speaker: "antigravity",
             direction: "antigravity_to_agents",
             title: parsed.error ? "Antigravity -> Agents · 오류 포함" : "Antigravity -> Agents",
             timestamp: event.ts,
             body: body || "Antigravity가 빈 응답을 반환했습니다.",
-            meta: { stats: parsed.stats, metadata: parsed.metadata, error: parsed.error, streaming: parsed.metadata?.streaming ?? payload.streaming, 형식: parsed.envelope ? "JSON envelope" : "원문 응답" },
+            meta: { stats: parsed.stats, metadata, error: parsed.error, streaming: metadata?.streaming ?? payload.streaming, artifact: payload.stdout_artifact, 형식: parsed.envelope ? "JSON envelope" : payload.response_preview ? "stdout preview" : "원문 응답" },
             severity: parsed.error ? "error" : "",
             rawEvent: event
           };
@@ -1114,9 +1253,9 @@ INDEX_HTML = r"""<!doctype html>
         case "repair.started":
           return turn(event, "observer", "system", "Observer", `응답 복구를 1회 시도했습니다.\n${repairReason(payload)}`, {}, "warn");
         case "repair.prompt_sent":
-          return turn(event, "agents", "agents_to_antigravity", "Agents -> Antigravity", payload.prompt || "구조 복구용 프롬프트를 보냈습니다.", { 단계: "응답 복구" });
+          return turn(event, "agents", "agents_to_antigravity", "Agents -> Antigravity", payload.prompt || payload.prompt_preview || "구조 복구용 프롬프트를 보냈습니다.", { 단계: "응답 복구", chars: payload.prompt_chars });
         case "repair.response":
-          return turn(event, "antigravity", "antigravity_to_agents", "Antigravity -> Agents", formatReadable(payload.response || ""), { 단계: "복구 응답" });
+          return turn(event, "antigravity", "antigravity_to_agents", "Antigravity -> Agents", formatReadable(payload.response || payload.response_preview || ""), { 단계: "복구 응답", chars: payload.response_chars });
         case "repair.validation_passed":
           return turn(event, "observer", "system", "Observer", "복구된 JSON이 schema 검증을 통과했습니다.", { 결과: "복구 성공" });
         case "repair.validation_failed":
@@ -1141,15 +1280,115 @@ INDEX_HTML = r"""<!doctype html>
       const prompt = event.payload?.prompt;
       if (!prompt) return false;
       return allEvents.slice(index + 1).some((candidate) =>
-        candidate.type === "prompt.sent" && candidate.payload?.prompt === prompt
+        candidate.type === "prompt.sent" && (
+          candidate.payload?.prompt === prompt ||
+          (candidate.payload?.prompt_ref === "prompt.rendered" && eventsShareRun(event, candidate))
+        )
       );
+    }
+    function eventsShareRun(left, right) {
+      const leftRun = left.session_id || left.payload?.run_id || left.payload?.session_id;
+      const rightRun = right.session_id || right.payload?.run_id || right.payload?.session_id;
+      return Boolean(leftRun && rightRun && leftRun === rightRun);
     }
     function turn(event, speaker, direction, title, body, meta = {}, severity = "") {
       return { speaker, direction, title, timestamp: event.ts, body, meta, severity, rawEvent: event };
     }
+    function runTelemetry(session, events = []) {
+      const status = session?.status || "unknown";
+      const relevantEvents = (events || []).filter((event) => eventMatchesSession(event, session));
+      const heartbeat = latestEvent(relevantEvents, "antigravity.heartbeat");
+      const exited = latestEvent(relevantEvents, "antigravity.exited");
+      const terminalEvent = latestTerminalEvent(relevantEvents);
+      const terminal = isTerminalStatus(status);
+      const heartbeatAge = heartbeat ? ageMs(heartbeat.ts) : null;
+      const terminalReference = terminalEvent?.ts || exited?.ts || session?.completed_at || "";
+      const heartbeatToTerminalMs = terminal && heartbeat ? durationBetween(heartbeat.ts, terminalReference) : null;
+      let state = status;
+      let label = statusLabel(status);
+      if (terminal) {
+        state = ["completed", "valid"].includes(status) ? "completed" : ["error", "invalid"].includes(status) ? "error" : status;
+      } else if (heartbeat) {
+        state = heartbeatAge !== null && heartbeatAge > 15000 ? "stale" : "live";
+        label = state === "stale" ? "Heartbeat 지연" : "Live";
+      } else if (["running", "sending", "repairing", "queued"].includes(status)) {
+        state = status === "running" ? "starting" : status;
+      }
+      const details = telemetryDetails({ session, status, state, heartbeat, heartbeatAge, heartbeatToTerminalMs, exited });
+      return {
+        state,
+        label,
+        details,
+        heartbeat,
+        heartbeatAge,
+        tooltip: [label, ...details].filter(Boolean).join(" · ")
+      };
+    }
+    function telemetryDetails({ session, status, state, heartbeat, heartbeatAge, heartbeatToTerminalMs, exited }) {
+      const payload = heartbeat?.payload || {};
+      const details = [];
+      if (heartbeat) {
+        if (isTerminalStatus(status)) {
+          details.push(`마지막 heartbeat ${formatTime(heartbeat.ts)}`);
+          if (heartbeatToTerminalMs !== null) details.push(`종료 ${formatDuration(heartbeatToTerminalMs)} 전`);
+        } else {
+          details.push(`최근 heartbeat ${formatAge(heartbeatAge)} 전`);
+        }
+        if (payload.elapsed_ms !== undefined) details.push(`경과 ${formatDuration(payload.elapsed_ms)}`);
+        if (payload.timeout_remaining_ms !== undefined) details.push(`timeout ${formatDuration(payload.timeout_remaining_ms)} 남음`);
+        if (payload.pid !== undefined && payload.pid !== null) details.push(`pid ${payload.pid}`);
+        if (payload.capture_mode) details.push(`capture ${payload.capture_mode}`);
+        if (payload.stdout_bytes !== undefined) details.push(`stdout ${payload.stdout_bytes}B`);
+        if (payload.stderr_bytes !== undefined) details.push(`stderr ${payload.stderr_bytes}B`);
+        if (payload.last_activity_ms_ago !== undefined) details.push(`마지막 출력 ${formatDuration(payload.last_activity_ms_ago)} 전`);
+      } else if (!isTerminalStatus(status)) {
+        details.push(state === "queued" ? "실행 대기 중" : state === "loading" ? "대화 기록 로딩 중" : "heartbeat 대기 중");
+      }
+      if (isTerminalStatus(status)) {
+        if (session?.duration_ms !== undefined && session.duration_ms !== null) details.push(`총 ${formatDuration(session.duration_ms)}`);
+        if (exited?.payload?.duration_ms !== undefined) details.push(`프로세스 ${formatDuration(exited.payload.duration_ms)}`);
+        if (exited?.payload?.exit_code !== undefined) details.push(`exit ${exited.payload.exit_code}`);
+      }
+      return details.length ? details : [statusLabel(status)];
+    }
+    function statusDotHtml(telemetry) {
+      const state = telemetry?.state || "unknown";
+      const title = telemetry?.tooltip || telemetry?.label || statusLabel(state);
+      return `<span class="status-dot ${escapeHtml(state)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></span>`;
+    }
+    function latestEvent(events, type) {
+      return [...(events || [])].reverse().find((event) => event.type === type) || null;
+    }
+    function latestTerminalEvent(events) {
+      return [...(events || [])].reverse().find((event) =>
+        ["session.completed", "session.cancelled", "session.error"].includes(event.type)
+      ) || null;
+    }
+    function eventMatchesSession(event, session) {
+      const sessionId = session?.session_id || session?.run_id;
+      if (!sessionId) return true;
+      const payload = event?.payload || {};
+      return event?.session_id === sessionId || payload.run_id === sessionId || payload.session_id === sessionId;
+    }
+    function ageMs(ts) {
+      const time = new Date(ts).getTime();
+      if (Number.isNaN(time)) return null;
+      return Math.max(0, Date.now() - time);
+    }
+    function durationBetween(startTs, endTs) {
+      const start = new Date(startTs).getTime();
+      const end = new Date(endTs).getTime();
+      if (Number.isNaN(start) || Number.isNaN(end)) return null;
+      return Math.max(0, end - start);
+    }
+    function formatAge(ms) {
+      if (ms === null || ms === undefined) return "알 수 없음";
+      return formatDuration(ms);
+    }
     function resultSummaryText(result) {
       if (result.text) return result.text;
       if (result.data) return formatReadable(result.data);
+      if (result.response_preview) return formatReadable(result.response_preview);
       if (result.raw_response) return formatReadable(result.raw_response);
       if (result.message) return result.message;
       return "세션이 완료되었습니다.";
@@ -1272,11 +1511,11 @@ INDEX_HTML = r"""<!doctype html>
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
       return JSON.stringify(value);
     }
-    qs("refresh").onclick = loadSessions;
+    qs("refresh").onclick = () => loadSessions();
     qs("raw").onchange = async () => {
       if (qs("raw").checked && !confirm("원본 payload에는 민감한 내용이 포함될 수 있습니다. 이 로컬 토큰으로 원본을 보시겠습니까?")) qs("raw").checked = false;
       openEvents();
-      if (currentSessionId) await loadTranscript();
+      if (currentSessionId) await loadTranscript(currentSessionId);
     };
     qs("copy").onclick = async () => {
       if (!transcript) return;
@@ -1313,12 +1552,17 @@ INDEX_HTML = r"""<!doctype html>
     window.describeEventAsConversationTurn = describeEventAsConversationTurn;
     window.preferredLiveSession = preferredLiveSession;
     window.groupSessionsByConversation = groupSessionsByConversation;
+    window.runTelemetry = runTelemetry;
+    window.renderRuntimeSignal = renderRuntimeSignal;
+    window.loadTranscript = loadTranscript;
+    window.selectSession = selectSession;
     window.parseAntigravityEnvelope = parseAntigravityEnvelope;
     window.renderMarkdown = renderMarkdown;
     window.renderSessionGroup = renderSessionGroup;
     window.sessionTitle = sessionTitle;
     window.hasActiveTextSelection = hasActiveTextSelection;
     window.rawEventKey = rawEventKey;
+    bindSessionListEvents();
     loadSessions().then(openEvents).catch(console.error);
   </script>
 </body>
