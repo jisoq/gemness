@@ -142,12 +142,41 @@ def test_dashboard_refresh_keeps_queued_session_waiting_for_capacity(tmp_path, m
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
     session = hub.create_session("ask_antigravity", "fake-model")
     hub.append_event(session.session_id, "run.accepted", "system", {"run_id": session.session_id, "concurrency_limit": 1})
+    hub.attach_service(_ServiceWithManagedRun(session.session_id))
     monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 3600.0)
 
     listed = hub.list_sessions()[0]
 
     assert listed["session_id"] == session.session_id
     assert listed["status"] == "queued"
+
+
+def test_dashboard_refresh_marks_orphaned_queued_session_as_error(tmp_path, monkeypatch) -> None:
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
+    session = hub.create_session("ask_antigravity", "fake-model")
+    hub.append_event(session.session_id, "run.accepted", "system", {"run_id": session.session_id, "concurrency_limit": 1})
+    monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 3600.0)
+
+    listed = hub.list_sessions()[0]
+    events = hub.get_events(session.session_id, raw=True)
+    error_event = next(event for event in events if event["type"] == "session.error")
+
+    assert listed["session_id"] == session.session_id
+    assert listed["status"] == "error"
+    assert error_event["payload"]["reason"] == "stale_observer_session"
+
+
+class _ServiceWithManagedRun:
+    def __init__(self, run_id: str) -> None:
+        self.run_manager = _ManagedRunSet({run_id})
+
+
+class _ManagedRunSet:
+    def __init__(self, run_ids: set[str]) -> None:
+        self.run_ids = run_ids
+
+    def is_managed(self, run_id: str) -> bool:
+        return run_id in self.run_ids
 
 
 def test_rename_conversation_updates_root_title_and_persists(tmp_path) -> None:

@@ -507,6 +507,48 @@ def test_idempotency_key_concurrent_start_creates_single_detached_run(tmp_path) 
         service.shutdown()
 
 
+def test_follow_up_idempotency_lock_does_not_block_unrelated_start(tmp_path) -> None:
+    service = make_service(tmp_path, ["first", "independent", "follow"])
+    conversation_lock = None
+    try:
+        first = service.ask_antigravity("first prompt")
+        conversation_lock = service._conversation_lock(first["conversation_id"])
+        conversation_lock.acquire()
+        follow_started = threading.Event()
+        follow_result: list[dict[str, Any]] = []
+        follow_errors: list[BaseException] = []
+
+        def start_follow_up() -> None:
+            try:
+                follow_started.set()
+                follow_result.append(service.start_follow_up_antigravity(first["session_id"], "blocked follow-up", idempotency_key="follow-key"))
+            except BaseException as exc:  # noqa: BLE001 - preserve thread failure for assertion.
+                follow_errors.append(exc)
+
+        follow_thread = threading.Thread(target=start_follow_up)
+        follow_thread.start()
+        assert follow_started.wait(timeout=1)
+        time.sleep(0.05)
+
+        started_at = time.monotonic()
+        independent = service.start_antigravity("independent prompt", idempotency_key="independent-key")
+        elapsed = time.monotonic() - started_at
+
+        conversation_lock.release()
+        follow_thread.join(timeout=2)
+        independent_done = service.await_antigravity_run(independent["run_id"], timeout_sec=2)
+        follow_done = service.await_antigravity_run(follow_result[0]["run_id"], timeout_sec=2)
+
+        assert elapsed < 0.5
+        assert follow_errors == []
+        assert independent_done["status"] == "completed"
+        assert follow_done["status"] == "completed"
+    finally:
+        if conversation_lock is not None and conversation_lock.locked():
+            conversation_lock.release()
+        service.shutdown()
+
+
 def test_get_antigravity_run_event_cursor_returns_only_later_events(tmp_path) -> None:
     release = threading.Event()
 

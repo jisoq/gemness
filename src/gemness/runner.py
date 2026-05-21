@@ -182,11 +182,14 @@ class _RunningAgyCommand:
     stderr_thread: threading.Thread | None
     poll_fn: Callable[[], int | None]
     terminate_fn: Callable[[], None]
+    terminate_requested: bool = False
 
     def poll(self) -> int | None:
         return self.poll_fn()
 
     def terminate(self) -> None:
+        if self.poll() is None:
+            self.terminate_requested = True
         self.terminate_fn()
 
     def join(self) -> None:
@@ -365,7 +368,7 @@ class AgyCliRunner:
         raw_stdout = running.stdout()
         stderr = running.stderr()
         exit_code = running.poll()
-        if not cancelled and cancel_event is not None and cancel_event.is_set() and not (exit_code == 0 and raw_stdout.strip()):
+        if not cancelled and not timed_out and cancel_event is not None and cancel_event.is_set() and running.terminate_requested:
             cancelled = True
         auth_status = detect_auth_status(raw_stdout, stderr, exit_code)
         if exit_code == 0 and not raw_stdout.strip():

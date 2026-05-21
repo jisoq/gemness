@@ -100,6 +100,10 @@ class RunManager:
         with self._lock:
             return self._runs.get(run_id)
 
+    def is_managed(self, run_id: str) -> bool:
+        with self._lock:
+            return run_id in self._runs
+
     def cancel(self, run_id: str) -> dict[str, Any]:
         managed = self.get(run_id)
         if managed is None:

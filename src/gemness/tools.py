@@ -66,7 +66,8 @@ class GemnessService:
         self.hub.attach_service(self)
         self.runner = runner or AgyCliRunner(self.config)
         self.run_manager = RunManager(self.config, self.hub)
-        self._idempotency_start_lock = threading.RLock()
+        self._idempotency_locks: dict[str, threading.Lock] = {}
+        self._idempotency_locks_guard = threading.RLock()
         self._conversation_locks: dict[str, threading.Lock] = {}
         self._conversation_locks_guard = threading.RLock()
         if self.config.observer_enabled and self.config.observer_start_on_init:
@@ -182,7 +183,7 @@ class GemnessService:
         return self._await_blocking(str(started["run_id"]))
 
     def start_antigravity(self, prompt: str, cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        with self._idempotency_start_lock:
+        with self._idempotency_scope(idempotency_key):
             existing = self._existing_idempotent_run(idempotency_key)
             if existing is not None:
                 return existing
@@ -208,7 +209,7 @@ class GemnessService:
             return self._start_payload(session.session_id, idempotency_key=idempotency_key)
 
     def start_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        with self._idempotency_start_lock:
+        with self._idempotency_scope(idempotency_key):
             existing = self._existing_idempotent_run(idempotency_key)
             if existing is not None:
                 return existing
@@ -238,7 +239,7 @@ class GemnessService:
             return self._start_payload(session.session_id, idempotency_key=idempotency_key)
 
     def start_review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        with self._idempotency_start_lock:
+        with self._idempotency_scope(idempotency_key):
             existing = self._existing_idempotent_run(idempotency_key)
             if existing is not None:
                 return existing
@@ -272,7 +273,7 @@ class GemnessService:
             return self._start_payload(session.session_id, idempotency_key=idempotency_key)
 
     def start_follow_up_antigravity(self, parent_session_id: str, instruction: str, idempotency_key: str | None = None) -> dict[str, Any]:
-        with self._idempotency_start_lock:
+        with self._idempotency_scope(idempotency_key):
             existing = self._existing_idempotent_run(idempotency_key)
             if existing is not None:
                 return existing
@@ -349,6 +350,17 @@ class GemnessService:
         if existing_run_id is None:
             return None
         return self._run_status_payload(existing_run_id) | {"idempotent": True}
+
+    def _idempotency_scope(self, idempotency_key: str | None) -> Any:
+        key = _clean_idempotency_key(idempotency_key)
+        if key is None:
+            return _null_lock()
+        with self._idempotency_locks_guard:
+            lock = self._idempotency_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._idempotency_locks[key] = lock
+            return lock
 
     def _start_payload(self, run_id: str, *, idempotency_key: str | None = None) -> dict[str, Any]:
         session = self.hub.get_session(run_id, raw=True)
@@ -1071,6 +1083,13 @@ def _event_result(events: list[dict[str, Any]]) -> dict[str, Any] | None:
         if event_type in {"session.error", "session.cancelled"}:
             return payload
     return None
+
+
+def _clean_idempotency_key(idempotency_key: str | None) -> str | None:
+    if idempotency_key is None:
+        return None
+    key = " ".join(str(idempotency_key).split())
+    return key or None
 
 
 def _is_writable_dir(path: Path) -> bool:

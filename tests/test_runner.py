@@ -401,6 +401,35 @@ def test_runner_preserves_completed_output_when_cancel_arrives_after_process_exi
     assert "cancelled" not in result.metadata
 
 
+def test_runner_preserves_error_when_cancel_arrives_after_process_exit(tmp_path) -> None:
+    command, _record_path = make_fake_agy(tmp_path, stdout="", stderr="bad", exit_code=2, sleep_sec=0)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(
+        GemnessConfig(
+            transcript_dir=tmp_path / "transcripts",
+            observer_enabled=False,
+            agy_command=command,
+            agy_timeout_sec=5,
+            agy_capture_mode="pipe",
+        )
+    )
+    cancel_event = threading.Event()
+
+    def mark_cancel_after_exit(running) -> None:  # noqa: ANN001
+        deadline = time.monotonic() + 2
+        while running.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancel_event.set()
+
+    result = runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path, cancel_event=cancel_event, process_callback=mark_cancel_after_exit)
+
+    assert result.status == "error"
+    assert result.exit_code == 2
+    assert result.stderr.strip() == "bad"
+    assert "cancelled" not in result.metadata
+
+
 def make_fake_agy(
     tmp_path: Path,
     *,

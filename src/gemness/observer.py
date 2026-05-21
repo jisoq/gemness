@@ -621,11 +621,11 @@ class ObserverHub:
             for session in self.sessions.values():
                 if session.status not in OPEN_SESSION_STATUSES:
                     continue
-                if session.status == "queued":
-                    continue
                 age = _age_seconds(session.updated_at, now)
                 pid = _last_started_pid(self.events.get(session.session_id, []))
                 reason = ""
+                if session.status == "queued" and _is_managed_run(self.service, session.session_id):
+                    continue
                 if pid is not None and age > STALE_PROCESS_GRACE_SEC and not _process_is_running(pid):
                     reason = f"process {pid} is no longer running"
                 elif age > self.config.agy_timeout_sec + STALE_PROCESS_GRACE_SEC:
@@ -1040,6 +1040,12 @@ def _observer_base_url(host: str, port: int) -> str:
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"http://{host}:{port}"
+
+
+def _is_managed_run(service: Any, session_id: str) -> bool:
+    run_manager = getattr(service, "run_manager", None)
+    is_managed = getattr(run_manager, "is_managed", None)
+    return bool(callable(is_managed) and is_managed(session_id))
 
 
 def _validated_title(title: str) -> str:
