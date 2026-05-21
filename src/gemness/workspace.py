@@ -103,7 +103,7 @@ def inspect_workspace_policy(config: GemnessConfig, requested_cwd: str | None = 
         allowed_by = None
         message = f"Invalid cwd: {candidate}"
 
-    if allowed_by is None and config.allow_untrusted_cwd_fallback and exists and is_dir:
+    if _can_use_untrusted_cwd_fallback(config, allowed_by, policy_mode, codex_decision.status, exists, is_dir):
         allowed_by = "untrusted_cwd_fallback"
         message = None
         diagnostics.append("GEMNESS_ALLOW_UNTRUSTED_CWD_FALLBACK is enabled; cwd is allowed without a workspace trust policy.")
@@ -149,11 +149,31 @@ def _candidate_cwd(config: GemnessConfig, requested_cwd: str | None) -> Path:
 
 
 def _automatic_allowed_by(candidate: Path, workspace_root: Path | None, codex_status: str) -> str | None:
+    if codex_status == UNTRUSTED:
+        return None
     if workspace_root is not None and _contains(workspace_root, candidate):
         return "workspace_root"
     if codex_status == "trusted":
         return "codex_trusted_project"
     return None
+
+
+def _can_use_untrusted_cwd_fallback(
+    config: GemnessConfig,
+    allowed_by: str | None,
+    policy_mode: str,
+    codex_status: str,
+    exists: bool,
+    is_dir: bool,
+) -> bool:
+    return (
+        allowed_by is None
+        and config.allow_untrusted_cwd_fallback
+        and policy_mode == POLICY_NO_POLICY
+        and codex_status != UNTRUSTED
+        and exists
+        and is_dir
+    )
 
 
 def _automatic_denial_message(

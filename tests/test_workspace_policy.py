@@ -164,6 +164,51 @@ def test_untrusted_cwd_fallback_requires_opt_in(tmp_path, monkeypatch) -> None:
     assert decision.policy_mode == POLICY_NO_POLICY
 
 
+def test_untrusted_cwd_fallback_does_not_bypass_explicit_allowed_roots(tmp_path, monkeypatch) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    _write_codex_projects(tmp_path / "codex", [], monkeypatch)
+
+    decision = inspect_workspace_policy(
+        GemnessConfig(observer_enabled=False, allowed_roots=(allowed,), allow_untrusted_cwd_fallback=True),
+        str(outside),
+    )
+
+    assert decision.allowed is False
+    assert decision.allowed_by is None
+    assert decision.policy_mode == POLICY_EXPLICIT_ALLOWED_ROOTS
+    assert "outside allowed roots" in str(decision.message)
+
+
+def test_untrusted_cwd_fallback_does_not_bypass_codex_untrusted_project(tmp_path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_codex_projects(tmp_path / "codex", [(project, "untrusted")], monkeypatch)
+
+    decision = inspect_workspace_policy(GemnessConfig(observer_enabled=False, allow_untrusted_cwd_fallback=True), str(project))
+
+    assert decision.allowed is False
+    assert decision.allowed_by is None
+    assert decision.codex_trust_for_cwd == "untrusted"
+    assert "trust_level=untrusted" in str(decision.message)
+
+
+def test_workspace_root_does_not_bypass_child_codex_untrusted_project(tmp_path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    child = workspace_root / "child"
+    child.mkdir(parents=True)
+    _write_codex_projects(tmp_path / "codex", [(child, "untrusted")], monkeypatch)
+
+    decision = inspect_workspace_policy(GemnessConfig(observer_enabled=False, workspace_root=workspace_root), str(child))
+
+    assert decision.allowed is False
+    assert decision.allowed_by is None
+    assert decision.codex_trust_for_cwd == "untrusted"
+    assert decision.matched_codex_project == child.resolve()
+
+
 def _write_codex_projects(codex_home: Path, projects: list[tuple[Path, str | None]], monkeypatch: pytest.MonkeyPatch) -> None:
     codex_home.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []

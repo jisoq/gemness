@@ -73,7 +73,8 @@
   <h2>트레이드오프</h2>
   <ul>
     <li><span class="tag">Safety</span>명시 <code>GEMNESS_ALLOWED_ROOTS</code>가 있으면 Codex trusted projects를 완전히 무시하는 strict mode를 택한다. 편의성은 줄지만, 사용자가 보안 경계를 명시한 경우 그 의도를 우선한다.</li>
-    <li><span class="tag">Compatibility</span>아무 정책 근거가 없는 arbitrary cwd 자동 허용은 기본적으로 막고, 필요 시 <code>GEMNESS_ALLOW_UNTRUSTED_CWD_FALLBACK=true</code> opt-in으로만 기존 동작을 허용하는 방향으로 구현한다.</li>
+    <li><span class="tag">Compatibility</span>아무 정책 근거가 없는 arbitrary cwd 자동 허용은 기본적으로 막고, 필요 시 <code>GEMNESS_ALLOW_UNTRUSTED_CWD_FALLBACK=true</code> opt-in으로만 기존 동작을 허용하는 방향으로 구현한다. PR 리뷰 이후 이 fallback은 <code>no_policy</code>일 때만 적용하고, explicit allowlist나 Codex <code>untrusted</code> deny는 우회하지 않도록 좁혔다.</li>
+    <li><span class="tag">Deny priority</span>Automatic mode에서도 closest Codex project가 <code>untrusted</code>이면 <code>workspace_root</code> 하위 여부보다 먼저 거부한다. 사용자가 의도적으로 차단한 nested worktree를 parent workspace root가 다시 열지 않게 하기 위한 선택이다.</li>
     <li><span class="tag">Follow-up</span><code>follow_up_antigravity</code>는 cwd 인자가 없지만 실제 agy 실행을 만들기 때문에 parent session의 <code>project_root</code>를 다시 policy 검증한다. parent root가 사라졌으면 기본 cwd policy로 fallback하되, 그 역시 신뢰 근거가 없으면 차단한다.</li>
   </ul>
 
