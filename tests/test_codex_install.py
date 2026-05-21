@@ -41,7 +41,7 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert server["env"]["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(server["env"]["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
     assert server["env"]["GEMNESS_AGY_TIMEOUT"] == "600"
-    assert server["env"]["GEMNESS_AGY_CAPTURE_MODE"] == "auto"
+    assert server["env"]["GEMNESS_AGY_CAPTURE_MODE"] == "winpty"
     assert server["env"]["GEMNESS_AGY_HEARTBEAT_INTERVAL"] == "5"
     assert server["env"]["GEMNESS_AGY_CONCURRENCY_LIMIT"] == "4"
     assert server["tools"]["start_antigravity"]["approval_mode"] == "prompt"
@@ -146,7 +146,7 @@ def test_build_mcp_env_omits_local_paths_by_default() -> None:
     assert env["GEMNESS_OBSERVER_START_ON_INIT"] == "true"
     assert Path(env["GEMNESS_TRANSCRIPT_DIR"]).is_absolute()
     assert env["GEMNESS_AGY_TIMEOUT"] == "600"
-    assert env["GEMNESS_AGY_CAPTURE_MODE"] == "auto"
+    assert env["GEMNESS_AGY_CAPTURE_MODE"] == "winpty"
     assert env["GEMNESS_AGY_HEARTBEAT_INTERVAL"] == "5"
     assert env["GEMNESS_AGY_CONCURRENCY_LIMIT"] == "4"
     assert "GEMNESS_AGY_COMMAND" not in env

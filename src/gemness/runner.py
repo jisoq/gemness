@@ -605,7 +605,7 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
     try:
         from winpty import PtyProcess
     except ImportError as exc:
-        raise RuntimeError("Windows console capture requires pywinpty. Install Gemness with Windows dependencies or set GEMNESS_AGY_CAPTURE_MODE=pipe.") from exc
+        raise RuntimeError("Windows Antigravity CLI capture requires pywinpty. Install Gemness with Windows dependencies.") from exc
 
     process = PtyProcess.spawn(
         command,
@@ -765,24 +765,9 @@ def clean_console_output(value: str) -> str:
 
 
 def _resolve_capture_mode(config: GemnessConfig) -> str:
-    mode = config.agy_capture_mode
-    if mode == CAPTURE_MODE_PIPE:
-        return CAPTURE_MODE_PIPE
-    if mode == CAPTURE_MODE_WINPTY:
-        return CAPTURE_MODE_WINPTY
-    if os.name == "nt" and _winpty_available():
+    if os.name == "nt":
         return CAPTURE_MODE_WINPTY
     return CAPTURE_MODE_PIPE
-
-
-def _winpty_available() -> bool:
-    if os.name != "nt":
-        return False
-    try:
-        import winpty  # noqa: F401
-    except ImportError:
-        return False
-    return True
 
 
 def _select_print_flag(help_text: str) -> str | None:

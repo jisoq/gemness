@@ -103,7 +103,7 @@ def build_budget(
     response_chars = len(response or "")
     result_chars = len(result or "")
     raw_stdout_bytes = len((raw_stdout or "").encode("utf-8", errors="replace"))
-    token_sources = _token_sources(envelope, stats, metadata, response)
+    token_sources = _token_sources(envelope, stats, metadata)
 
     prompt_tokens = _first_token_value(token_sources, _PROMPT_TOKEN_KEYS)
     response_tokens = _first_token_value(token_sources, _RESPONSE_TOKEN_KEYS)
@@ -237,15 +237,11 @@ def _token_sources(
     envelope: dict[str, Any] | None,
     stats: dict[str, Any] | None,
     metadata: dict[str, Any] | None,
-    response: str,
 ) -> list[Any]:
     sources: list[Any] = []
     if isinstance(envelope, dict):
         sources.extend([envelope.get("stats"), envelope.get("usage"), envelope.get("metadata")])
     sources.extend([stats, metadata])
-    nested = _parse_json_object(response)
-    if nested is not None:
-        sources.extend([nested.get("stats"), nested.get("usage"), nested.get("metadata")])
     return [source for source in sources if isinstance(source, dict)]
 
 
@@ -280,17 +276,6 @@ def _is_number(value: Any) -> bool:
 
 def _normalize_key(value: str) -> str:
     return value.strip().lower().replace("-", "_")
-
-
-def _parse_json_object(value: str) -> dict[str, Any] | None:
-    stripped = str(value or "").strip()
-    if not stripped.startswith("{"):
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _git(cwd: Path, *args: str) -> str:

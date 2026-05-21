@@ -40,6 +40,12 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
+            "oneOf": [
+                {"required": ["prompt"], "properties": {"mode": {"enum": ["ask"]}}},
+                {"required": ["mode", "prompt", "schema"], "properties": {"mode": {"const": "json"}}},
+                {"required": ["mode"], "properties": {"mode": {"const": "review_current_diff"}}},
+                {"required": ["mode", "parent_session_id", "prompt"], "properties": {"mode": {"const": "follow_up"}}},
+            ],
             "properties": {
                 "mode": {
                     "type": "string",

@@ -91,7 +91,7 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
         "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
         "GEMNESS_AGY_TIMEOUT": "600",
-        "GEMNESS_AGY_CAPTURE_MODE": "auto",
+        "GEMNESS_AGY_CAPTURE_MODE": "winpty",
         "GEMNESS_AGY_HEARTBEAT_INTERVAL": "5",
         "GEMNESS_AGY_CONCURRENCY_LIMIT": "4",
     }
@@ -132,7 +132,7 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
             "GEMNESS_AGY_TIMEOUT": "600",
-            "GEMNESS_AGY_CAPTURE_MODE": "auto",
+            "GEMNESS_AGY_CAPTURE_MODE": "winpty",
             "GEMNESS_AGY_HEARTBEAT_INTERVAL": "5",
             "GEMNESS_AGY_CONCURRENCY_LIMIT": "4",
         }

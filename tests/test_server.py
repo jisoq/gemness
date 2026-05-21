@@ -5,10 +5,12 @@ import json
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+from jsonschema import Draft7Validator
+
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
 from gemness.mcp_metadata import TOOL_NAMES
 from gemness.runner import AgyRunResult
-from gemness.server import _handle_message, _read_message, _write_message
+from gemness.server import TOOLS, _handle_message, _read_message, _write_message
 from gemness.tools import GemnessService
 
 
@@ -168,6 +170,21 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         assert legacy_status["result"]["structuredContent"]["status"] == "completed"
     finally:
         service.shutdown()
+
+
+def test_start_antigravity_schema_declares_mode_requirements() -> None:
+    schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == "start_antigravity")
+    validator = Draft7Validator(schema)
+
+    assert not validator.is_valid({})
+    assert not validator.is_valid({"mode": "ask"})
+    assert validator.is_valid({"prompt": "hello"})
+    assert validator.is_valid({"mode": "ask", "prompt": "hello"})
+    assert not validator.is_valid({"mode": "json", "prompt": "hello"})
+    assert validator.is_valid({"mode": "json", "prompt": "hello", "schema": {"type": "object"}})
+    assert validator.is_valid({"mode": "review_current_diff"})
+    assert not validator.is_valid({"mode": "follow_up", "prompt": "continue"})
+    assert validator.is_valid({"mode": "follow_up", "parent_session_id": "session-1", "prompt": "continue"})
 
 
 def test_start_antigravity_consolidated_modes_route_to_detached_runs(tmp_path) -> None:

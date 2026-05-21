@@ -317,6 +317,38 @@ def test_cli_envelope_token_stats_are_preferred_for_budget(tmp_path) -> None:
         service.shutdown()
 
 
+def test_model_json_usage_is_not_treated_as_cli_budget_stats(tmp_path) -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["answer", "usage"],
+        "properties": {
+            "answer": {"type": "string"},
+            "usage": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["input_tokens", "output_tokens"],
+                "properties": {
+                    "input_tokens": {"type": "integer"},
+                    "output_tokens": {"type": "integer"},
+                },
+            },
+        },
+    }
+    response = '{"answer":"yes","usage":{"input_tokens":999,"output_tokens":888}}'
+    service = make_service(tmp_path, [response])
+    try:
+        result = service.ask_antigravity_json("Return usage", schema)
+
+        assert result["status"] == "valid"
+        assert result["budget"]["estimate_method"] == "chars_div_4"
+        assert result["budget"]["prompt_est_tokens"] != 999
+        assert result["budget"]["response_est_tokens"] != 888
+        assert result["budget"]["response_est_tokens"] == (len(response) + 3) // 4
+    finally:
+        service.shutdown()
+
+
 def test_cli_envelope_error_returns_status_error(tmp_path) -> None:
     stdout = json.dumps({"response": "partial", "error": {"message": "auth failed"}, "metadata": {"streaming": False}})
     service = make_service(tmp_path, [AgyRunResult.completed(stdout)])
