@@ -85,6 +85,7 @@ class GemnessConfig:
     agy_heartbeat_interval_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_HEARTBEAT_INTERVAL", 5.0))
     agy_concurrency_limit: int = field(default_factory=lambda: _int_env("GEMNESS_AGY_CONCURRENCY_LIMIT", 4))
     agy_queue_limit: int = field(default_factory=lambda: _int_env("GEMNESS_AGY_QUEUE_LIMIT", 64))
+    enable_auto_dedupe: bool = field(default_factory=lambda: _bool_env("GEMNESS_ENABLE_AUTO_DEDUPE", False))
     workspace_root: Path | None = field(default_factory=lambda: _optional_path_env("GEMNESS_WORKSPACE_ROOT"))
     allowed_roots: tuple[Path, ...] = field(default_factory=lambda: _path_list_env("GEMNESS_ALLOWED_ROOTS"))
     allow_untrusted_cwd_fallback: bool = field(default_factory=lambda: _bool_env("GEMNESS_ALLOW_UNTRUSTED_CWD_FALLBACK", False))

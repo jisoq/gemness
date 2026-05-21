@@ -29,6 +29,7 @@ def test_config_defaults_use_antigravity_env(monkeypatch) -> None:
     monkeypatch.delenv("GEMNESS_AGY_CAPTURE_MODE", raising=False)
     monkeypatch.delenv("GEMNESS_OBSERVER_PORT", raising=False)
     monkeypatch.delenv("GEMNESS_OBSERVER_START_ON_INIT", raising=False)
+    monkeypatch.delenv("GEMNESS_ENABLE_AUTO_DEDUPE", raising=False)
 
     config = GemnessConfig()
 
@@ -38,18 +39,21 @@ def test_config_defaults_use_antigravity_env(monkeypatch) -> None:
     assert config.agy_capture_mode == "auto"
     assert config.observer_port == 56755
     assert config.observer_start_on_init is True
+    assert config.enable_auto_dedupe is False
 
 
 def test_config_reads_agy_overrides(monkeypatch) -> None:
     monkeypatch.setenv("GEMNESS_AGY_COMMAND", "custom-agy")
     monkeypatch.setenv("GEMNESS_AGY_TIMEOUT", "12")
     monkeypatch.setenv("GEMNESS_AGY_CAPTURE_MODE", "pipe")
+    monkeypatch.setenv("GEMNESS_ENABLE_AUTO_DEDUPE", "true")
 
     config = GemnessConfig()
 
     assert config.agy_command == "custom-agy"
     assert config.agy_timeout_sec == 12
     assert config.agy_capture_mode == "pipe"
+    assert config.enable_auto_dedupe is True
 
 
 def test_gemness_env_preserves_existing_values() -> None:
@@ -186,6 +190,30 @@ def test_runner_synthesizes_non_streaming_envelope_and_metadata(tmp_path) -> Non
     assert "stdout" not in response_event["payload"]
     artifact_path = Path(response_event["payload"]["stdout_artifact"]["path"])
     assert artifact_path.read_text(encoding="utf-8") == "final answer\n"
+
+
+def test_runner_preserves_cli_envelope_stats_when_present(tmp_path) -> None:
+    cli_envelope = json.dumps(
+        {
+            "response": "final answer",
+            "stats": {"tokens": {"prompt_tokens": 10, "response_tokens": 3}},
+            "metadata": {"cli": "agy"},
+        }
+    )
+    command, _record_path = make_fake_agy(tmp_path, stdout=cli_envelope)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False, agy_command=command, agy_timeout_sec=5, agy_capture_mode="pipe"))
+
+    result = runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path)
+    envelope = json.loads(result.stdout)
+
+    assert result.status == "completed"
+    assert envelope["response"] == "final answer"
+    assert envelope["stats"]["tokens"]["prompt_tokens"] == 10
+    assert envelope["stats"]["tokens"]["response_tokens"] == 3
+    assert envelope["metadata"]["cli"] == "agy"
+    assert envelope["metadata"]["run_id"] == session.session_id
 
 
 def test_runner_reports_auth_required_from_stderr(tmp_path) -> None:

@@ -10,7 +10,7 @@ Use this skill when the user says `use gemness`, mentions Gemness, or asks to co
 ## Procedure
 
 1. Spawn or delegate to an `antigravity reviewer` subagent when the environment supports subagents. Prefer a lightweight high-reasoning reviewer profile such as `gpt-5.5-mini` with `xhigh` reasoning when available. Keep the main Codex context focused on orchestration and verification.
-2. The reviewer subagent should start Gemness work with `start_antigravity`, wait or poll with `await_antigravity_run` until completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status.
+2. The reviewer subagent should start Gemness work with `start_antigravity`, wait or poll with `await_antigravity_run` until completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status. It should not paste the full Antigravity answer back to the parent unless the parent explicitly asks for it; keep the parent report focused on conclusions, accepted/rejected advice, and residual uncertainty.
 3. Before any Gemness tool call, determine the current workspace cwd as an absolute path:
    - Prefer `git rev-parse --show-toplevel` when the current directory is inside a git repository.
    - If that fails, use the current working directory's absolute path.
@@ -29,6 +29,13 @@ Use this skill when the user says `use gemness`, mentions Gemness, or asks to co
 9. Treat Antigravity's result as advisory.
 10. Verify before applying changes.
 11. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
+
+## Token observability guidance
+
+- Gemness preserves full run results. Completed `await_antigravity_run` payloads include the full result surface plus `summary`, `budget`, `observer_url`, `session_id`, and `run_id`.
+- Treat `budget` as approximate telemetry for spotting duplicate or wasteful multi-LLM usage, not as exact billing data.
+- `request_fingerprint`, `workspace_fingerprint`, and `workspace_fingerprint_degraded` are recording signals for future dedupe/compaction decisions. Automatic dedupe is off by default (`GEMNESS_ENABLE_AUTO_DEDUPE=false`), and matching fingerprints do not currently imply run reuse.
+- Do not paste diffs, raw logs, full transcripts, or full Antigravity answers into the parent conversation when a concise advisory is enough.
 
 ## Failure behavior
 

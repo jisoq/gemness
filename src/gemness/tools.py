@@ -21,6 +21,7 @@ from .review import REVIEW_SCHEMA, build_review_prompt
 from .run_manager import RunManager
 from .runner import AgyCliRunner, AgyRunResult, AgyRunner, agy_fallback_paths, command_exists, probe_auth, resolve_agy_command
 from .schema_validation import validate_json_schema, validate_schema_definition
+from .telemetry import RequestProvenance, build_budget, build_request_provenance, combine_budgets
 from .workspace import WorkspaceAccessError, inspect_workspace_policy, normalized_allowed_roots, resolve_workspace_cwd
 
 
@@ -188,7 +189,9 @@ class GemnessService:
                 resolved_cwd = resolve_workspace_cwd(self.config, cwd)
             except WorkspaceAccessError as exc:
                 return exc.to_payload()
+            provenance = self._request_provenance("ask", prompt, resolved_cwd)
             session = self._session("ask_antigravity", None, None, _session_title(prompt, "ask_antigravity"), cwd=resolved_cwd)
+            self._record_request_provenance(session.session_id, provenance)
             self.run_manager.start(
                 session.session_id,
                 lambda cancel_event, process_callback, heartbeat_callback: self._run_text_session(
@@ -197,6 +200,7 @@ class GemnessService:
                     existing_session_id=session.session_id,
                     cwd=resolved_cwd,
                     title_source=prompt,
+                    request_provenance=provenance,
                     cancel_event=cancel_event,
                     process_callback=process_callback,
                     heartbeat_callback=heartbeat_callback,
@@ -217,7 +221,9 @@ class GemnessService:
                 resolved_cwd = resolve_workspace_cwd(self.config, cwd)
             except WorkspaceAccessError as exc:
                 return exc.to_payload()
+            provenance = self._request_provenance("json", prompt, resolved_cwd, schema=schema)
             session = self._session("ask_antigravity_json", None, None, _session_title(prompt, "ask_antigravity_json"), cwd=resolved_cwd)
+            self._record_request_provenance(session.session_id, provenance)
             self.run_manager.start(
                 session.session_id,
                 lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
@@ -227,6 +233,7 @@ class GemnessService:
                     existing_session_id=session.session_id,
                     cwd=resolved_cwd,
                     title_source=prompt,
+                    request_provenance=provenance,
                     cancel_event=cancel_event,
                     process_callback=process_callback,
                     heartbeat_callback=heartbeat_callback,
@@ -255,6 +262,8 @@ class GemnessService:
                 project_root=str(resolved_cwd),
             )
             prompt = build_review_prompt(base_ref)
+            provenance = self._request_provenance("review_current_diff", prompt, resolved_cwd, base_ref=base_ref)
+            self._record_request_provenance(session.session_id, provenance)
             self.run_manager.start(
                 session.session_id,
                 lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
@@ -264,6 +273,7 @@ class GemnessService:
                     existing_session_id=session.session_id,
                     cwd=resolved_cwd,
                     title_source=f"현재 변경 리뷰: {base_ref}",
+                    request_provenance=provenance,
                     cancel_event=cancel_event,
                     process_callback=process_callback,
                     heartbeat_callback=heartbeat_callback,
@@ -305,6 +315,14 @@ class GemnessService:
                     fallback_used=plan.fallback_used,
                     fallback_reason=plan.fallback_reason,
                 )
+                provenance = self._request_provenance(
+                    "follow_up",
+                    plan.prompt,
+                    plan.cwd,
+                    parent_session_id=parent_session_id,
+                    native_conversation_id=plan.native_conversation_id,
+                )
+                self._record_request_provenance(session.session_id, provenance)
             run_lock = self._conversation_lock(session.conversation_id)
 
             def run(cancel_event, process_callback, heartbeat_callback) -> dict[str, Any]:
@@ -319,6 +337,7 @@ class GemnessService:
                         fallback_used=plan.fallback_used,
                         fallback_reason=plan.fallback_reason,
                         native_conversation_id=plan.native_conversation_id,
+                        request_provenance=provenance,
                         cancel_event=cancel_event,
                         process_callback=process_callback,
                         heartbeat_callback=heartbeat_callback,
@@ -371,7 +390,8 @@ class GemnessService:
     def _start_payload(self, run_id: str, *, idempotency_key: str | None = None) -> dict[str, Any]:
         session = self.hub.get_session(run_id, raw=True)
         status = str(session["status"])
-        result = _event_result(self.hub.get_events(run_id, raw=True)) if status in FINAL_STATUSES else None
+        raw_events = self.hub.get_events(run_id, raw=True)
+        result = _event_result(raw_events) if status in FINAL_STATUSES else None
         rejected = status == "error" and isinstance(result, dict) and result.get("reason") == "run_queue_full"
         payload = {
             "status": "error" if rejected else "accepted",
@@ -382,8 +402,11 @@ class GemnessService:
             "session_status": status,
             "idempotency_key": idempotency_key,
         }
+        payload.update(_event_provenance_fields(raw_events))
         if result is not None:
             payload["result"] = result
+            if isinstance(result.get("budget"), dict):
+                payload["budget"] = result["budget"]
             if isinstance(result.get("message"), str):
                 payload["message"] = result["message"]
         return payload
@@ -422,6 +445,9 @@ class GemnessService:
         }
         if result is not None:
             payload["result"] = result
+            if isinstance(result.get("budget"), dict):
+                payload["budget"] = result["budget"]
+        payload.update(_event_provenance_fields(raw_events))
         return payload
 
     def _call_runner(self, prompt: str, **kwargs: Any) -> AgyRunResult:
@@ -449,6 +475,7 @@ class GemnessService:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         native_conversation_id: str | None = None,
+        request_provenance: RequestProvenance | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Any = None,
         heartbeat_callback: Any = None,
@@ -471,8 +498,18 @@ class GemnessService:
         if not session.title:
             self.hub.set_title(session_id, title)
         observer_url = self.hub.observer_url(session_id)
+        if request_provenance is None:
+            request_provenance = self._request_provenance(
+                _mode_for_tool(tool_name),
+                prompt,
+                cwd,
+                parent_session_id=parent_session_id,
+                native_conversation_id=native_conversation_id,
+            )
+        self._record_request_provenance(session_id, request_provenance)
         prompt_to_send = self.hub.prepare_prompt(session_id, prompt)
 
+        runner_started = time.monotonic()
         result = self._call_runner(
             prompt_to_send,
             session_id=session_id,
@@ -486,6 +523,7 @@ class GemnessService:
             heartbeat_callback=heartbeat_callback,
             heartbeat_interval_sec=self.config.agy_heartbeat_interval_sec,
         )
+        runner_duration_ms = _elapsed_ms(runner_started)
         if result.status == "interrupted":
             retry_result = self._retry_text(tool_name, session_id, prompt_to_send, result, cwd)
             self.hub.set_status(
@@ -496,19 +534,62 @@ class GemnessService:
             )
             return retry_result
         if result.status == "cancelled":
-            payload = {"status": "cancelled", "session_id": session_id, "run_id": session.run_id or session_id, "conversation_id": session.conversation_id, "observer_url": observer_url, "metadata": result.metadata}
+            response_text, envelope = extract_cli_response(result.stdout)
+            metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
+            budget = build_budget(
+                prompt=prompt_to_send,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=result.message,
+                duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=result.stats,
+                metadata=metadata,
+            )
+            payload = {
+                "status": "cancelled",
+                "session_id": session_id,
+                "run_id": session.run_id or session_id,
+                "conversation_id": session.conversation_id,
+                "observer_url": observer_url,
+                "metadata": metadata,
+                "budget": budget,
+                **request_provenance.result_fields(),
+            }
             self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled"})
             return payload
         if result.status == "error":
-            return self._runner_error(session_id, observer_url, result)
+            response_text, envelope = extract_cli_response(result.stdout)
+            metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
+            budget = build_budget(
+                prompt=prompt_to_send,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=result.message,
+                duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=result.stats,
+                metadata=metadata,
+            )
+            return self._runner_error(session_id, observer_url, result, budget=budget, request_provenance=request_provenance, metadata=metadata)
 
         text, envelope = extract_cli_response(result.stdout)
         clean_text = clean_advisory_text(text)
         stats = _merged_stats(result.stats, envelope)
-        metadata = _result_metadata(result, envelope)
+        metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
+        budget = build_budget(
+            prompt=prompt_to_send,
+            response=text,
+            raw_stdout=result.raw_stdout or result.stdout,
+            result=clean_text,
+            duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+            envelope=envelope,
+            stats=stats,
+            metadata=metadata,
+        )
         envelope_error = _envelope_error(envelope)
         if envelope_error:
-            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata)
+            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata, budget=budget, request_provenance=request_provenance)
         payload = {
             "status": "completed",
             "text": clean_text,
@@ -519,6 +600,8 @@ class GemnessService:
             "observer_url": observer_url,
             "stats": stats,
             "metadata": metadata,
+            "budget": budget,
+            **request_provenance.result_fields(),
         }
         if clean_text != text:
             payload["filtered_progress"] = True
@@ -538,6 +621,7 @@ class GemnessService:
         warnings: list[str] | None = None,
         cwd: Path | None = None,
         title_source: str | None = None,
+        request_provenance: RequestProvenance | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Any = None,
         heartbeat_callback: Any = None,
@@ -549,8 +633,12 @@ class GemnessService:
         session = self._session(tool_name, parent_session_id, existing_session_id, title, cwd=cwd)
         session_id = session.session_id
         observer_url = self.hub.observer_url(session_id)
+        if request_provenance is None:
+            request_provenance = self._request_provenance(_mode_for_tool(tool_name), prompt, cwd, schema=schema, parent_session_id=parent_session_id)
+        self._record_request_provenance(session_id, request_provenance)
         prompt_to_send = self.hub.prepare_prompt(session_id, _json_prompt(prompt, schema))
 
+        runner_started = time.monotonic()
         result = self._call_runner(
             prompt_to_send,
             session_id=session_id,
@@ -561,6 +649,7 @@ class GemnessService:
             heartbeat_callback=heartbeat_callback,
             heartbeat_interval_sec=self.config.agy_heartbeat_interval_sec,
         )
+        runner_duration_ms = _elapsed_ms(runner_started)
         if result.status == "interrupted":
             retry_result = self._retry_json(tool_name, session_id, prompt_to_send, result, schema, cwd)
             self.hub.set_status(
@@ -571,18 +660,61 @@ class GemnessService:
             )
             return retry_result
         if result.status == "cancelled":
-            payload = {"status": "cancelled", "session_id": session_id, "run_id": session.run_id or session_id, "conversation_id": session.conversation_id, "observer_url": observer_url, "metadata": result.metadata}
+            response_text, envelope = extract_cli_response(result.stdout)
+            metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
+            budget = build_budget(
+                prompt=prompt_to_send,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=result.message,
+                duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=result.stats,
+                metadata=metadata,
+            )
+            payload = {
+                "status": "cancelled",
+                "session_id": session_id,
+                "run_id": session.run_id or session_id,
+                "conversation_id": session.conversation_id,
+                "observer_url": observer_url,
+                "metadata": metadata,
+                "budget": budget,
+                **request_provenance.result_fields(),
+            }
             self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled"})
             return payload
         if result.status == "error":
-            return self._runner_error(session_id, observer_url, result)
+            response_text, envelope = extract_cli_response(result.stdout)
+            metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
+            budget = build_budget(
+                prompt=prompt_to_send,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=result.message,
+                duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=result.stats,
+                metadata=metadata,
+            )
+            return self._runner_error(session_id, observer_url, result, budget=budget, request_provenance=request_provenance, metadata=metadata)
 
         response_text, envelope = extract_cli_response(result.stdout)
         stats = _merged_stats(result.stats, envelope)
-        metadata = _result_metadata(result, envelope)
+        metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
+        budget = build_budget(
+            prompt=prompt_to_send,
+            response=response_text,
+            raw_stdout=result.raw_stdout or result.stdout,
+            result=response_text,
+            duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+            envelope=envelope,
+            stats=stats,
+            metadata=metadata,
+        )
         envelope_error = _envelope_error(envelope)
         if envelope_error:
-            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata)
+            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata, budget=budget, request_provenance=request_provenance)
         data, parse_error, candidate = parse_json_candidate(response_text)
         self.hub.append_event(
             session_id,
@@ -606,10 +738,21 @@ class GemnessService:
                 "observer_url": observer_url,
                 "stats": stats,
                 "metadata": metadata,
+                "budget": build_budget(
+                    prompt=prompt_to_send,
+                    response=response_text,
+                    raw_stdout=result.raw_stdout or result.stdout,
+                    result=_json_result_text(data),
+                    duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+                    envelope=envelope,
+                    stats=stats,
+                    metadata=metadata,
+                ),
                 "warnings": warnings or [],
                 "repaired": False,
                 "repair_attempted": False,
                 "repair_succeeded": False,
+                **request_provenance.result_fields(),
             }
             self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
             return payload
@@ -620,10 +763,12 @@ class GemnessService:
             parse_error,
             validation_errors,
             cwd,
+            request_provenance=request_provenance,
             cancel_event=cancel_event,
             process_callback=process_callback,
             heartbeat_callback=heartbeat_callback,
         )
+        combined_budget = combine_budgets(budget, repair.get("budget"))
         if repair["status"] == "valid":
             payload = {
                 "status": "valid",
@@ -635,15 +780,25 @@ class GemnessService:
                 "observer_url": observer_url,
                 "stats": stats,
                 "metadata": metadata,
+                "budget": combined_budget or budget,
                 "warnings": warnings or [],
                 "repaired": True,
                 "repair_attempted": True,
                 "repair_succeeded": True,
+                **request_provenance.result_fields(),
             }
             self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
             return payload
         if repair["status"] == "error":
-            return self._runner_error(session_id, observer_url, repair["result"])
+            repair_metadata = _metadata_with_provenance(repair["result"].metadata, request_provenance)
+            return self._runner_error(
+                session_id,
+                observer_url,
+                repair["result"],
+                budget=combined_budget or budget,
+                request_provenance=request_provenance,
+                metadata=repair_metadata,
+            )
         if repair["status"] == "interrupted":
             retry_result = self._retry_json(tool_name, session_id, prompt_to_send, repair["result"], schema, cwd)
             self.hub.set_status(
@@ -661,10 +816,12 @@ class GemnessService:
                 "run_id": session.run_id or session_id,
                 "conversation_id": session.conversation_id,
                 "observer_url": observer_url,
-                "metadata": repair["result"].metadata,
+                "metadata": _metadata_with_provenance(repair["result"].metadata, request_provenance),
+                "budget": combined_budget or budget,
                 "repaired": False,
                 "repair_attempted": True,
                 "repair_succeeded": False,
+                **request_provenance.result_fields(),
             }
             self.hub.set_status(session_id, "cancelled", "session.cancelled", payload | {"reason": "user_cancelled", "phase": "repair"}, phase="repair")
             return payload
@@ -679,10 +836,12 @@ class GemnessService:
             "observer_url": observer_url,
             "stats": stats,
             "metadata": metadata,
+            "budget": combined_budget or budget,
             "warnings": warnings or [],
             "repaired": False,
             "repair_attempted": True,
             "repair_succeeded": False,
+            **request_provenance.result_fields(),
         }
         event_name = "json.parse_failed" if parse_error else "json.validation_failed"
         self.hub.append_event(session_id, event_name, "codex_mcp", {"parse_error": parse_error, "validation_errors": validation_errors})
@@ -698,6 +857,7 @@ class GemnessService:
         validation_errors: list[dict[str, Any]],
         cwd: Path | None,
         *,
+        request_provenance: RequestProvenance | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Any = None,
         heartbeat_callback: Any = None,
@@ -716,6 +876,7 @@ class GemnessService:
             {"prompt_preview": _preview_text(repair_prompt), "prompt_chars": len(repair_prompt)},
             phase="repair",
         )
+        runner_started = time.monotonic()
         result = self._call_runner(
             repair_prompt,
             session_id=session_id,
@@ -727,19 +888,58 @@ class GemnessService:
             heartbeat_callback=heartbeat_callback,
             heartbeat_interval_sec=self.config.agy_heartbeat_interval_sec,
         )
+        runner_duration_ms = _elapsed_ms(runner_started)
         if result.status == "error":
-            return {"status": "error", "result": result}
+            response_text, envelope = extract_cli_response(result.stdout)
+            budget = build_budget(
+                prompt=repair_prompt,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=result.message,
+                duration_ms=_metadata_duration_ms(result.metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=result.stats,
+                metadata=result.metadata,
+            )
+            return {"status": "error", "result": result, "budget": budget}
         if result.status in {"cancelled", "interrupted"}:
-            return {"status": result.status, "result": result}
+            response_text, envelope = extract_cli_response(result.stdout)
+            budget = build_budget(
+                prompt=repair_prompt,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=result.message,
+                duration_ms=_metadata_duration_ms(result.metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=result.stats,
+                metadata=result.metadata,
+            )
+            return {"status": result.status, "result": result, "budget": budget}
         response_text, envelope = extract_cli_response(result.stdout)
         envelope_error = _envelope_error(envelope)
+        stats = _merged_stats(result.stats, envelope)
+        metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance) if request_provenance is not None else _result_metadata(result, envelope)
+        budget = build_budget(
+            prompt=repair_prompt,
+            response=response_text,
+            raw_stdout=result.raw_stdout or result.stdout,
+            result=response_text,
+            duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+            envelope=envelope,
+            stats=stats,
+            metadata=metadata,
+        )
         if envelope_error:
-            return {"status": "error", "result": AgyRunResult.error(envelope_error, exit_code=result.exit_code, stderr=result.stderr, stdout=result.stdout, metadata=result.metadata)}
+            return {
+                "status": "error",
+                "result": AgyRunResult.error(envelope_error, exit_code=result.exit_code, stderr=result.stderr, stdout=result.stdout, metadata=metadata),
+                "budget": budget,
+            }
         self.hub.append_event(
             session_id,
             "repair.response",
             "gemness",
-            {"response_preview": _preview_text(response_text), "response_chars": len(response_text)},
+            {"response_preview": _preview_text(response_text), "response_chars": len(response_text), "budget": budget},
             phase="repair",
         )
         data, repair_parse_error, candidate = parse_json_candidate(response_text)
@@ -751,7 +951,7 @@ class GemnessService:
                 {"parse_error": repair_parse_error, "candidate": candidate},
                 phase="repair",
             )
-            return {"status": "invalid", "raw_response": response_text}
+            return {"status": "invalid", "raw_response": response_text, "budget": budget}
         repair_validation_errors = validate_json_schema(data, schema)
         if repair_validation_errors:
             self.hub.append_event(
@@ -761,9 +961,32 @@ class GemnessService:
                 {"validation_errors": repair_validation_errors, "candidate": candidate},
                 phase="repair",
             )
-            return {"status": "invalid", "raw_response": response_text}
+            return {"status": "invalid", "raw_response": response_text, "budget": build_budget(
+                prompt=repair_prompt,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=_json_result_text(data),
+                duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=stats,
+                metadata=metadata,
+            )}
         self.hub.append_event(session_id, "repair.validation_passed", "codex_mcp", {"data": data}, phase="repair")
-        return {"status": "valid", "data": data, "raw_response": response_text}
+        return {
+            "status": "valid",
+            "data": data,
+            "raw_response": response_text,
+            "budget": build_budget(
+                prompt=repair_prompt,
+                response=response_text,
+                raw_stdout=result.raw_stdout or result.stdout,
+                result=_json_result_text(data),
+                duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
+                envelope=envelope,
+                stats=stats,
+                metadata=metadata,
+            ),
+        }
 
     def _retry_text(self, tool_name: str, parent_session_id: str, original_prompt: str, result: AgyRunResult, cwd: Path | None) -> dict[str, Any]:
         prompt = _interrupted_retry_prompt(original_prompt, result.raw_stdout or result.stdout, result.interrupt_instruction or "")
@@ -773,8 +996,18 @@ class GemnessService:
         prompt = _interrupted_retry_prompt(original_prompt, result.raw_stdout or result.stdout, result.interrupt_instruction or "")
         return self._run_json_session(tool_name, prompt, schema, parent_session_id=parent_session_id, cwd=cwd, title_source=result.interrupt_instruction or original_prompt)
 
-    def _runner_error(self, session_id: str, observer_url: str, result: AgyRunResult) -> dict[str, Any]:
+    def _runner_error(
+        self,
+        session_id: str,
+        observer_url: str,
+        result: AgyRunResult,
+        *,
+        budget: dict[str, Any] | None = None,
+        request_provenance: RequestProvenance | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         session = self.hub.sessions.get(session_id)
+        metadata = metadata if metadata is not None else result.metadata
         payload = {
             "status": "error",
             "exit_code": result.exit_code,
@@ -785,8 +1018,12 @@ class GemnessService:
             "stderr_tail": result.stderr[-4000:] if result.stderr else "",
             "message": result.message,
             "stats": result.stats,
-            "metadata": result.metadata,
+            "metadata": metadata,
         }
+        if budget is not None:
+            payload["budget"] = budget
+        if request_provenance is not None:
+            payload.update(request_provenance.result_fields())
         self.hub.set_status(session_id, "error", "session.error", payload)
         return payload
 
@@ -798,6 +1035,9 @@ class GemnessService:
         result: AgyRunResult,
         stats: dict[str, Any],
         metadata: dict[str, Any],
+        *,
+        budget: dict[str, Any] | None = None,
+        request_provenance: RequestProvenance | None = None,
     ) -> dict[str, Any]:
         session = self.hub.sessions.get(session_id)
         payload = {
@@ -812,6 +1052,10 @@ class GemnessService:
             "stats": stats,
             "metadata": metadata,
         }
+        if budget is not None:
+            payload["budget"] = budget
+        if request_provenance is not None:
+            payload.update(request_provenance.result_fields())
         self.hub.set_status(session_id, "error", "session.error", payload)
         return payload
 
@@ -937,6 +1181,34 @@ class GemnessService:
                 self._conversation_locks[key] = lock
             return lock
 
+    def _request_provenance(
+        self,
+        mode: str,
+        prompt: str,
+        cwd: Path | None,
+        *,
+        schema: dict[str, Any] | None = None,
+        base_ref: str | None = None,
+        parent_session_id: str | None = None,
+        native_conversation_id: str | None = None,
+    ) -> RequestProvenance:
+        return build_request_provenance(
+            mode=mode,
+            prompt=prompt,
+            cwd=cwd,
+            schema=schema,
+            base_ref=base_ref,
+            parent_session_id=parent_session_id,
+            native_conversation_id=native_conversation_id,
+            auto_dedupe_enabled=self.config.enable_auto_dedupe,
+        )
+
+    def _record_request_provenance(self, session_id: str, provenance: RequestProvenance) -> None:
+        events = self.hub.get_events(session_id, raw=True)
+        if any(event.get("type") == "request.fingerprinted" for event in events):
+            return
+        self.hub.append_event(session_id, "request.fingerprinted", "system", provenance.event_payload())
+
 def validate_base_ref(base_ref: str) -> str:
     ref = base_ref.strip()
     if not ref:
@@ -1061,12 +1333,59 @@ def _merged_stats(result_stats: dict[str, Any], envelope: dict[str, Any] | None)
     return stats
 
 
-def _result_metadata(result: AgyRunResult, envelope: dict[str, Any] | None) -> dict[str, Any]:
-    if result.metadata:
-        return dict(result.metadata)
-    if isinstance(envelope, dict) and isinstance(envelope.get("metadata"), dict):
-        return dict(envelope["metadata"])
+def _metadata_with_provenance(metadata: dict[str, Any], provenance: RequestProvenance | None) -> dict[str, Any]:
+    if provenance is None:
+        return dict(metadata)
+    return dict(metadata) | provenance.metadata_fields()
+
+
+def _metadata_duration_ms(metadata: dict[str, Any], fallback_ms: int) -> int:
+    value = metadata.get("duration_ms")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return int(value)
+    return fallback_ms
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
+def _json_result_text(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _event_provenance_fields(events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in reversed(events):
+        if event.get("type") != "request.fingerprinted":
+            continue
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        fields: dict[str, Any] = {}
+        for key in ("request_fingerprint", "workspace_fingerprint", "workspace_fingerprint_degraded"):
+            if key in payload:
+                fields[key] = payload[key]
+        return fields
+    result = _event_result(events)
+    if isinstance(result, dict):
+        return {key: result[key] for key in ("request_fingerprint", "workspace_fingerprint", "workspace_fingerprint_degraded") if key in result}
     return {}
+
+
+def _mode_for_tool(tool_name: str) -> str:
+    if tool_name == "ask_antigravity_json":
+        return "json"
+    if tool_name == "review_current_diff_with_antigravity":
+        return "review_current_diff"
+    return "ask"
+
+
+def _result_metadata(result: AgyRunResult, envelope: dict[str, Any] | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if isinstance(envelope, dict) and isinstance(envelope.get("metadata"), dict):
+        metadata.update(envelope["metadata"])
+    metadata.update(result.metadata)
+    return metadata
 
 
 def _envelope_error(envelope: dict[str, Any] | None) -> str | None:

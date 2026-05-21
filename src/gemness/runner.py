@@ -828,7 +828,28 @@ def _redact_prompt_argument(command: list[str], print_flag: str | None) -> list[
 
 
 def _response_envelope(raw_stdout: str, metadata: dict[str, Any]) -> str:
+    parsed = _json_object(raw_stdout)
+    if parsed is not None and _has_response_text(parsed):
+        envelope = dict(parsed)
+        envelope_metadata = envelope.get("metadata") if isinstance(envelope.get("metadata"), dict) else {}
+        envelope["metadata"] = {**envelope_metadata, **metadata}
+        return json.dumps(envelope, ensure_ascii=False)
     return json.dumps({"response": raw_stdout, "metadata": metadata}, ensure_ascii=False)
+
+
+def _json_object(value: str) -> dict[str, Any] | None:
+    stripped = value.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _has_response_text(value: dict[str, Any]) -> bool:
+    return any(isinstance(value.get(key), str) for key in ("response", "text", "content", "output"))
 
 
 def _metadata(
