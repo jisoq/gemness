@@ -1224,7 +1224,7 @@ INDEX_HTML = r"""<!doctype html>
           };
         case "antigravity.response": {
           const parsed = parseAntigravityEnvelope(payload.response || "");
-          const body = parsed.response ?? payload.response_preview ?? payload.response ?? "";
+          const body = parsed.response || payload.response_preview || payload.response || "";
           const metadata = parsed.metadata ?? payload.metadata;
           return {
             speaker: "antigravity",

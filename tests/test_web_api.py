@@ -350,6 +350,37 @@ console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.
     assert turns[0]["meta"]["metadata"]["streaming"] is False
 
 
+def test_conversation_transcript_renders_response_preview_without_raw_response(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const turns = buildConversationTranscript([
+  {
+    session_id: "s1",
+    type: "antigravity.response",
+    ts: "2026-05-19T03:04:22Z",
+    role: "gemness",
+    payload: {
+      response_preview: "2026년 5월 22일입니다.",
+      stdout_artifact: { kind: "text", name: "stdout.txt", bytes: 28, encoding: "utf-8" },
+      metadata: { streaming: false, auth_status: "ok" },
+      streaming: false
+    }
+  }
+]);
+console.log(JSON.stringify(turns.map((turn) => ({ body: turn.body, meta: turn.meta }))));
+"""
+    script_path = tmp_path / "preview-response-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    turns = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert turns[0]["body"] == "2026년 5월 22일입니다."
+    assert turns[0]["meta"]["형식"] == "stdout preview"
+    assert turns[0]["meta"]["artifact"]["name"] == "stdout.txt"
+
+
 def test_heartbeat_events_update_runtime_signal_without_chat_turns(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"
