@@ -66,7 +66,7 @@ The bootstrap command writes or replaces only the marked block between:
 # gemness-mcp:end
 ```
 
-It also installs the `use gemness` trigger guidance and runs an MCP stdio smoke test.
+It also installs or updates the `gemness` skill guidance and runs an MCP stdio smoke test.
 
 ## 3. What Bootstrap Writes
 

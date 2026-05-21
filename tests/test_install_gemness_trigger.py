@@ -11,29 +11,28 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(install_gemness_trigger)
 
 
-def test_project_install_creates_agents_and_skill_when_missing(tmp_path) -> None:
+def test_project_install_creates_skill_when_missing(tmp_path) -> None:
     updated = install_gemness_trigger.install("project", tmp_path)
 
     agents = tmp_path / "AGENTS.md"
     skill = tmp_path / ".agents" / "skills" / "gemness" / "SKILL.md"
-    assert updated == [agents, skill]
-    assert "use gemness" in agents.read_text(encoding="utf-8")
+    assert updated == [skill]
+    assert not agents.exists()
     assert "name: gemness" in skill.read_text(encoding="utf-8")
 
 
-def test_project_install_appends_without_overwriting_existing_content(tmp_path) -> None:
+def test_project_install_leaves_agents_without_trigger_block_unchanged(tmp_path) -> None:
     agents = tmp_path / "AGENTS.md"
     agents.write_text("# Existing\n\nKeep me.\n", encoding="utf-8")
 
-    install_gemness_trigger.install("project", tmp_path)
+    updated = install_gemness_trigger.install("project", tmp_path)
 
     text = agents.read_text(encoding="utf-8")
-    assert "# Existing" in text
-    assert "Keep me." in text
-    assert text.count(install_gemness_trigger.START_MARKER) == 1
+    assert updated == [tmp_path / ".agents" / "skills" / "gemness" / "SKILL.md"]
+    assert text == "# Existing\n\nKeep me.\n"
 
 
-def test_project_install_replaces_existing_marker_block_without_duplicates(tmp_path) -> None:
+def test_project_install_removes_existing_marker_block_without_pointer(tmp_path) -> None:
     agents = tmp_path / "AGENTS.md"
     agents.write_text(
         "# Existing\n\n"
@@ -46,8 +45,10 @@ def test_project_install_replaces_existing_marker_block_without_duplicates(tmp_p
 
     text = agents.read_text(encoding="utf-8")
     assert "old block" not in text
-    assert text.count(install_gemness_trigger.START_MARKER) == 1
-    assert text.count(install_gemness_trigger.END_MARKER) == 1
+    assert install_gemness_trigger.START_MARKER not in text
+    assert install_gemness_trigger.END_MARKER not in text
+    assert "Gemness" not in text
+    assert text == "# Existing\n"
 
 
 def test_user_install_uses_temp_home_and_codex_home(tmp_path, monkeypatch) -> None:
@@ -60,7 +61,7 @@ def test_user_install_uses_temp_home_and_codex_home(tmp_path, monkeypatch) -> No
 
     install_gemness_trigger.install("user", tmp_path)
 
-    assert (codex_home / "AGENTS.md").exists()
+    assert not (codex_home / "AGENTS.md").exists()
     assert (home / ".agents" / "skills" / "gemness" / "SKILL.md").exists()
 
 

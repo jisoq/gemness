@@ -33,7 +33,7 @@ uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 
 `bootstrap-codex` 명령어는 다음 작업을 수행합니다:
 - 사용자의 Codex 설정 파일에 `[mcp_servers.gemness]` 블록을 추가/갱신합니다.
-- `use gemness` 트리거 가이던스(trigger guidance) 지침을 설정합니다.
+- `use gemness` 트리거 동작을 담은 `gemness` skill을 설치/갱신합니다.
 - `agy --version` 명령어를 통해 Antigravity CLI가 사용 가능한지 확인합니다.
 - 설정된 MCP stdio 명령어로 스모크 테스트(smoke test)를 실행하여 동작 여부를 검증합니다.
 
