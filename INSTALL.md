@@ -35,8 +35,11 @@ Windows PowerShell:
 
 ```powershell
 irm https://antigravity.google/cli/install.ps1 | iex
-agy --help
-agy -p "Return exactly: GEMNESS_AGY_HEALTHCHECK"
+$agy = (Get-Command agy -ErrorAction SilentlyContinue).Source
+if (-not $agy) { $agy = "$env:LOCALAPPDATA\agy\bin\agy.exe" }
+if (-not (Test-Path $agy)) { throw "Antigravity CLI not found. Restart PowerShell or install agy first." }
+& $agy --help
+& $agy -p "Return exactly: GEMNESS_AGY_HEALTHCHECK"
 ```
 
 macOS/Linux:
@@ -47,7 +50,7 @@ agy --help
 agy -p "Return exactly: GEMNESS_AGY_HEALTHCHECK"
 ```
 
-If `agy` is missing, Gemness on Windows also checks `%LOCALAPPDATA%\agy\bin\agy.exe`. If authentication is required, run `agy` once and complete the browser sign-in flow. Windows installs include `pywinpty` so Gemness can capture Antigravity print-mode text even when the CLI writes directly to the console instead of stdout/stderr.
+If authentication is required, run the same `agy` command once and complete the browser sign-in flow. On Windows, Gemness first uses `agy` from `PATH` and then checks `%LOCALAPPDATA%\agy\bin\agy.exe`, so a default Antigravity install works without hand-editing Codex config. The `uvx --from git+https://github.com/jisoq/gemness ...` launch installs Gemness with its Windows dependency (`pywinpty`), and Gemness uses that console capture path for Antigravity print-mode text because `agy` can write directly to the console instead of stdout/stderr.
 
 ## 2. Bootstrap Codex
 
@@ -57,7 +60,7 @@ From any directory, run:
 uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 ```
 
-This installs from GitHub with `uvx` and does not require a PyPI token.
+This installs from GitHub with `uvx`, resolves platform dependencies such as Windows `pywinpty`, and does not require a PyPI token.
 
 The bootstrap command writes or replaces only the marked block between:
 
@@ -82,7 +85,7 @@ required = false
 
 [mcp_servers.gemness.env]
 GEMNESS_AGY_TIMEOUT = "600"
-GEMNESS_AGY_CAPTURE_MODE = "auto"
+GEMNESS_AGY_CAPTURE_MODE = "winpty"
 GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"
 GEMNESS_AGY_CONCURRENCY_LIMIT = "4"
 ```
@@ -96,7 +99,7 @@ Verify:
 - Default bootstrap does not write a machine-specific `GEMNESS_AGY_COMMAND`.
 - `--workspace-root` sets a default cwd and implicit root; it does not enable strict allowlist mode by itself.
 - `--allowed-root` writes `GEMNESS_ALLOWED_ROOTS` and enables strict explicit allowlist mode, which disables Codex trusted-project automatic mode.
-- `GEMNESS_AGY_CAPTURE_MODE = "auto"` allows Windows console capture and ordinary stdout/stderr capture elsewhere.
+- `GEMNESS_AGY_CAPTURE_MODE = "winpty"` uses Windows console capture for Antigravity print-mode output.
 - `GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"` records progress events for long detached runs.
 - `GEMNESS_AGY_CONCURRENCY_LIMIT = "4"` limits concurrent Antigravity background runs.
 

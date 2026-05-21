@@ -605,7 +605,7 @@ def _start_winpty_command(command: list[str], cwd: Path | None, env: dict[str, s
     try:
         from winpty import PtyProcess
     except ImportError as exc:
-        raise RuntimeError("Windows console capture requires pywinpty. Install Gemness with Windows dependencies or set GEMNESS_AGY_CAPTURE_MODE=pipe.") from exc
+        raise RuntimeError("Windows Antigravity CLI capture requires pywinpty. Install Gemness with Windows dependencies.") from exc
 
     process = PtyProcess.spawn(
         command,
@@ -765,24 +765,9 @@ def clean_console_output(value: str) -> str:
 
 
 def _resolve_capture_mode(config: GemnessConfig) -> str:
-    mode = config.agy_capture_mode
-    if mode == CAPTURE_MODE_PIPE:
-        return CAPTURE_MODE_PIPE
-    if mode == CAPTURE_MODE_WINPTY:
-        return CAPTURE_MODE_WINPTY
-    if os.name == "nt" and _winpty_available():
+    if os.name == "nt":
         return CAPTURE_MODE_WINPTY
     return CAPTURE_MODE_PIPE
-
-
-def _winpty_available() -> bool:
-    if os.name != "nt":
-        return False
-    try:
-        import winpty  # noqa: F401
-    except ImportError:
-        return False
-    return True
 
 
 def _select_print_flag(help_text: str) -> str | None:
@@ -828,7 +813,28 @@ def _redact_prompt_argument(command: list[str], print_flag: str | None) -> list[
 
 
 def _response_envelope(raw_stdout: str, metadata: dict[str, Any]) -> str:
+    parsed = _json_object(raw_stdout)
+    if parsed is not None and _has_response_text(parsed):
+        envelope = dict(parsed)
+        envelope_metadata = envelope.get("metadata") if isinstance(envelope.get("metadata"), dict) else {}
+        envelope["metadata"] = {**envelope_metadata, **metadata}
+        return json.dumps(envelope, ensure_ascii=False)
     return json.dumps({"response": raw_stdout, "metadata": metadata}, ensure_ascii=False)
+
+
+def _json_object(value: str) -> dict[str, Any] | None:
+    stripped = value.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _has_response_text(value: dict[str, Any]) -> bool:
+    return any(isinstance(value.get(key), str) for key in ("response", "text", "content", "output"))
 
 
 def _metadata(

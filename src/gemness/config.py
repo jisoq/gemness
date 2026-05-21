@@ -8,7 +8,7 @@ DEFAULT_OBSERVER_PORT = 56755
 DEFAULT_TRANSCRIPT_DIR = Path.home() / ".gemness" / "transcripts"
 DEFAULT_MODEL_LABEL = "Antigravity CLI default"
 DEFAULT_AGY_COMMAND = "agy"
-AGY_CAPTURE_MODES = {"auto", "pipe", "winpty"}
+LEGACY_AGY_CAPTURE_MODES = {"auto", "pipe", "winpty"}
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -32,11 +32,11 @@ def _float_env(name: str, default: float) -> float:
     return float(value)
 
 
-def _choice_env(name: str, default: str, choices: set[str]) -> str:
-    value = os.getenv(name, default).strip().lower()
-    if value not in choices:
-        raise ValueError(f"{name} must be one of: {', '.join(sorted(choices))}")
-    return value
+def _agy_capture_mode_env() -> str:
+    value = os.getenv("GEMNESS_AGY_CAPTURE_MODE", "winpty").strip().lower()
+    if value in LEGACY_AGY_CAPTURE_MODES:
+        return "winpty"
+    raise ValueError("GEMNESS_AGY_CAPTURE_MODE must be winpty")
 
 
 def _optional_str_env(name: str) -> str | None:
@@ -81,10 +81,11 @@ class GemnessConfig:
     agy_command: str = field(default_factory=lambda: os.getenv("GEMNESS_AGY_COMMAND", DEFAULT_AGY_COMMAND))
     agy_timeout_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_TIMEOUT", 600.0))
     agy_health_timeout_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_HEALTH_TIMEOUT", 20.0))
-    agy_capture_mode: str = field(default_factory=lambda: _choice_env("GEMNESS_AGY_CAPTURE_MODE", "auto", AGY_CAPTURE_MODES))
+    agy_capture_mode: str = field(default_factory=_agy_capture_mode_env)
     agy_heartbeat_interval_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_HEARTBEAT_INTERVAL", 5.0))
     agy_concurrency_limit: int = field(default_factory=lambda: _int_env("GEMNESS_AGY_CONCURRENCY_LIMIT", 4))
     agy_queue_limit: int = field(default_factory=lambda: _int_env("GEMNESS_AGY_QUEUE_LIMIT", 64))
+    enable_auto_dedupe: bool = field(default_factory=lambda: _bool_env("GEMNESS_ENABLE_AUTO_DEDUPE", False))
     workspace_root: Path | None = field(default_factory=lambda: _optional_path_env("GEMNESS_WORKSPACE_ROOT"))
     allowed_roots: tuple[Path, ...] = field(default_factory=lambda: _path_list_env("GEMNESS_ALLOWED_ROOTS"))
     allow_untrusted_cwd_fallback: bool = field(default_factory=lambda: _bool_env("GEMNESS_ALLOW_UNTRUSTED_CWD_FALLBACK", False))

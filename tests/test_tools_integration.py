@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import threading
 import time
 from typing import Any, Callable
+
+import pytest
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
 from gemness.observer import ObserverHub
@@ -131,12 +135,22 @@ def test_ask_antigravity_happy_path(tmp_path) -> None:
         assert result["status"] == "completed"
         assert result["text"] == "hello"
         assert result["summary"] == "hello"
+        assert result["budget"]["prompt_chars"] == len("Say hello")
+        assert result["budget"]["response_chars"] == len("hello")
+        assert result["budget"]["response_est_tokens"] >= 1
+        assert result["budget"]["response_mode"] == "full"
+        assert result["budget"]["truncated"] is False
+        assert result["request_fingerprint"].startswith("req:")
+        assert result["workspace_fingerprint"]
+        assert result["workspace_fingerprint_degraded"] is True
         assert result["session_id"]
         assert result["metadata"]["streaming"] is False
         assert result["observer_url"].startswith("http://127.0.0.1:")
         assert service.hub.get_session(result["session_id"])["title"] == "Say hello"
         events = service.hub.get_events(result["session_id"], raw=False)
         assert "prompt.sent" in [event["type"] for event in events]
+        completed = next(event for event in events if event["type"] == "session.completed")
+        assert completed["payload"]["result"]["budget"]["prompt_chars"] == len("Say hello")
     finally:
         service.shutdown()
 
@@ -199,6 +213,9 @@ def test_ask_antigravity_json_valid_json(tmp_path) -> None:
         result = service.ask_antigravity_json("Return answer", TEXT_SCHEMA)
         assert result["status"] == "valid"
         assert result["data"] == {"answer": "yes"}
+        assert result["budget"]["prompt_chars"] > len("Return answer")
+        assert result["budget"]["response_chars"] == len('{"answer":"yes"}')
+        assert result["budget"]["response_est_tokens"] >= 1
         assert "raw_response" not in result
         assert result["response_preview"] == '{"answer":"yes"}'
         assert result["repaired"] is False
@@ -279,6 +296,59 @@ def test_cli_envelope_stats_and_metadata_are_returned(tmp_path) -> None:
         service.shutdown()
 
 
+def test_cli_envelope_token_stats_are_preferred_for_budget(tmp_path) -> None:
+    stdout = json.dumps(
+        {
+            "response": "hello",
+            "stats": {"tokens": {"prompt_tokens": 33, "response_tokens": 7, "result_tokens": 6}},
+            "metadata": {"streaming": False, "auth_status": "ok", "duration_ms": 123},
+        }
+    )
+    service = make_service(tmp_path, [AgyRunResult.completed(stdout, metadata={"streaming": False, "auth_status": "ok"})])
+    try:
+        result = service.ask_antigravity("Say hello")
+
+        assert result["budget"]["prompt_est_tokens"] == 33
+        assert result["budget"]["response_est_tokens"] == 7
+        assert result["budget"]["result_est_tokens"] == 6
+        assert result["budget"]["duration_ms"] == 123
+        assert result["budget"]["estimate_method"] == "cli_stats"
+    finally:
+        service.shutdown()
+
+
+def test_model_json_usage_is_not_treated_as_cli_budget_stats(tmp_path) -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["answer", "usage"],
+        "properties": {
+            "answer": {"type": "string"},
+            "usage": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["input_tokens", "output_tokens"],
+                "properties": {
+                    "input_tokens": {"type": "integer"},
+                    "output_tokens": {"type": "integer"},
+                },
+            },
+        },
+    }
+    response = '{"answer":"yes","usage":{"input_tokens":999,"output_tokens":888}}'
+    service = make_service(tmp_path, [response])
+    try:
+        result = service.ask_antigravity_json("Return usage", schema)
+
+        assert result["status"] == "valid"
+        assert result["budget"]["estimate_method"] == "chars_div_4"
+        assert result["budget"]["prompt_est_tokens"] != 999
+        assert result["budget"]["response_est_tokens"] != 888
+        assert result["budget"]["response_est_tokens"] == (len(response) + 3) // 4
+    finally:
+        service.shutdown()
+
+
 def test_cli_envelope_error_returns_status_error(tmp_path) -> None:
     stdout = json.dumps({"response": "partial", "error": {"message": "auth failed"}, "metadata": {"streaming": False}})
     service = make_service(tmp_path, [AgyRunResult.completed(stdout)])
@@ -347,6 +417,8 @@ def test_review_current_diff_asks_antigravity_to_inspect_workspace(tmp_path) -> 
     try:
         result = service.review_current_diff_with_antigravity("HEAD")
         assert result["status"] == "valid"
+        assert result["budget"]["prompt_chars"] > 0
+        assert result["budget"]["response_chars"] == len(json.dumps(review))
         assert service.runner.calls[0]["cwd"] == tmp_path.resolve()
         prompt = service.runner.calls[0]["prompt"]
         assert "Gemness has not embedded a diff" in prompt
@@ -440,7 +512,11 @@ def test_start_antigravity_returns_detached_run_and_await_collects_result(tmp_pa
         done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
 
         assert done["status"] == "completed"
+        assert done["budget"] == done["result"]["budget"]
         assert done["result"]["text"] == "slow answer"
+        assert done["result"]["summary"] == "slow answer"
+        assert done["result"]["observer_url"] == done["observer_url"]
+        assert done["result"]["session_id"] == started["run_id"]
         assert done["result"]["run_id"] == started["run_id"]
     finally:
         service.shutdown()
@@ -457,6 +533,98 @@ def test_idempotency_key_reuses_existing_detached_run(tmp_path) -> None:
         assert second["idempotent"] is True
         assert done["result"]["text"] == "once"
         assert len(service.runner.calls) == 1
+    finally:
+        service.shutdown()
+
+
+def test_request_fingerprint_is_stable_for_same_input(tmp_path) -> None:
+    service = make_service(tmp_path, ["one", "two"])
+    try:
+        first = service.ask_antigravity("same prompt")
+        second = service.ask_antigravity("same prompt")
+
+        assert first["request_fingerprint"] == second["request_fingerprint"]
+        assert first["workspace_fingerprint"] == second["workspace_fingerprint"]
+    finally:
+        service.shutdown()
+
+
+def test_workspace_fingerprint_changes_when_workspace_changes(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+
+    service = make_service(tmp_path / "transcripts", ["clean", "dirty"], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        clean = service.ask_antigravity("fingerprint", cwd=str(repo))
+        (repo / "tracked.txt").write_text("after\n", encoding="utf-8")
+        dirty = service.ask_antigravity("fingerprint", cwd=str(repo))
+
+        assert clean["workspace_fingerprint_degraded"] is False
+        assert dirty["workspace_fingerprint_degraded"] is False
+        assert clean["workspace_fingerprint"] != dirty["workspace_fingerprint"]
+        assert clean["request_fingerprint"] != dirty["request_fingerprint"]
+    finally:
+        service.shutdown()
+
+
+def test_workspace_fingerprint_changes_when_untracked_file_content_changes(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    untracked = repo / "notes.txt"
+    untracked.write_text("before\n", encoding="utf-8")
+
+    service = make_service(tmp_path / "transcripts", ["before", "after"], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        before = service.ask_antigravity("fingerprint", cwd=str(repo))
+        untracked.write_text("after UNTRACKED_CONTENT_SHOULD_NOT_LEAK\n", encoding="utf-8")
+        after = service.ask_antigravity("fingerprint", cwd=str(repo))
+        payload = json.dumps({"before": before, "after": after}, ensure_ascii=False)
+
+        assert before["workspace_fingerprint_degraded"] is False
+        assert after["workspace_fingerprint_degraded"] is False
+        assert before["workspace_fingerprint"] != after["workspace_fingerprint"]
+        assert before["request_fingerprint"] != after["request_fingerprint"]
+        assert "UNTRACKED_CONTENT_SHOULD_NOT_LEAK" not in payload
+    finally:
+        service.shutdown()
+
+
+def test_raw_git_diff_is_not_exposed_in_result_or_observer_payloads(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    marker = "RAW_DIFF_MARKER_SHOULD_NOT_LEAK"
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    (repo / "tracked.txt").write_text(f"after {marker}\n", encoding="utf-8")
+
+    service = make_service(tmp_path / "transcripts", ["ok"], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        result = service.ask_antigravity("fingerprint only", cwd=str(repo))
+        raw_events = service.hub.get_events(result["session_id"], raw=True)
+        public_events = service.hub.get_events(result["session_id"], raw=False)
+        public_payload = json.dumps({"result": result, "raw_events": raw_events, "public_events": public_events}, ensure_ascii=False)
+
+        assert marker not in public_payload
+        assert "workspace_fingerprint" in result
     finally:
         service.shutdown()
 
@@ -675,6 +843,8 @@ def test_completed_follow_up_uses_native_conversation_id_when_available(tmp_path
         assert second["status"] == "completed"
         assert service.hub.get_session(second["session_id"])["parent_session_id"] == first["session_id"]
         assert service.runner.calls[1]["prompt"] == "go deeper"
+        assert "first" not in service.runner.calls[1]["prompt"]
+        assert "first prompt" not in service.runner.calls[1]["prompt"]
         assert service.runner.calls[1]["native_conversation_id"] == native_id
         assert second["conversation_id"] == first["conversation_id"]
     finally:
@@ -745,3 +915,22 @@ def _wait_for_session_status(hub: ObserverHub, status: str) -> str:
                 return session.session_id
         time.sleep(0.02)
     raise AssertionError(f"No session reached status {status}")
+
+
+def _require_git() -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git is required for workspace fingerprint tests")
+
+
+def _git(cwd, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    return completed.stdout

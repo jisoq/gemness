@@ -21,12 +21,8 @@ TOOL_NAMES = (
     "ask_antigravity",
     "start_antigravity",
     "follow_up_antigravity",
-    "start_follow_up_antigravity",
     "ask_antigravity_json",
-    "start_antigravity_json",
     "review_current_diff_with_antigravity",
-    "start_review_current_diff_with_antigravity",
-    "get_antigravity_run",
     "await_antigravity_run",
     "cancel_antigravity_run",
 )
@@ -34,7 +30,6 @@ AUTO_APPROVE_TOOLS = {
     "antigravity_health",
     "ask_antigravity",
     "follow_up_antigravity",
-    "get_antigravity_run",
     "await_antigravity_run",
 }
 
@@ -96,7 +91,7 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
         "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
         "GEMNESS_AGY_TIMEOUT": "600",
-        "GEMNESS_AGY_CAPTURE_MODE": "auto",
+        "GEMNESS_AGY_CAPTURE_MODE": "winpty",
         "GEMNESS_AGY_HEARTBEAT_INTERVAL": "5",
         "GEMNESS_AGY_CONCURRENCY_LIMIT": "4",
     }
@@ -137,7 +132,7 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
             "GEMNESS_AGY_TIMEOUT": "600",
-            "GEMNESS_AGY_CAPTURE_MODE": "auto",
+            "GEMNESS_AGY_CAPTURE_MODE": "winpty",
             "GEMNESS_AGY_HEARTBEAT_INTERVAL": "5",
             "GEMNESS_AGY_CONCURRENCY_LIMIT": "4",
         }

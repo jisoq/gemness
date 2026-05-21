@@ -36,13 +36,27 @@ TOOLS = [
     },
     {
         "name": "start_antigravity",
-        "description": "Advanced background API: start a detached Antigravity CLI advisory run and return immediately with a run id.",
+        "description": "Start a background Antigravity run and return immediately with a run id. This is the default reviewer-subagent flow; use mode=ask, json, review_current_diff, or follow_up.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["prompt"],
+            "oneOf": [
+                {"required": ["prompt"], "not": {"required": ["schema"]}, "properties": {"mode": {"enum": ["ask"]}}},
+                {"required": ["mode", "prompt", "schema"], "properties": {"mode": {"const": "json"}}},
+                {"required": ["mode"], "properties": {"mode": {"const": "review_current_diff"}}},
+                {"required": ["mode", "parent_session_id", "prompt"], "properties": {"mode": {"const": "follow_up"}}},
+            ],
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["ask", "json", "review_current_diff", "follow_up"],
+                    "default": "ask",
+                    "description": "Run type. ask uses prompt, json uses prompt+schema, review_current_diff uses base_ref, and follow_up uses parent_session_id+prompt.",
+                },
                 "prompt": {"type": "string"},
+                "schema": {"type": "object"},
+                "base_ref": {"type": "string", "default": "HEAD"},
+                "parent_session_id": {"type": "string"},
                 "cwd": {"type": "string"},
                 "idempotency_key": {"type": "string"},
             },
@@ -62,20 +76,6 @@ TOOLS = [
         },
     },
     {
-        "name": "start_follow_up_antigravity",
-        "description": "Advanced background API: start a detached follow-up Antigravity run from a previous observer run id.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["parent_session_id", "prompt"],
-            "properties": {
-                "parent_session_id": {"type": "string"},
-                "prompt": {"type": "string"},
-                "idempotency_key": {"type": "string"},
-            },
-        },
-    },
-    {
         "name": "ask_antigravity_json",
         "description": "Blocking final-result Antigravity JSON tool. Validates the final response against a schema and returns data plus observer URL without raw transcript.",
         "inputSchema": {
@@ -86,21 +86,6 @@ TOOLS = [
                 "prompt": {"type": "string"},
                 "schema": {"type": "object"},
                 "cwd": {"type": "string"},
-            },
-        },
-    },
-    {
-        "name": "start_antigravity_json",
-        "description": "Advanced background API: start a detached Antigravity JSON run and validate the final response in the background.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["prompt", "schema"],
-            "properties": {
-                "prompt": {"type": "string"},
-                "schema": {"type": "object"},
-                "cwd": {"type": "string"},
-                "idempotency_key": {"type": "string"},
             },
         },
     },
@@ -117,35 +102,8 @@ TOOLS = [
         },
     },
     {
-        "name": "start_review_current_diff_with_antigravity",
-        "description": "Advanced background API: start a detached Antigravity current-diff review run.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "base_ref": {"type": "string", "default": "HEAD"},
-                "cwd": {"type": "string"},
-                "idempotency_key": {"type": "string"},
-            },
-        },
-    },
-    {
-        "name": "get_antigravity_run",
-        "description": "Advanced background API: return current state, final result when available, and recent observer events for a detached Antigravity run.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["run_id"],
-            "properties": {
-                "run_id": {"type": "string"},
-                "event_cursor": {"type": "string"},
-                "recent_event_limit": {"type": "integer", "default": 20, "minimum": 0, "maximum": 100},
-            },
-        },
-    },
-    {
         "name": "await_antigravity_run",
-        "description": "Advanced background API: wait briefly for a detached Antigravity run, then return completion or the current running state.",
+        "description": "Wait briefly for a background Antigravity run, then return completion or the current running state. Use timeout_sec=0 to poll without waiting.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -229,7 +187,7 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
     elif name == "ask_antigravity":
         result = service.ask_antigravity(str(arguments["prompt"]), cwd=arguments.get("cwd"))
     elif name == "start_antigravity":
-        result = service.start_antigravity(str(arguments["prompt"]), cwd=arguments.get("cwd"), idempotency_key=arguments.get("idempotency_key"))
+        result = _call_start_antigravity(service, arguments)
     elif name == "follow_up_antigravity":
         result = service.follow_up_antigravity(str(arguments["parent_session_id"]), str(arguments["prompt"]))
     elif name == "start_follow_up_antigravity":
@@ -277,6 +235,50 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
         "structuredContent": result,
         "isError": result.get("status") == "error",
     }
+
+
+def _call_start_antigravity(service: GemnessService, arguments: dict[str, Any]) -> dict[str, Any]:
+    mode = str(arguments.get("mode") or "ask").strip().lower()
+    idempotency_key = arguments.get("idempotency_key")
+    if mode in {"ask", "text", "advisory"}:
+        if "schema" in arguments:
+            raise ValueError("schema requires start_antigravity mode 'json'")
+        return service.start_antigravity(
+            _required_string(arguments, "prompt", mode=mode),
+            cwd=arguments.get("cwd"),
+            idempotency_key=idempotency_key,
+        )
+    if mode == "json":
+        if "schema" not in arguments:
+            raise ValueError("schema is required when start_antigravity mode is 'json'")
+        return service.start_antigravity_json(
+            _required_string(arguments, "prompt", mode=mode),
+            arguments["schema"],
+            cwd=arguments.get("cwd"),
+            idempotency_key=idempotency_key,
+        )
+    if mode in {"review", "review_current_diff"}:
+        return service.start_review_current_diff_with_antigravity(
+            base_ref=str(arguments.get("base_ref") or "HEAD"),
+            cwd=arguments.get("cwd"),
+            idempotency_key=idempotency_key,
+        )
+    if mode in {"follow_up", "follow-up"}:
+        return service.start_follow_up_antigravity(
+            _required_string(arguments, "parent_session_id", mode=mode),
+            _required_string(arguments, "prompt", mode=mode),
+            idempotency_key=idempotency_key,
+        )
+    raise ValueError(f"Unknown start_antigravity mode: {arguments.get('mode')}")
+
+
+def _required_string(arguments: dict[str, Any], name: str, *, mode: str) -> str:
+    if name not in arguments:
+        raise ValueError(f"{name} is required when start_antigravity mode is {mode!r}")
+    value = arguments[name]
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string when start_antigravity mode is {mode!r}")
+    return value
 
 
 def _normalize_tool_name(name: Any) -> str:

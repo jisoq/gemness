@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import stat
 import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
+
+import pytest
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
 from gemness.observer import ObserverHub
@@ -23,33 +27,119 @@ DEFAULT_HELP = """Usage of agy:
 """
 
 
+@pytest.fixture(autouse=True)
+def fake_winpty_module(monkeypatch) -> None:
+    if os.name != "nt":
+        return
+    module = types.SimpleNamespace(PtyProcess=_FakePtyProcess)
+    monkeypatch.setitem(sys.modules, "winpty", module)
+
+
+class _FakePtyProcess:
+    def __init__(self, command, *, cwd=None, env=None, dimensions=None) -> None:  # noqa: ANN001
+        self._process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.pid = self._process.pid
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._reader = threading.Thread(target=self._read_output, daemon=True)
+        self._reader.start()
+
+    @classmethod
+    def spawn(cls, command, *, cwd=None, env=None, dimensions=None):  # noqa: ANN001
+        return cls(command, cwd=cwd, env=env, dimensions=dimensions)
+
+    @property
+    def exitstatus(self):
+        return self._process.poll()
+
+    def isalive(self) -> bool:
+        return self._process.poll() is None
+
+    def read(self, size: int) -> str:
+        try:
+            first = self._queue.get_nowait()
+        except queue.Empty:
+            if self.isalive():
+                return ""
+            raise EOFError
+        if first is None:
+            raise EOFError
+        chars = [first]
+        while len(chars) < size:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                break
+            chars.append(item)
+        return "".join(chars)
+
+    def terminate(self, force: bool = False) -> None:
+        if self._process.poll() is None:
+            if force:
+                self._process.kill()
+            else:
+                self._process.terminate()
+
+    def wait(self) -> int:
+        return self._process.wait()
+
+    def close(self) -> None:
+        self.terminate(force=True)
+
+    def _read_output(self) -> None:
+        try:
+            assert self._process.stdout is not None
+            while True:
+                char = self._process.stdout.read(1)
+                if char == "":
+                    break
+                self._queue.put(char)
+        finally:
+            self._queue.put(None)
+
+
 def test_config_defaults_use_antigravity_env(monkeypatch) -> None:
     monkeypatch.delenv("GEMNESS_AGY_COMMAND", raising=False)
     monkeypatch.delenv("GEMNESS_AGY_TIMEOUT", raising=False)
     monkeypatch.delenv("GEMNESS_AGY_CAPTURE_MODE", raising=False)
     monkeypatch.delenv("GEMNESS_OBSERVER_PORT", raising=False)
     monkeypatch.delenv("GEMNESS_OBSERVER_START_ON_INIT", raising=False)
+    monkeypatch.delenv("GEMNESS_ENABLE_AUTO_DEDUPE", raising=False)
 
     config = GemnessConfig()
 
     assert config.agy_command == "agy"
     assert config.agy_timeout_sec == 600
     assert config.agy_queue_limit == 64
-    assert config.agy_capture_mode == "auto"
+    assert config.agy_capture_mode == "winpty"
     assert config.observer_port == 56755
     assert config.observer_start_on_init is True
+    assert config.enable_auto_dedupe is False
 
 
 def test_config_reads_agy_overrides(monkeypatch) -> None:
     monkeypatch.setenv("GEMNESS_AGY_COMMAND", "custom-agy")
     monkeypatch.setenv("GEMNESS_AGY_TIMEOUT", "12")
     monkeypatch.setenv("GEMNESS_AGY_CAPTURE_MODE", "pipe")
+    monkeypatch.setenv("GEMNESS_ENABLE_AUTO_DEDUPE", "true")
 
     config = GemnessConfig()
 
     assert config.agy_command == "custom-agy"
     assert config.agy_timeout_sec == 12
-    assert config.agy_capture_mode == "pipe"
+    assert config.agy_capture_mode == "winpty"
+    assert config.enable_auto_dedupe is True
 
 
 def test_gemness_env_preserves_existing_values() -> None:
@@ -153,7 +243,11 @@ def test_runner_detaches_agy_stdin(tmp_path, monkeypatch) -> None:
     result = runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path)
 
     assert result.status == "completed"
-    assert captured["stdin"] is subprocess.DEVNULL
+    if os.name == "nt":
+        assert result.metadata["capture_mode"] == "winpty"
+        assert captured["stdin"] is subprocess.DEVNULL
+    else:
+        assert captured["stdin"] is subprocess.DEVNULL
 
 
 def test_runner_synthesizes_non_streaming_envelope_and_metadata(tmp_path) -> None:
@@ -166,7 +260,7 @@ def test_runner_synthesizes_non_streaming_envelope_and_metadata(tmp_path) -> Non
     envelope = json.loads(result.stdout)
 
     assert result.status == "completed"
-    assert envelope["response"] == "final answer\n"
+    assert "final answer" in envelope["response"]
     assert envelope["metadata"]["run_id"] == session.session_id
     assert envelope["metadata"]["conversation_id"] == session.conversation_id
     assert envelope["metadata"]["cwd"] == str(tmp_path)
@@ -174,18 +268,43 @@ def test_runner_synthesizes_non_streaming_envelope_and_metadata(tmp_path) -> Non
     assert envelope["metadata"]["exit_code"] == 0
     assert envelope["metadata"]["auth_status"] == "ok"
     assert envelope["metadata"]["streaming"] is False
-    assert result.stderr == "diagnostic\n"
+    assert result.stderr == ("" if os.name == "nt" else "diagnostic\n")
     events = hub.get_events(session.session_id, raw=True)
     response_event = next(event for event in events if event["type"] == "antigravity.response")
     assert "antigravity.started" in [event["type"] for event in events]
     assert "antigravity.response" in [event["type"] for event in events]
-    assert "antigravity.stderr" in [event["type"] for event in events]
+    if os.name != "nt":
+        assert "antigravity.stderr" in [event["type"] for event in events]
     assert "antigravity.exited" in [event["type"] for event in events]
-    assert response_event["payload"]["response_preview"] == "final answer\n"
+    assert "final answer" in response_event["payload"]["response_preview"]
     assert "response" not in response_event["payload"]
     assert "stdout" not in response_event["payload"]
     artifact_path = Path(response_event["payload"]["stdout_artifact"]["path"])
-    assert artifact_path.read_text(encoding="utf-8") == "final answer\n"
+    assert "final answer" in artifact_path.read_text(encoding="utf-8")
+
+
+def test_runner_preserves_cli_envelope_stats_when_present(tmp_path) -> None:
+    cli_envelope = json.dumps(
+        {
+            "response": "final answer",
+            "stats": {"tokens": {"prompt_tokens": 10, "response_tokens": 3}},
+            "metadata": {"cli": "agy"},
+        }
+    )
+    command, _record_path = make_fake_agy(tmp_path, stdout=cli_envelope)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False, agy_command=command, agy_timeout_sec=5, agy_capture_mode="pipe"))
+
+    result = runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path)
+    envelope = json.loads(result.stdout)
+
+    assert result.status == "completed"
+    assert envelope["response"] == "final answer"
+    assert envelope["stats"]["tokens"]["prompt_tokens"] == 10
+    assert envelope["stats"]["tokens"]["response_tokens"] == 3
+    assert envelope["metadata"]["cli"] == "agy"
+    assert envelope["metadata"]["run_id"] == session.session_id
 
 
 def test_runner_reports_auth_required_from_stderr(tmp_path) -> None:
@@ -321,7 +440,7 @@ def test_runner_emits_heartbeat_payload_while_process_is_running(tmp_path) -> No
     assert result.status == "completed"
     assert heartbeats
     assert heartbeats[0]["pid"]
-    assert heartbeats[0]["capture_mode"] == "pipe"
+    assert heartbeats[0]["capture_mode"] == ("winpty" if os.name == "nt" else "pipe")
     assert "timeout_remaining_ms" in heartbeats[0]
 
 
@@ -397,7 +516,7 @@ def test_runner_preserves_completed_output_when_cancel_arrives_after_process_exi
 
     envelope = json.loads(result.stdout)
     assert result.status == "completed"
-    assert envelope["response"] == "done\n"
+    assert envelope["response"] == ("done" if os.name == "nt" else "done\n")
     assert "cancelled" not in result.metadata
 
 
@@ -426,7 +545,11 @@ def test_runner_preserves_error_when_cancel_arrives_after_process_exit(tmp_path)
 
     assert result.status == "error"
     assert result.exit_code == 2
-    assert result.stderr.strip() == "bad"
+    if os.name == "nt":
+        assert result.stderr == ""
+        assert "bad" in (result.raw_stdout or result.stdout)
+    else:
+        assert result.stderr.strip() == "bad"
     assert "cancelled" not in result.metadata
 
 
