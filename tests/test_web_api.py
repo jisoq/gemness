@@ -23,7 +23,7 @@ class WebFakeRunner:
 
 
 def test_observer_api_is_loopback_local_and_exports_redacted_transcript(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_antigravity("API_KEY=secret-value")
@@ -42,7 +42,7 @@ def test_observer_api_is_loopback_local_and_exports_redacted_transcript(tmp_path
 
 
 def test_observer_api_exports_conversation_without_public_agy_conversation_id(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_antigravity("hello")
@@ -64,7 +64,7 @@ def test_observer_api_exports_conversation_without_public_agy_conversation_id(tm
 
 
 def test_legacy_session_url_redirects_to_conversation_url(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_antigravity("hello")
@@ -85,7 +85,7 @@ def test_legacy_session_url_redirects_to_conversation_url(tmp_path) -> None:
 
 
 def test_observer_server_binds_loopback(tmp_path) -> None:
-    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0), runner=WebFakeRunner())
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=WebFakeRunner())
     try:
         result = service.ask_antigravity("hello")
         assert result["observer_url"].startswith("http://127.0.0.1:")
@@ -94,7 +94,7 @@ def test_observer_server_binds_loopback(tmp_path) -> None:
 
 
 def test_observer_api_renames_and_deletes_conversation(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_antigravity("hello")
@@ -176,7 +176,7 @@ def test_observer_ui_keeps_dashboard_url_instead_of_session_path() -> None:
 
 
 def test_observer_root_serves_live_dashboard_without_token(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_antigravity("hello")
@@ -193,7 +193,7 @@ def test_observer_root_serves_live_dashboard_without_token(tmp_path) -> None:
 
 
 def test_observer_api_ignores_stale_url_token(tmp_path) -> None:
-    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0)
+    config = GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path)
     service = GemnessService(config, runner=WebFakeRunner())
     try:
         result = service.ask_antigravity("hello")

@@ -105,6 +105,8 @@ def make_service(
     supports_conversation: bool = True,
     **config_overrides,
 ) -> GemnessService:
+    if "workspace_root" not in config_overrides and "allowed_roots" not in config_overrides:
+        config_overrides["workspace_root"] = tmp_path
     config = GemnessConfig(
         transcript_dir=tmp_path,
         observer_enabled=True,

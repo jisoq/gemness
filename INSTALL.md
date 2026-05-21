@@ -94,6 +94,8 @@ Verify:
 - Default bootstrap does not write `cwd`.
 - Default bootstrap does not write workspace-root or allowed-root environment values.
 - Default bootstrap does not write a machine-specific `GEMNESS_AGY_COMMAND`.
+- `--workspace-root` sets a default cwd and implicit root; it does not enable strict allowlist mode by itself.
+- `--allowed-root` writes `GEMNESS_ALLOWED_ROOTS` and enables strict explicit allowlist mode, which disables Codex trusted-project automatic mode.
 - `GEMNESS_AGY_CAPTURE_MODE = "auto"` allows Windows console capture and ordinary stdout/stderr capture elsewhere.
 - `GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"` records progress events for long detached runs.
 - `GEMNESS_AGY_CONCURRENCY_LIMIT = "4"` limits concurrent Antigravity background runs.
