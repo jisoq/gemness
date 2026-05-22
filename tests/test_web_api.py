@@ -324,6 +324,42 @@ console.log(JSON.stringify({
     assert data["visible"][-1] == "처음 질문"
 
 
+def test_conversation_transcript_omits_duplicate_completed_result_summary(tmp_path) -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required for Observer UI rendering tests"
+
+    script = _extract_index_script() + r"""
+const events = [
+  {
+    session_id: "run_1",
+    type: "antigravity.response",
+    ts: "2026-05-19T03:04:31Z",
+    role: "gemness",
+    payload: { response: JSON.stringify({ response: "동일한 최종 답변입니다." }) }
+  },
+  {
+    session_id: "run_1",
+    type: "session.completed",
+    ts: "2026-05-19T03:05:20Z",
+    role: "system",
+    payload: { result: { status: "completed", text: "동일한 최종 답변입니다." } }
+  }
+];
+const turns = buildConversationTranscript(events);
+console.log(JSON.stringify(turns.map((turn) => ({ title: turn.title, body: turn.body, meta: turn.meta }))));
+"""
+    script_path = tmp_path / "duplicate-completed-summary-test.js"
+    script_path.write_text(script, encoding="utf-8")
+    completed = subprocess.run([node, str(script_path)], capture_output=True, text=True, encoding="utf-8", check=True)
+    turns = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert turns[0]["title"] == "Antigravity -> Agents"
+    assert turns[0]["body"] == "동일한 최종 답변입니다."
+    assert turns[1]["title"] == "Observer"
+    assert turns[1]["body"] == "최종 결과: 완료"
+    assert turns[1]["meta"]["duplicate_result_summary"] == "omitted"
+
+
 def test_conversation_transcript_renders_non_streaming_response_metadata(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"
