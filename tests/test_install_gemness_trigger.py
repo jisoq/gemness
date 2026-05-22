@@ -71,11 +71,22 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert "\n---\n\n# Gemness Skill" in text
     assert "antigravity reviewer" in text
     assert "first-priority Gemness path" in text
+    assert "## Main Agent Orchestrator" in text
+    assert "## Reviewer Subagent" in text
+    assert "Use one Gemness health owner per task" in text
+    assert "Gemness health handoff" in text
+    assert "delegated_run handoff" in text
+    assert "idempotency_key" in text
+    assert "skip `antigravity_health`" in text
+    assert "main must not call `start_antigravity` / `await_antigravity_run` while reviewer owns the delegated run" in text
+    assert "reviewer must not spawn/delegate another subagent" in text
     assert "codex_multi_agent_available=true" in text
     assert "~/.gemness/codex-host-capabilities.json" in text
     assert "start Gemness work with `start_antigravity`" in text
     assert "wait or poll with `await_antigravity_run`" in text
+    assert "non-overlapping local tasks" in text
     assert "blocking convenience wrappers" in text
     assert "Pass this cwd to `antigravity_health`" in text
     assert "Do not omit cwd" in text
+    assert "reviewer may call it first with cwd" not in text
     assert "//" not in text.split("---", 2)[1]
