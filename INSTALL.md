@@ -88,6 +88,7 @@ GEMNESS_AGY_TIMEOUT = "600"
 GEMNESS_AGY_CAPTURE_MODE = "winpty"
 GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"
 GEMNESS_AGY_CONCURRENCY_LIMIT = "4"
+GEMNESS_CODEX_HOST_CAPABILITIES_FILE = "~/.gemness/codex-host-capabilities.json"
 ```
 
 Verify:
@@ -102,6 +103,7 @@ Verify:
 - `GEMNESS_AGY_CAPTURE_MODE = "winpty"` uses Windows console capture for Antigravity print-mode output.
 - `GEMNESS_AGY_HEARTBEAT_INTERVAL = "5"` records progress events for long detached runs.
 - `GEMNESS_AGY_CONCURRENCY_LIMIT = "4"` limits concurrent Antigravity background runs.
+- `GEMNESS_CODEX_HOST_CAPABILITIES_FILE` stores the Codex host multi-agent capability detected during the first Gemness health check.
 
 To pin a local CLI path explicitly:
 
@@ -150,4 +152,4 @@ Report these items back to the user:
 - Antigravity CLI command and version.
 - Smoke-test result.
 - Whether Codex must be restarted before `gemness` tools appear.
-- The first phrase to try after restart: `use gemness health check`.
+- The first phrase to try after restart: `use gemness health check`. That health check should record whether this Codex host exposes multi-agent spawn/delegation tooling, then reuse the recorded result for later repositories.

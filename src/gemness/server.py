@@ -11,13 +11,21 @@ from .tools import GemnessService
 TOOLS = [
     {
         "name": "antigravity_health",
-        "description": "Check MCP server, workspace, observer, and Antigravity CLI readiness.",
+        "description": "Check MCP server, workspace, observer, Antigravity CLI readiness, and record Codex host multi-agent capability when the main agent has probed it.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "cwd": {"type": "string"},
                 "check_antigravity": {"type": "boolean", "default": True},
+                "codex_multi_agent_available": {
+                    "type": "boolean",
+                    "description": "Set by the main Codex agent after host-side spawn/delegation tool discovery. Stored in the user-level Gemness host capability cache.",
+                },
+                "codex_multi_agent_evidence": {
+                    "type": "string",
+                    "description": "Short evidence for the multi-agent capability decision, for example the discovered spawn tool name.",
+                },
             },
         },
     },
@@ -118,7 +126,7 @@ TOOLS = [
     },
     {
         "name": "cancel_antigravity_run",
-        "description": "Advanced background API: request cancellation for a detached Antigravity run by run id.",
+        "description": "Background run control API: request cancellation for a detached Antigravity run by run id.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -183,7 +191,12 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
     name = _normalize_tool_name(params.get("name"))
     arguments = params.get("arguments") or {}
     if name == "antigravity_health":
-        result = service.antigravity_health(cwd=arguments.get("cwd"), check_antigravity=bool(arguments.get("check_antigravity", True)))
+        result = service.antigravity_health(
+            cwd=arguments.get("cwd"),
+            check_antigravity=bool(arguments.get("check_antigravity", True)),
+            codex_multi_agent_available=arguments.get("codex_multi_agent_available"),
+            codex_multi_agent_evidence=arguments.get("codex_multi_agent_evidence"),
+        )
     elif name == "ask_antigravity":
         result = service.ask_antigravity(str(arguments["prompt"]), cwd=arguments.get("cwd"))
     elif name == "start_antigravity":

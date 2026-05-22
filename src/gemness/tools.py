@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .codex_host import codex_host_capabilities
 from .config import DEFAULT_MODEL_LABEL, GemnessConfig
 from .json_utils import extract_cli_response, parse_json_candidate
 from .mcp_metadata import SERVER_NAME, SERVER_VERSION, TOOL_NAMES
@@ -78,8 +79,21 @@ class GemnessService:
         self.run_manager.shutdown()
         self.hub.shutdown()
 
-    def antigravity_health(self, *, cwd: str | None = None, check_antigravity: bool = True) -> dict[str, Any]:
+    def antigravity_health(
+        self,
+        *,
+        cwd: str | None = None,
+        check_antigravity: bool = True,
+        codex_multi_agent_available: bool | None = None,
+        codex_multi_agent_evidence: str | None = None,
+    ) -> dict[str, Any]:
         warnings: list[str] = []
+        codex_host, codex_host_warnings = codex_host_capabilities(
+            self.config.codex_host_capabilities_file,
+            multi_agent_available=codex_multi_agent_available,
+            evidence=codex_multi_agent_evidence,
+        )
+        warnings.extend(codex_host_warnings)
         workspace_decision = inspect_workspace_policy(self.config, cwd)
         resolved_cwd = workspace_decision.cwd if workspace_decision.allowed else None
         cwd_error = workspace_decision.message if not workspace_decision.allowed else None
@@ -149,6 +163,7 @@ class GemnessService:
                 "executable": sys.executable,
             },
             "mcp": {"transport": "stdio", "tools": TOOL_NAMES},
+            "codex_host": codex_host,
             "workspace": workspace,
             "antigravity": antigravity,
             "observer": observer,

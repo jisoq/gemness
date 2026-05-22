@@ -9,26 +9,29 @@ Use this skill when the user says `use gemness`, mentions Gemness, or asks to co
 
 ## Procedure
 
-1. Spawn or delegate to an `antigravity reviewer` subagent when the environment supports subagents. Prefer a lightweight high-reasoning reviewer profile such as `gpt-5.5-mini` with `xhigh` reasoning when available. Keep the main Codex context focused on orchestration and verification.
-2. The reviewer subagent should start Gemness work with `start_antigravity`, wait or poll with `await_antigravity_run` until completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status. It should not paste the full Antigravity answer back to the parent unless the parent explicitly asks for it; keep the parent report focused on conclusions, accepted/rejected advice, and residual uncertainty.
-3. Before any Gemness tool call, determine the current workspace cwd as an absolute path:
+1. Treat the `antigravity reviewer` subagent flow as the first-priority Gemness path, not a mere recommendation. A user request that triggers this skill is a request to use Gemness through that reviewer flow unless the host proves it cannot spawn/delegate.
+2. On the first Gemness health check in a Codex host, discover whether subagent, spawn, or delegation tooling is available. If the host exposes those tools lazily, use host tool discovery first. Then call `antigravity_health` with `codex_multi_agent_available=true` or `false` and a short `codex_multi_agent_evidence` value so Gemness can store the result in the user-level host capability cache.
+3. On later Gemness tasks, read the `codex_host` capability returned by `antigravity_health`, or the persisted `~/.gemness/codex-host-capabilities.json` cache when already known. If `codex_host.multi_agent.available` is true, spawn or delegate to the reviewer subagent first without re-probing every repository. Re-probe only when the cached state is missing, unreadable, unknown, or the spawn call itself fails.
+4. If multi-agent support is unavailable, unknown after probing, or blocked by the host, state that fallback briefly before using Gemness MCP tools directly from the main agent. Do not silently use blocking main-agent calls when the cached host capability says multi-agent is available.
+5. The reviewer subagent should start Gemness work with `start_antigravity`, wait or poll with `await_antigravity_run` until completion, and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status. It should not paste the full Antigravity answer back to the parent unless the parent explicitly asks for it; keep the parent report focused on conclusions, accepted/rejected advice, and residual uncertainty.
+6. Before any Gemness tool call, determine the current workspace cwd as an absolute path:
    - Prefer `git rev-parse --show-toplevel` when the current directory is inside a git repository.
    - If that fails, use the current working directory's absolute path.
    - Pass this cwd to `antigravity_health`, `ask_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`, and `start_antigravity`.
    - Do not omit cwd and fall back to the MCP server process start directory.
    - `follow_up_antigravity` has no cwd argument; it should continue from the parent session's stored `project_root`.
-4. If connection status is uncertain and `antigravity_health` exists, the reviewer may call it first with cwd.
-5. Select the `start_antigravity` mode:
+7. If connection status is uncertain and `antigravity_health` exists, the reviewer may call it first with cwd.
+8. Select the `start_antigravity` mode:
    - `mode="review_current_diff"` for current workspace change review.
    - `mode="json"` for schema-constrained structured output.
    - `mode="ask"` for general second opinion or reasoning review.
    - `mode="follow_up"` for continuing the same Gemness observer conversation.
-6. Use `ask_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`, or `follow_up_antigravity` only as blocking convenience wrappers when a simpler one-shot call is more appropriate than explicit start/poll handling.
-7. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
-8. Do not include secrets or credentials.
-9. Treat Antigravity's result as advisory.
-10. Verify before applying changes.
-11. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
+9. Use `ask_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`, or `follow_up_antigravity` only as blocking convenience wrappers when the multi-agent reviewer flow is unavailable or a simpler one-shot call is explicitly more appropriate than explicit start/poll handling.
+10. Send concise task instructions. Do not paste diffs, file dumps, logs, terminal transcripts, or full conversation transcripts when Antigravity can inspect the workspace itself.
+11. Do not include secrets or credentials.
+12. Treat Antigravity's result as advisory.
+13. Verify before applying changes.
+14. Report back with what Gemness/Antigravity said, what was accepted, what was rejected, and what remains uncertain.
 
 ## Token observability guidance
 

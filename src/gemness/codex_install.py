@@ -7,7 +7,7 @@ from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import DEFAULT_OBSERVER_PORT
+from .config import DEFAULT_CODEX_HOST_CAPABILITIES_FILE, DEFAULT_OBSERVER_PORT
 from .config import DEFAULT_TRANSCRIPT_DIR
 
 
@@ -89,6 +89,7 @@ def build_codex_config(options: CodexConfigOptions) -> str:
         "GEMNESS_OBSERVER_PORT": str(DEFAULT_OBSERVER_PORT),
         "GEMNESS_OBSERVER_START_ON_INIT": "true",
         "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
+        "GEMNESS_CODEX_HOST_CAPABILITIES_FILE": str(DEFAULT_CODEX_HOST_CAPABILITIES_FILE),
         "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
         "GEMNESS_AGY_TIMEOUT": "600",
         "GEMNESS_AGY_CAPTURE_MODE": "winpty",
@@ -130,6 +131,7 @@ def build_mcp_env(options: CodexConfigOptions, base_env: dict[str, str] | None =
             "GEMNESS_OBSERVER_PORT": str(DEFAULT_OBSERVER_PORT),
             "GEMNESS_OBSERVER_START_ON_INIT": "true",
             "GEMNESS_TRANSCRIPT_DIR": options.transcript_dir,
+            "GEMNESS_CODEX_HOST_CAPABILITIES_FILE": str(DEFAULT_CODEX_HOST_CAPABILITIES_FILE),
             "GEMNESS_REDACT_RAW_BY_DEFAULT": "true",
             "GEMNESS_AGY_TIMEOUT": "600",
             "GEMNESS_AGY_CAPTURE_MODE": "winpty",
