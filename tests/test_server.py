@@ -214,6 +214,19 @@ def test_start_antigravity_schema_declares_mode_requirements() -> None:
     assert validator.is_valid({"mode": "follow_up", "parent_session_id": "session-1", "prompt": "continue"})
 
 
+def test_tool_metadata_declares_delegated_run_ownership() -> None:
+    start_tool = next(tool for tool in TOOLS if tool["name"] == "start_antigravity")
+    await_tool = next(tool for tool in TOOLS if tool["name"] == "await_antigravity_run")
+
+    assert "delegated reviewer-owned flow" in start_tool["description"]
+    assert "explicit takeover" in start_tool["description"]
+    idempotency_description = start_tool["inputSchema"]["properties"]["idempotency_key"]["description"]
+    assert "Parent-supplied delegation key" in idempotency_description
+    assert "delegation_id" in idempotency_description
+    assert "delegated run owner" in await_tool["description"]
+    assert "explicit main-agent takeover" in await_tool["description"]
+
+
 def test_start_antigravity_consolidated_modes_route_to_detached_runs(tmp_path) -> None:
     service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
     try:

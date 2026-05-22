@@ -44,7 +44,7 @@ TOOLS = [
     },
     {
         "name": "start_antigravity",
-        "description": "Start a background Antigravity run and return immediately with a run id. This is the default reviewer-subagent flow; use mode=ask, json, review_current_diff, or follow_up.",
+        "description": "Start a background Antigravity run and return immediately with a run id. This is the delegated reviewer-owned flow; the main agent should call it only for explicit takeover or non-delegated fallback. Use mode=ask, json, review_current_diff, or follow_up.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -66,7 +66,10 @@ TOOLS = [
                 "base_ref": {"type": "string", "default": "HEAD"},
                 "parent_session_id": {"type": "string"},
                 "cwd": {"type": "string"},
-                "idempotency_key": {"type": "string"},
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Parent-supplied delegation key. A reviewer subagent should reuse the exact delegation_id from the parent handoff so duplicate starts return the existing run.",
+                },
             },
         },
     },
@@ -111,7 +114,7 @@ TOOLS = [
     },
     {
         "name": "await_antigravity_run",
-        "description": "Wait briefly for a background Antigravity run, then return completion or the current running state. Use timeout_sec=0 to poll without waiting.",
+        "description": "Wait briefly for a background Antigravity run, then return completion or the current running state. Use only by the delegated run owner or during explicit main-agent takeover; timeout_sec=0 polls without waiting.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
