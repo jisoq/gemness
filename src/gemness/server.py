@@ -191,10 +191,13 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
     name = _normalize_tool_name(params.get("name"))
     arguments = params.get("arguments") or {}
     if name == "antigravity_health":
+        codex_multi_agent_available = arguments.get("codex_multi_agent_available")
+        if "codex_multi_agent_available" in arguments and not isinstance(codex_multi_agent_available, bool):
+            raise ValueError("codex_multi_agent_available must be a boolean when provided")
         result = service.antigravity_health(
             cwd=arguments.get("cwd"),
             check_antigravity=bool(arguments.get("check_antigravity", True)),
-            codex_multi_agent_available=arguments.get("codex_multi_agent_available"),
+            codex_multi_agent_available=codex_multi_agent_available,
             codex_multi_agent_evidence=arguments.get("codex_multi_agent_evidence"),
         )
     elif name == "ask_antigravity":

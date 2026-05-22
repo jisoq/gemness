@@ -33,7 +33,11 @@ def codex_host_capabilities(
         warnings.append(f"Codex host capability cache is unreadable: {resolved_path} ({exc})")
         return _unknown_payload(resolved_path, "unreadable"), warnings
 
-    return _normalize_payload(raw, resolved_path), warnings
+    payload = _normalize_payload(raw, resolved_path)
+    status = payload.get("multi_agent", {}).get("status")
+    if status in {"invalid", "unknown"}:
+        warnings.append(f"Codex host capability cache is {status}: {resolved_path}")
+    return payload, warnings
 
 
 def _record_payload(path: Path, multi_agent_available: bool, evidence: str | None) -> dict[str, Any]:
@@ -85,9 +89,11 @@ def _normalize_payload(raw: Any, path: Path) -> dict[str, Any]:
         status = "unavailable"
     else:
         status = str(multi_agent.get("status") or "unknown")
+        if status in {"available", "unavailable"}:
+            status = "invalid"
         available = None
     return {
-        "schema_version": int(raw.get("schema_version") or 1),
+        "schema_version": _safe_schema_version(raw.get("schema_version")),
         "host": str(raw.get("host") or "codex"),
         "cache_path": str(path),
         "updated_at": raw.get("updated_at"),
@@ -100,6 +106,13 @@ def _normalize_payload(raw: Any, path: Path) -> dict[str, Any]:
             "warning": multi_agent.get("warning"),
         },
     }
+
+
+def _safe_schema_version(value: Any) -> int:
+    try:
+        return int(value or 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 def _now_iso() -> str:

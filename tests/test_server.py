@@ -172,6 +172,31 @@ def test_server_tools_list_and_call(tmp_path) -> None:
         service.shutdown()
 
 
+def test_health_rejects_non_boolean_codex_multi_agent_available(tmp_path) -> None:
+    service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
+    try:
+        called = _handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "antigravity_health",
+                    "arguments": {
+                        "check_antigravity": False,
+                        "codex_multi_agent_available": "false",
+                    },
+                },
+            },
+            service,
+        )
+
+        assert called["error"]["code"] == -32603
+        assert "codex_multi_agent_available must be a boolean" in called["error"]["message"]
+    finally:
+        service.shutdown()
+
+
 def test_start_antigravity_schema_declares_mode_requirements() -> None:
     schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == "start_antigravity")
     validator = Draft7Validator(schema)
