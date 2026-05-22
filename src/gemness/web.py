@@ -1262,10 +1262,16 @@ INDEX_HTML = r"""<!doctype html>
           return turn(event, "observer", "system", "Observer", `복구 후에도 schema 검증을 통과하지 못했습니다.\n${validationText(payload.validation_errors || payload.parse_error || [])}`, { 결과: "복구 실패" }, "error");
         case "session.completed": {
           const result = payload.result || {};
-          return turn(event, "observer", "system", "Observer", `최종 결과: ${statusLabel(result.status || payload.status || "completed")}\n${resultSummaryText(result)}`, {
+          const summary = resultSummaryText(result);
+          const duplicateSummary = isDuplicateCompletedResultSummary(summary, event, index, allEvents);
+          const body = duplicateSummary
+            ? `최종 결과: ${statusLabel(result.status || payload.status || "completed")}`
+            : `최종 결과: ${statusLabel(result.status || payload.status || "completed")}\n${summary}`;
+          return turn(event, "observer", "system", "Observer", body, {
             repaired: result.repaired,
             repair_attempted: result.repair_attempted,
-            repair_succeeded: result.repair_succeeded
+            repair_succeeded: result.repair_succeeded,
+            duplicate_result_summary: duplicateSummary ? "omitted" : ""
           });
         }
         case "session.cancelled":
@@ -1392,6 +1398,29 @@ INDEX_HTML = r"""<!doctype html>
       if (result.raw_response) return formatReadable(result.raw_response);
       if (result.message) return result.message;
       return "세션이 완료되었습니다.";
+    }
+    function isDuplicateCompletedResultSummary(summary, event, index, allEvents) {
+      if (!summary || summary === "세션이 완료되었습니다.") return false;
+      const previous = allEvents.slice(0, index).reverse().find((candidate) =>
+        eventsShareRun(event, candidate) &&
+        ["antigravity.response", "repair.response"].includes(candidate.type)
+      );
+      if (!previous) return false;
+      return normalizeComparableText(summary) === normalizeComparableText(responseTurnBody(previous));
+    }
+    function responseTurnBody(event) {
+      const payload = event.payload || {};
+      if (event.type === "repair.response") {
+        return formatReadable(payload.response || payload.response_preview || "");
+      }
+      if (event.type === "antigravity.response") {
+        const parsed = parseAntigravityEnvelope(payload.response || "");
+        return parsed.response || payload.response_preview || payload.response || "";
+      }
+      return "";
+    }
+    function normalizeComparableText(value) {
+      return String(value ?? "").replace(/\r\n/g, "\n").trim();
     }
     function parseAntigravityEnvelope(value) {
       if (typeof value !== "string") return { response: "", envelope: null };
