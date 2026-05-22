@@ -77,6 +77,10 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert "Gemness health handoff" in text
     assert "delegated_run handoff" in text
     assert "idempotency_key" in text
+    assert 'model="gpt-5.4-mini"' in text
+    assert 'reasoning_effort="high"' in text
+    assert "gpt-5.5-mini" not in text
+    assert "xhigh" not in text
     assert "skip `antigravity_health`" in text
     assert "main must not call `start_antigravity` / `await_antigravity_run` while reviewer owns the delegated run" in text
     assert "reviewer must not spawn/delegate another subagent" in text

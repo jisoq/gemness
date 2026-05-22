@@ -59,6 +59,8 @@ After the reviewer is spawned in background or detached mode, the main agent sho
 
 Delegated run ownership is also single-owner. When the main agent spawns the reviewer, it passes a `delegated_run handoff` containing cwd, task, mode, optional schema or parent session id, and a parent-generated `delegation_id`. The reviewer uses that exact `delegation_id` as `idempotency_key` for `start_antigravity`. While the reviewer owns the run, the main agent does not call `start_antigravity`, `await_antigravity_run`, or blocking Gemness wrappers for the same task.
 
+The reviewer subagent spawn profile is `model="gpt-5.4-mini"` with `reasoning_effort="high"`. The reviewer handles Gemness orchestration and concise result synthesis while Antigravity CLI performs the primary advisory reasoning.
+
 The main agent may take over only when reviewer spawn fails, the reviewer explicitly fails or times out, the reviewer returns only a `run_id` without final advisory, or the user explicitly requests main-agent direct execution. During takeover, the main agent should not start a duplicate run; it should await, cancel, or follow up using existing run or session identifiers when available.
 
 ## Conversation Continuity
