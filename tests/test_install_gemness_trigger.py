@@ -70,6 +70,9 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert text.startswith("---\n")
     assert "\n---\n\n# Gemness Skill" in text
     assert "antigravity reviewer" in text
+    assert "first-priority Gemness path" in text
+    assert "codex_multi_agent_available=true" in text
+    assert "~/.gemness/codex-host-capabilities.json" in text
     assert "start Gemness work with `start_antigravity`" in text
     assert "wait or poll with `await_antigravity_run`" in text
     assert "blocking convenience wrappers" in text

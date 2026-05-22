@@ -6,6 +6,7 @@ from pathlib import Path
 
 DEFAULT_OBSERVER_PORT = 56755
 DEFAULT_TRANSCRIPT_DIR = Path.home() / ".gemness" / "transcripts"
+DEFAULT_CODEX_HOST_CAPABILITIES_FILE = Path.home() / ".gemness" / "codex-host-capabilities.json"
 DEFAULT_MODEL_LABEL = "Antigravity CLI default"
 DEFAULT_AGY_COMMAND = "agy"
 LEGACY_AGY_CAPTURE_MODES = {"auto", "pipe", "winpty"}
@@ -89,6 +90,11 @@ class GemnessConfig:
     workspace_root: Path | None = field(default_factory=lambda: _optional_path_env("GEMNESS_WORKSPACE_ROOT"))
     allowed_roots: tuple[Path, ...] = field(default_factory=lambda: _path_list_env("GEMNESS_ALLOWED_ROOTS"))
     allow_untrusted_cwd_fallback: bool = field(default_factory=lambda: _bool_env("GEMNESS_ALLOW_UNTRUSTED_CWD_FALLBACK", False))
+    codex_host_capabilities_file: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("GEMNESS_CODEX_HOST_CAPABILITIES_FILE", str(DEFAULT_CODEX_HOST_CAPABILITIES_FILE))
+        ).expanduser()
+    )
 
     @classmethod
     def from_env(cls) -> "GemnessConfig":

@@ -1,6 +1,6 @@
 # Gemness Antigravity Observer
 
-Gemness wraps Antigravity CLI (`agy`) as a local MCP advisory server. In the default Codex UX, the main agent delegates Antigravity work to an `antigravity reviewer` subagent. That reviewer subagent starts a background run with `start_antigravity`, waits or polls with `await_antigravity_run`, and returns a concise advisory summary to the parent. Gemness registers a run, invokes `agy`, and the Observer UI records prompt preparation, progress heartbeats, final process metadata, JSON validation, and repair attempts. Heartbeats are summarized as a live status LED and runtime telemetry in the default UI, while the raw heartbeat events remain available in the debug panel. The Observer UI also lets you rename or remove completed local conversation records. Gemness is a task-clarification bridge, not a bulk context courier: prompts should state the user's intent, cwd, and constraints, then let Antigravity inspect the workspace with its own tools when needed.
+Gemness wraps Antigravity CLI (`agy`) as a local MCP advisory server. In the Codex UX, the first-priority path is for the main agent to delegate Antigravity work to an `antigravity reviewer` subagent. That reviewer subagent starts a background run with `start_antigravity`, waits or polls with `await_antigravity_run`, and returns a concise advisory summary to the parent. Gemness registers a run, invokes `agy`, and the Observer UI records prompt preparation, progress heartbeats, final process metadata, JSON validation, and repair attempts. Heartbeats are summarized as a live status LED and runtime telemetry in the default UI, while the raw heartbeat events remain available in the debug panel. The Observer UI also lets you rename or remove completed local conversation records. Gemness is a task-clarification bridge, not a bulk context courier: prompts should state the user's intent, cwd, and constraints, then let Antigravity inspect the workspace with its own tools when needed.
 
 ## Runtime Flow
 
@@ -51,7 +51,7 @@ Heartbeat payloads include elapsed time, timeout remaining, pid, capture mode, s
 
 Detached runs are controlled by `run_id`. `conversation_id` remains the conversation continuity identifier; it is not used to cancel or poll a specific process. RunManager keeps in-memory process handles for active runs, uses transcript events to recover terminal state after restart, scans accepted-run events for `idempotency_key` reuse, and marks unmanaged open runs as cancelled when cancellation is requested after a manager restart.
 
-The reviewer subagent is the preferred place to run `start_antigravity` and `await_antigravity_run`, because it keeps the main agent free to continue orchestration while the Observer run remains inspectable. The blocking tools remain useful for small one-shot calls and compatibility with simpler clients.
+The reviewer subagent is the first-priority place to run `start_antigravity` and `await_antigravity_run`, because it keeps the main agent free to continue orchestration while the Observer run remains inspectable. The blocking tools remain useful for small one-shot calls and compatibility with simpler clients when multi-agent support is unavailable.
 
 ## Conversation Continuity
 
@@ -68,8 +68,11 @@ Gemness keeps conversation continuity inside Observer transcripts and native Ant
 - best-effort auth status
 - Observer and transcript directory state
 - workspace cwd and allowed-root state
+- Codex host multi-agent capability cache state
 
 An auth problem returns structured `auth_required` information instead of crashing.
+
+The first Gemness health check in a Codex host should include the main agent's host-side multi-agent discovery result through `codex_multi_agent_available` and `codex_multi_agent_evidence`. Gemness stores that result in `~/.gemness/codex-host-capabilities.json` and returns it later in the `codex_host` health payload, so the same Codex host does not need to re-probe spawn/delegation tools for every repository.
 
 ## Model Selection
 

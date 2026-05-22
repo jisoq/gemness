@@ -128,6 +128,69 @@ def make_service(
     )
 
 
+def test_health_records_codex_multi_agent_host_capability(tmp_path) -> None:
+    cache_path = tmp_path / "codex-host-capabilities.json"
+    service = make_service(tmp_path, [], codex_host_capabilities_file=cache_path)
+    try:
+        recorded = service.antigravity_health(
+            check_antigravity=False,
+            codex_multi_agent_available=True,
+            codex_multi_agent_evidence="multi_agent_v1.spawn_agent",
+        )
+        assert recorded["codex_host"]["multi_agent"]["status"] == "available"
+        assert recorded["codex_host"]["multi_agent"]["available"] is True
+        assert recorded["codex_host"]["multi_agent"]["priority"] == "first"
+        assert cache_path.exists()
+
+        reused = service.antigravity_health(check_antigravity=False)
+        assert reused["codex_host"]["multi_agent"]["status"] == "available"
+        assert reused["codex_host"]["multi_agent"]["evidence"] == "multi_agent_v1.spawn_agent"
+    finally:
+        service.shutdown()
+
+
+def test_health_reports_unrecorded_codex_multi_agent_host_capability(tmp_path) -> None:
+    cache_path = tmp_path / "missing-codex-host-capabilities.json"
+    service = make_service(tmp_path, [], codex_host_capabilities_file=cache_path)
+    try:
+        result = service.antigravity_health(check_antigravity=False)
+        assert result["status"] == "warning"
+        assert result["codex_host"]["cache_path"] == str(cache_path.resolve())
+        assert result["codex_host"]["multi_agent"]["status"] == "not_recorded"
+        assert result["codex_host"]["multi_agent"]["available"] is None
+        assert "Codex multi-agent capability has not been recorded yet." in result["warnings"]
+    finally:
+        service.shutdown()
+
+
+def test_health_warns_for_invalid_codex_multi_agent_host_cache(tmp_path) -> None:
+    cache_path = tmp_path / "invalid-codex-host-capabilities.json"
+    cache_path.write_text(json.dumps({"schema_version": "not-an-int", "multi_agent": {"available": "false"}}), encoding="utf-8")
+    service = make_service(tmp_path, [], codex_host_capabilities_file=cache_path)
+    try:
+        result = service.antigravity_health(check_antigravity=False)
+        assert result["status"] == "warning"
+        assert result["codex_host"]["schema_version"] == 1
+        assert result["codex_host"]["multi_agent"]["status"] == "unknown"
+        assert result["codex_host"]["multi_agent"]["available"] is None
+        assert any("Codex host capability cache is unknown" in warning for warning in result["warnings"])
+    finally:
+        service.shutdown()
+
+
+def test_health_warns_for_malformed_codex_multi_agent_host_cache(tmp_path) -> None:
+    cache_path = tmp_path / "malformed-codex-host-capabilities.json"
+    cache_path.write_text(json.dumps({"schema_version": 1, "multi_agent": "bad"}), encoding="utf-8")
+    service = make_service(tmp_path, [], codex_host_capabilities_file=cache_path)
+    try:
+        result = service.antigravity_health(check_antigravity=False)
+        assert result["status"] == "warning"
+        assert result["codex_host"]["multi_agent"]["status"] == "invalid"
+        assert any("Codex host capability cache is invalid" in warning for warning in result["warnings"])
+    finally:
+        service.shutdown()
+
+
 def test_ask_antigravity_happy_path(tmp_path) -> None:
     service = make_service(tmp_path, ["hello"])
     try:
