@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import subprocess
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+import pytest
 from jsonschema import Draft7Validator
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
@@ -228,6 +231,9 @@ def test_tool_metadata_declares_delegated_run_ownership() -> None:
 
 
 def test_start_antigravity_consolidated_modes_route_to_detached_runs(tmp_path) -> None:
+    _require_git()
+    _init_git_repo(tmp_path)
+    (tmp_path / "tracked.txt").write_text("after\n", encoding="utf-8")
     service = GemnessService(GemnessConfig(transcript_dir=tmp_path, observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
     try:
         parent = _handle_message(
@@ -421,3 +427,31 @@ def test_health_tool_returns_structured_antigravity_result(tmp_path) -> None:
         assert result["observer"]["running"] is True
     finally:
         service.shutdown()
+
+
+def _init_git_repo(cwd) -> None:
+    _git(cwd, "init")
+    _git(cwd, "config", "user.email", "gemness@example.invalid")
+    _git(cwd, "config", "user.name", "Gemness Test")
+    (cwd / "tracked.txt").write_text("before\n", encoding="utf-8")
+    _git(cwd, "add", "tracked.txt")
+    _git(cwd, "commit", "-m", "initial")
+
+
+def _require_git() -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git is required for review_current_diff routing tests")
+
+
+def _git(cwd, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    return completed.stdout

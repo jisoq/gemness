@@ -39,7 +39,7 @@ First determine whether you are the main agent orchestrator or the reviewer suba
 2. Trust the parent's `Gemness health handoff` and `delegated_run handoff` when they match the current cwd and task. Do not re-probe host multi-agent support from inside the reviewer.
 3. When a reviewer subagent receives a `Gemness health handoff` for the same cwd with status `ok` or `warning`, it must skip `antigravity_health` and start Gemness work with `start_antigravity`. Recheck only when the parent explicitly asks for health, the cwd differs, the handoff is missing/failed/stale, or the first Gemness tool call fails in a way that needs health diagnostics.
 4. If no handoff is present and the reviewer is the first Gemness actor, it may call `antigravity_health` once with cwd before `start_antigravity`; after that it owns the health result and should continue the task without asking the parent to recheck.
-5. The reviewer subagent should start Gemness work with `start_antigravity`, passing the parent `delegation_id` as `idempotency_key` when present. It should wait or poll with `await_antigravity_run` until completion and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status.
+5. The reviewer subagent should start Gemness work with `start_antigravity`, passing the parent `delegation_id` as `idempotency_key` when present. Gemness scopes that key by tool/cwd/workspace fingerprint, so a duplicate key from a different cwd must start a distinct run. It should wait or poll with `await_antigravity_run` until completion and return a concise final advisory. It must not return only `run_id`, `observer_url`, or an accepted/running status.
 6. The reviewer should not paste the full Antigravity answer back to the parent unless the parent explicitly asks for it; keep the parent report focused on conclusions, accepted/rejected advice, and residual uncertainty.
 
 ## Shared Tool Rules
@@ -51,7 +51,7 @@ First determine whether you are the main agent orchestrator or the reviewer suba
    - Do not omit cwd and fall back to the MCP server process start directory.
    - `follow_up_antigravity` has no cwd argument; it should continue from the parent session's stored `project_root`.
 2. Select the `start_antigravity` mode:
-   - `mode="review_current_diff"` for current workspace change review.
+   - `mode="review_current_diff"` for current git workspace change review. If the cwd is not a git worktree, expect a `diff_unavailable_not_git_repo` error instead of falling back to another repository.
    - `mode="json"` for schema-constrained structured output.
    - `mode="ask"` for general second opinion or reasoning review.
    - `mode="follow_up"` for continuing the same Gemness observer conversation.
@@ -67,6 +67,7 @@ First determine whether you are the main agent orchestrator or the reviewer suba
 - Gemness preserves full run results. Completed `await_antigravity_run` payloads include the full result surface plus `summary`, `budget`, `observer_url`, `session_id`, and `run_id`.
 - Treat `budget` as approximate telemetry for spotting duplicate or wasteful multi-LLM usage, not as exact billing data.
 - `request_fingerprint`, `workspace_fingerprint`, and `workspace_fingerprint_degraded` are recording signals for future dedupe/compaction decisions. Automatic dedupe is off by default (`GEMNESS_ENABLE_AUTO_DEDUPE=false`), and matching fingerprints do not currently imply run reuse.
+- For `review_current_diff`, treat `review_scope` in the final JSON as part of the advisory contract: it should show the inspected cwd, workspace root, base ref, and reviewed changed files. If Gemness returns `invalid` with `review_scope_errors`, discard the advisory as out of scope.
 - Do not paste diffs, raw logs, full transcripts, or full Antigravity answers into the parent conversation when a concise advisory is enough.
 
 ## Failure behavior

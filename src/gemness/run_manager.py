@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import queue
 import threading
 import time
@@ -21,6 +23,8 @@ RunCallable = Callable[
 class ManagedRun:
     run_id: str
     idempotency_key: str | None
+    idempotency_context: dict[str, Any] | None
+    idempotency_lookup_key: str | None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     condition: threading.Condition = field(default_factory=threading.Condition)
@@ -49,14 +53,17 @@ class RunManager:
         for worker in self._workers:
             worker.start()
 
-    def find_by_idempotency_key(self, idempotency_key: str | None) -> str | None:
+    def find_by_idempotency_key(self, idempotency_key: str | None, *, idempotency_context: dict[str, Any] | None = None) -> str | None:
         key = _clean_key(idempotency_key)
         if key is None:
             return None
+        lookup_key = _lookup_key(key, idempotency_context)
         with self._lock:
-            run_id = self._idempotency.get(key)
+            run_id = self._idempotency.get(lookup_key)
         if run_id is not None:
             return run_id
+        if idempotency_context and idempotency_context.get("workspace_fingerprint_degraded") is True:
+            return None
         self.hub.refresh_from_disk()
         for session in self.hub.list_sessions():
             session_id = session.get("session_id")
@@ -66,18 +73,33 @@ class RunManager:
                 if event.get("type") != "run.accepted":
                     continue
                 payload = event.get("payload", {})
-                if isinstance(payload, dict) and payload.get("idempotency_key") == key:
+                if isinstance(payload, dict) and _payload_matches_idempotency(payload, key, lookup_key, idempotency_context):
                     with self._lock:
-                        self._idempotency[key] = session_id
+                        self._idempotency[lookup_key] = session_id
                     return session_id
         return None
 
-    def start(self, run_id: str, run_callable: RunCallable, *, idempotency_key: str | None = None) -> ManagedRun:
-        managed = ManagedRun(run_id=run_id, idempotency_key=_clean_key(idempotency_key))
+    def start(
+        self,
+        run_id: str,
+        run_callable: RunCallable,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_context: dict[str, Any] | None = None,
+    ) -> ManagedRun:
+        clean_key = _clean_key(idempotency_key)
+        clean_context = _clean_context(idempotency_context)
+        lookup_key = _lookup_key(clean_key, clean_context) if clean_key is not None else None
+        managed = ManagedRun(
+            run_id=run_id,
+            idempotency_key=clean_key,
+            idempotency_context=clean_context,
+            idempotency_lookup_key=lookup_key,
+        )
         with self._lock:
             self._runs[run_id] = managed
-            if managed.idempotency_key:
-                self._idempotency.setdefault(managed.idempotency_key, run_id)
+            if managed.idempotency_lookup_key:
+                self._idempotency.setdefault(managed.idempotency_lookup_key, run_id)
         try:
             self._work_queue.put_nowait((managed, run_callable))
         except queue.Full:
@@ -90,6 +112,8 @@ class RunManager:
             {
                 "run_id": run_id,
                 "idempotency_key": managed.idempotency_key,
+                "idempotency_context": managed.idempotency_context,
+                "idempotency_scope": managed.idempotency_lookup_key,
                 "concurrency_limit": self._concurrency_limit,
                 "queue_limit": self._queue_limit,
             },
@@ -229,8 +253,8 @@ class RunManager:
     def _evict(self, managed: ManagedRun) -> None:
         with self._lock:
             self._runs.pop(managed.run_id, None)
-            if managed.idempotency_key and self._idempotency.get(managed.idempotency_key) == managed.run_id:
-                self._idempotency.pop(managed.idempotency_key, None)
+            if managed.idempotency_lookup_key and self._idempotency.get(managed.idempotency_lookup_key) == managed.run_id:
+                self._idempotency.pop(managed.idempotency_lookup_key, None)
 
     def _cancel_unmanaged(self, run_id: str) -> dict[str, Any]:
         try:
@@ -278,3 +302,33 @@ def _clean_key(idempotency_key: str | None) -> str | None:
         return None
     key = " ".join(str(idempotency_key).split())
     return key or None
+
+
+def _clean_context(idempotency_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(idempotency_context, dict):
+        return None
+    clean = {str(key): value for key, value in idempotency_context.items() if value is not None}
+    return clean or None
+
+
+def _lookup_key(idempotency_key: str | None, idempotency_context: dict[str, Any] | None) -> str | None:
+    if idempotency_key is None:
+        return None
+    if not idempotency_context:
+        return idempotency_key
+    payload = {"idempotency_key": idempotency_key, "context": idempotency_context}
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"scoped:{hashlib.sha256(serialized.encode('utf-8', errors='replace')).hexdigest()}"
+
+
+def _payload_matches_idempotency(
+    payload: dict[str, Any],
+    idempotency_key: str,
+    lookup_key: str | None,
+    idempotency_context: dict[str, Any] | None,
+) -> bool:
+    if payload.get("idempotency_key") != idempotency_key:
+        return False
+    if not idempotency_context:
+        return "idempotency_scope" not in payload
+    return payload.get("idempotency_scope") == lookup_key

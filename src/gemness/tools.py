@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import re
@@ -18,7 +19,14 @@ from .config import DEFAULT_MODEL_LABEL, GemnessConfig
 from .json_utils import extract_cli_response, parse_json_candidate
 from .mcp_metadata import SERVER_NAME, SERVER_VERSION, TOOL_NAMES
 from .observer import FINAL_STATUSES, ObserverHub
-from .review import REVIEW_SCHEMA, build_review_prompt
+from .review import (
+    REVIEW_SCHEMA,
+    ReviewWorkspace,
+    ReviewWorkspaceError,
+    build_review_prompt,
+    inspect_review_workspace,
+    validate_review_scope,
+)
 from .run_manager import RunManager
 from .runner import AgyCliRunner, AgyRunResult, AgyRunner, agy_fallback_paths, command_exists, probe_auth, resolve_agy_command
 from .schema_validation import validate_json_schema, validate_schema_definition
@@ -196,15 +204,16 @@ class GemnessService:
         return self._await_blocking(str(started["run_id"]))
 
     def start_antigravity(self, prompt: str, cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        with self._idempotency_scope(idempotency_key):
-            existing = self._existing_idempotent_run(idempotency_key)
+        try:
+            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+        except WorkspaceAccessError as exc:
+            return exc.to_payload()
+        provenance = self._request_provenance("ask", prompt, resolved_cwd)
+        idempotency_context = _idempotency_context("ask_antigravity", resolved_cwd, provenance)
+        with self._idempotency_scope(idempotency_key, idempotency_context):
+            existing = self._existing_idempotent_run(idempotency_key, idempotency_context=idempotency_context)
             if existing is not None:
                 return existing
-            try:
-                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            except WorkspaceAccessError as exc:
-                return exc.to_payload()
-            provenance = self._request_provenance("ask", prompt, resolved_cwd)
             session = self._session("ask_antigravity", None, None, _session_title(prompt, "ask_antigravity"), cwd=resolved_cwd)
             self._record_request_provenance(session.session_id, provenance)
             self.run_manager.start(
@@ -221,22 +230,24 @@ class GemnessService:
                     heartbeat_callback=heartbeat_callback,
                 ),
                 idempotency_key=idempotency_key,
+                idempotency_context=idempotency_context,
             )
             return self._start_payload(session.session_id, idempotency_key=idempotency_key)
 
     def start_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        with self._idempotency_scope(idempotency_key):
-            existing = self._existing_idempotent_run(idempotency_key)
+        schema_error = validate_schema_definition(schema)
+        if schema_error:
+            return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
+        try:
+            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+        except WorkspaceAccessError as exc:
+            return exc.to_payload()
+        provenance = self._request_provenance("json", prompt, resolved_cwd, schema=schema)
+        idempotency_context = _idempotency_context("ask_antigravity_json", resolved_cwd, provenance, schema_hash=provenance.schema_hash)
+        with self._idempotency_scope(idempotency_key, idempotency_context):
+            existing = self._existing_idempotent_run(idempotency_key, idempotency_context=idempotency_context)
             if existing is not None:
                 return existing
-            schema_error = validate_schema_definition(schema)
-            if schema_error:
-                return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
-            try:
-                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            except WorkspaceAccessError as exc:
-                return exc.to_payload()
-            provenance = self._request_provenance("json", prompt, resolved_cwd, schema=schema)
             session = self._session("ask_antigravity_json", None, None, _session_title(prompt, "ask_antigravity_json"), cwd=resolved_cwd)
             self._record_request_provenance(session.session_id, provenance)
             self.run_manager.start(
@@ -254,31 +265,44 @@ class GemnessService:
                     heartbeat_callback=heartbeat_callback,
                 ),
                 idempotency_key=idempotency_key,
+                idempotency_context=idempotency_context,
             )
             return self._start_payload(session.session_id, idempotency_key=idempotency_key)
 
     def start_review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
-        with self._idempotency_scope(idempotency_key):
-            existing = self._existing_idempotent_run(idempotency_key)
+        try:
+            resolved_cwd = resolve_workspace_cwd(self.config, cwd)
+        except WorkspaceAccessError as exc:
+            return exc.to_payload()
+        try:
+            base_ref = validate_base_ref(base_ref)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        try:
+            review_workspace = inspect_review_workspace(resolved_cwd, base_ref)
+        except ReviewWorkspaceError as exc:
+            return exc.to_payload()
+        prompt = build_review_prompt(base_ref, review_workspace)
+        provenance = self._request_provenance("review_current_diff", prompt, resolved_cwd, base_ref=base_ref)
+        idempotency_context = _idempotency_context(
+            "review_current_diff_with_antigravity",
+            resolved_cwd,
+            provenance,
+            base_ref=base_ref,
+            workspace_root=str(review_workspace.workspace_root),
+        )
+        with self._idempotency_scope(idempotency_key, idempotency_context):
+            existing = self._existing_idempotent_run(idempotency_key, idempotency_context=idempotency_context)
             if existing is not None:
                 return existing
-            try:
-                resolved_cwd = resolve_workspace_cwd(self.config, cwd)
-            except WorkspaceAccessError as exc:
-                return exc.to_payload()
-            try:
-                base_ref = validate_base_ref(base_ref)
-            except ValueError as exc:
-                return {"status": "error", "message": str(exc)}
             session = self.hub.create_session(
                 "review_current_diff_with_antigravity",
                 DEFAULT_MODEL_LABEL,
                 title=f"현재 변경 리뷰: {base_ref}",
                 project_root=str(resolved_cwd),
             )
-            prompt = build_review_prompt(base_ref)
-            provenance = self._request_provenance("review_current_diff", prompt, resolved_cwd, base_ref=base_ref)
             self._record_request_provenance(session.session_id, provenance)
+            self.hub.append_event(session.session_id, "review.scope", "system", review_workspace.to_payload())
             self.run_manager.start(
                 session.session_id,
                 lambda cancel_event, process_callback, heartbeat_callback: self._run_json_session(
@@ -289,13 +313,17 @@ class GemnessService:
                     cwd=resolved_cwd,
                     title_source=f"현재 변경 리뷰: {base_ref}",
                     request_provenance=provenance,
+                    review_workspace=review_workspace,
                     cancel_event=cancel_event,
                     process_callback=process_callback,
                     heartbeat_callback=heartbeat_callback,
                 ),
                 idempotency_key=idempotency_key,
+                idempotency_context=idempotency_context,
             )
-            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            payload = self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            payload["expected_review_scope"] = review_workspace.to_payload()
+            return payload
 
     def start_follow_up_antigravity(self, parent_session_id: str, instruction: str, idempotency_key: str | None = None) -> dict[str, Any]:
         with self._idempotency_scope(idempotency_key):
@@ -385,16 +413,17 @@ class GemnessService:
             if time.monotonic() >= deadline:
                 return status | {"message": "Blocking compatibility wait reached its safety deadline."}
 
-    def _existing_idempotent_run(self, idempotency_key: str | None) -> dict[str, Any] | None:
-        existing_run_id = self.run_manager.find_by_idempotency_key(idempotency_key)
+    def _existing_idempotent_run(self, idempotency_key: str | None, *, idempotency_context: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        existing_run_id = self.run_manager.find_by_idempotency_key(idempotency_key, idempotency_context=idempotency_context)
         if existing_run_id is None:
             return None
         return self._run_status_payload(existing_run_id) | {"idempotent": True}
 
-    def _idempotency_scope(self, idempotency_key: str | None) -> Any:
+    def _idempotency_scope(self, idempotency_key: str | None, idempotency_context: dict[str, Any] | None = None) -> Any:
         key = _clean_idempotency_key(idempotency_key)
         if key is None:
             return _null_lock()
+        key = _idempotency_lock_key(key, idempotency_context)
         with self._idempotency_locks_guard:
             lock = self._idempotency_locks.get(key)
             if lock is None:
@@ -637,6 +666,7 @@ class GemnessService:
         cwd: Path | None = None,
         title_source: str | None = None,
         request_provenance: RequestProvenance | None = None,
+        review_workspace: ReviewWorkspace | None = None,
         cancel_event: threading.Event | None = None,
         process_callback: Any = None,
         heartbeat_callback: Any = None,
@@ -742,6 +772,22 @@ class GemnessService:
         else:
             validation_errors = []
         if parse_error is None and not validation_errors:
+            review_scope_errors = validate_review_scope(data, review_workspace) if review_workspace is not None else []
+            if review_scope_errors:
+                return self._review_scope_invalid_result(
+                    session_id,
+                    observer_url,
+                    response_text,
+                    review_scope_errors,
+                    stats,
+                    metadata,
+                    budget,
+                    warnings or [],
+                    request_provenance,
+                    repaired=False,
+                    repair_attempted=False,
+                    repair_succeeded=False,
+                )
             self.hub.append_event(session_id, "json.validation_passed", "codex_mcp", {"data": data})
             payload = {
                 "status": "valid",
@@ -769,6 +815,7 @@ class GemnessService:
                 "repair_succeeded": False,
                 **request_provenance.result_fields(),
             }
+            payload.update(_review_payload_fields(data, review_workspace))
             self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
             return payload
         repair = self._repair_or_invalid(
@@ -785,6 +832,22 @@ class GemnessService:
         )
         combined_budget = combine_budgets(budget, repair.get("budget"))
         if repair["status"] == "valid":
+            review_scope_errors = validate_review_scope(repair["data"], review_workspace) if review_workspace is not None else []
+            if review_scope_errors:
+                return self._review_scope_invalid_result(
+                    session_id,
+                    observer_url,
+                    repair["raw_response"],
+                    review_scope_errors,
+                    stats,
+                    metadata,
+                    combined_budget or budget,
+                    warnings or [],
+                    request_provenance,
+                    repaired=False,
+                    repair_attempted=True,
+                    repair_succeeded=True,
+                )
             payload = {
                 "status": "valid",
                 "data": repair["data"],
@@ -802,6 +865,7 @@ class GemnessService:
                 "repair_succeeded": True,
                 **request_provenance.result_fields(),
             }
+            payload.update(_review_payload_fields(repair["data"], review_workspace))
             self.hub.set_status(session_id, "valid", "session.completed", {"result": payload})
             return payload
         if repair["status"] == "error":
@@ -860,6 +924,44 @@ class GemnessService:
         }
         event_name = "json.parse_failed" if parse_error else "json.validation_failed"
         self.hub.append_event(session_id, event_name, "codex_mcp", {"parse_error": parse_error, "validation_errors": validation_errors})
+        self.hub.set_status(session_id, "invalid", "session.completed", {"result": payload})
+        return payload
+
+    def _review_scope_invalid_result(
+        self,
+        session_id: str,
+        observer_url: str,
+        response_text: str,
+        review_scope_errors: list[dict[str, object]],
+        stats: dict[str, Any],
+        metadata: dict[str, Any],
+        budget: dict[str, Any],
+        warnings: list[str],
+        request_provenance: RequestProvenance,
+        *,
+        repaired: bool,
+        repair_attempted: bool,
+        repair_succeeded: bool,
+    ) -> dict[str, Any]:
+        payload = {
+            "status": "invalid",
+            "response_preview": _preview_text(response_text),
+            "parse_error": None,
+            "validation_errors": review_scope_errors,
+            "review_scope_errors": review_scope_errors,
+            "session_id": session_id,
+            "run_id": session_id,
+            "observer_url": observer_url,
+            "stats": stats,
+            "metadata": metadata,
+            "budget": budget,
+            "warnings": warnings,
+            "repaired": repaired,
+            "repair_attempted": repair_attempted,
+            "repair_succeeded": repair_succeeded,
+            **request_provenance.result_fields(),
+        }
+        self.hub.append_event(session_id, "review.scope_failed", "codex_mcp", {"validation_errors": review_scope_errors})
         self.hub.set_status(session_id, "invalid", "session.completed", {"result": payload})
         return payload
 
@@ -1387,6 +1489,16 @@ def _event_provenance_fields(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
 
+def _review_payload_fields(data: Any, review_workspace: ReviewWorkspace | None) -> dict[str, Any]:
+    if review_workspace is None:
+        return {}
+    review_scope = data.get("review_scope") if isinstance(data, dict) else None
+    return {
+        "review_scope": review_scope,
+        "expected_review_scope": review_workspace.to_payload(),
+    }
+
+
 def _mode_for_tool(tool_name: str) -> str:
     if tool_name == "ask_antigravity_json":
         return "json"
@@ -1445,6 +1557,25 @@ def _clean_idempotency_key(idempotency_key: str | None) -> str | None:
         return None
     key = " ".join(str(idempotency_key).split())
     return key or None
+
+
+def _idempotency_context(tool_name: str, cwd: Path | None, provenance: RequestProvenance, **extra: Any) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "tool_name": tool_name,
+        "cwd": str(cwd) if cwd is not None else None,
+        "workspace_fingerprint": provenance.workspace_fingerprint,
+        "workspace_fingerprint_degraded": provenance.workspace_fingerprint_degraded,
+    }
+    context.update(extra)
+    return {key: value for key, value in context.items() if value is not None}
+
+
+def _idempotency_lock_key(idempotency_key: str, idempotency_context: dict[str, Any] | None) -> str:
+    if not idempotency_context:
+        return idempotency_key
+    payload = {"idempotency_key": idempotency_key, "context": idempotency_context}
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"scoped:{hashlib.sha256(serialized.encode('utf-8', errors='replace')).hexdigest()}"
 
 
 def _is_writable_dir(path: Path) -> bool:
