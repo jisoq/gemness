@@ -57,7 +57,7 @@ class ReviewWorkspace:
             "cwd": str(self.cwd),
             "workspace_root": str(self.workspace_root),
             "base_ref": self.base_ref,
-            "changed_files": list(self.changed_files),
+            "reviewed_files": list(self.changed_files),
         }
 
 
@@ -81,6 +81,8 @@ def inspect_review_workspace(cwd: Path, base_ref: str) -> ReviewWorkspace:
     try:
         inside = _git(resolved, "rev-parse", "--is-inside-work-tree").strip().lower()
     except ReviewWorkspaceError as exc:
+        if exc.reason != "diff_unavailable_not_git_repo":
+            raise
         raise ReviewWorkspaceError(
             f"Current diff unavailable: cwd is not a git repository: {resolved}",
             reason="diff_unavailable_not_git_repo",
@@ -160,27 +162,37 @@ def validate_review_scope(data: object, review_workspace: ReviewWorkspace) -> li
 
 
 def _changed_files(cwd: Path, root: Path, base_ref: str) -> list[str]:
-    diff_files = _git(cwd, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base_ref, "--").splitlines()
-    untracked = _git(root, "ls-files", "--others", "--exclude-standard").splitlines()
+    pathspec = _cwd_pathspec(cwd, root)
+    diff_files = _git(root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base_ref, "--", pathspec).splitlines()
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "--", pathspec).splitlines()
     return _dedupe_sorted(_normalize_relative_path(path) for path in (*diff_files, *untracked))
 
 
 def _git(cwd: Path, *args: str) -> str:
-    completed = subprocess_run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        timeout=10,
-    )
+    try:
+        completed = subprocess_run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=10,
+        )
+    except OSError as exc:
+        raise ReviewWorkspaceError(f"Current diff unavailable for cwd {cwd}: {exc}", reason="diff_unavailable_git_error", cwd=cwd) from exc
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout).strip() or f"git {' '.join(args)} failed with exit code {completed.returncode}"
         reason = "diff_unavailable_not_git_repo" if "rev-parse" in args else "diff_unavailable_git_error"
         raise ReviewWorkspaceError(f"Current diff unavailable for cwd {cwd}: {message}", reason=reason, cwd=cwd)
     return completed.stdout
+
+
+def _cwd_pathspec(cwd: Path, root: Path) -> str:
+    if cwd == root:
+        return "."
+    return cwd.relative_to(root).as_posix()
 
 
 def _dedupe_sorted(paths: Iterable[str]) -> list[str]:

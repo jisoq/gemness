@@ -330,5 +330,5 @@ def _payload_matches_idempotency(
     if payload.get("idempotency_key") != idempotency_key:
         return False
     if not idempotency_context:
-        return "idempotency_scope" not in payload
+        return payload.get("idempotency_scope") in {None, lookup_key}
     return payload.get("idempotency_scope") == lookup_key

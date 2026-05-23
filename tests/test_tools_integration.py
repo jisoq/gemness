@@ -531,6 +531,70 @@ def test_review_current_diff_rejects_non_git_workspace(tmp_path) -> None:
         service.shutdown()
 
 
+def test_review_current_diff_returns_structured_error_when_git_unavailable(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def missing_git(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("gemness.review.subprocess_run", missing_git)
+    service = make_service(tmp_path / "transcripts", [json.dumps({})], workspace_root=workspace, allowed_roots=(workspace,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(workspace))
+
+        assert result["status"] == "error"
+        assert result["reason"] == "diff_unavailable_git_error"
+        assert "git" in result["message"]
+        assert service.runner.calls == []
+    finally:
+        service.shutdown()
+
+
+def test_review_current_diff_limits_changed_files_to_requested_subdirectory(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    subdir = repo / "src"
+    subdir.mkdir(parents=True)
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "outside.txt").write_text("before\n", encoding="utf-8")
+    (subdir / "inside.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", "outside.txt", "src/inside.txt")
+    _git(repo, "commit", "-m", "initial")
+    (repo / "outside.txt").write_text("after\n", encoding="utf-8")
+    (repo / "outside-new.txt").write_text("new\n", encoding="utf-8")
+    (subdir / "inside.txt").write_text("after\n", encoding="utf-8")
+    (subdir / "new.txt").write_text("new\n", encoding="utf-8")
+    expected_scope = {
+        "cwd": str(subdir.resolve()),
+        "workspace_root": str(repo.resolve()),
+        "base_ref": "HEAD",
+        "reviewed_files": ["src/inside.txt", "src/new.txt"],
+    }
+    review = {
+        "verdict": "pass",
+        "summary": "No findings.",
+        "findings": [],
+        "recommended_actions": [],
+        "review_scope": expected_scope,
+    }
+    service = make_service(tmp_path / "transcripts", [json.dumps(review)], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(subdir))
+
+        assert result["status"] == "valid"
+        assert result["data"]["review_scope"] == expected_scope
+        prompt = service.runner.calls[0]["prompt"]
+        assert "src/inside.txt" in prompt
+        assert "src/new.txt" in prompt
+        assert "outside.txt" not in prompt
+        assert "outside-new.txt" not in prompt
+    finally:
+        service.shutdown()
+
+
 def test_review_current_diff_rejects_out_of_scope_advisory(tmp_path) -> None:
     _require_git()
     repo = tmp_path / "repo"
@@ -913,6 +977,23 @@ def test_follow_up_idempotency_lock_does_not_block_unrelated_start(tmp_path) -> 
     finally:
         if conversation_lock is not None and conversation_lock.locked():
             conversation_lock.release()
+        service.shutdown()
+
+
+def test_completed_follow_up_idempotency_recovers_from_events(tmp_path) -> None:
+    service = make_service(tmp_path, ["parent", "follow"])
+    try:
+        parent = service.ask_antigravity("parent prompt")
+        started = service.start_follow_up_antigravity(parent["session_id"], "follow", idempotency_key="follow-key")
+        done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
+        repeated = service.start_follow_up_antigravity(parent["session_id"], "different follow", idempotency_key="follow-key")
+
+        assert done["status"] == "completed"
+        assert service.run_manager.get(started["run_id"]) is None
+        assert repeated["run_id"] == started["run_id"]
+        assert repeated["idempotent"] is True
+        assert len(service.runner.calls) == 2
+    finally:
         service.shutdown()
 
 
