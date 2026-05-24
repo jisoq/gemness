@@ -77,9 +77,11 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert "Gemness health handoff" in text
     assert "delegated_run handoff" in text
     assert "idempotency_key" in text
-    assert 'model="gpt-5.4-mini"' in text
-    assert 'reasoning_effort="high"' in text
+    assert 'model="gpt-5.5"' in text
+    assert 'reasoning_effort="medium"' in text
+    assert "gpt-5.4-mini" not in text
     assert "gpt-5.5-mini" not in text
+    assert 'reasoning_effort="high"' not in text
     assert "xhigh" not in text
     assert "skip `antigravity_health`" in text
     assert "main must not call `start_antigravity` / `await_antigravity_run` while reviewer owns the delegated run" in text
@@ -88,6 +90,14 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert "~/.gemness/codex-host-capabilities.json" in text
     assert "start Gemness work with `start_antigravity`" in text
     assert "wait or poll with `await_antigravity_run`" in text
+    assert "A single `await_antigravity_run` timeout" in text
+    assert "result_pending=true" in text
+    assert "must not call `cancel_antigravity_run` merely because the run is slow" in text
+    assert "must not fabricate, infer, or summarize Antigravity's advisory" in text
+    assert "the reviewer is only the delivery owner for that follow-up" in text
+    assert "must forward the instruction to Antigravity" in text
+    assert "must not answer the parent follow-up from the reviewer model's own reasoning" in text
+    assert "must not self-initiate another Antigravity turn" in text
     assert "non-overlapping local tasks" in text
     assert "blocking convenience wrappers" in text
     assert "Pass this cwd to `antigravity_health`" in text

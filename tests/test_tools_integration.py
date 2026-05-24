@@ -11,6 +11,7 @@ import pytest
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
 from gemness.observer import ObserverHub
+from gemness.review import ReviewWorkspaceError, inspect_review_workspace
 from gemness.runner import AgyCapabilities, AgyRunResult
 from gemness.tools import GemnessService, validate_base_ref
 
@@ -470,21 +471,45 @@ def test_requested_cwd_outside_allowed_root_is_rejected(tmp_path) -> None:
 
 
 def test_review_current_diff_asks_antigravity_to_inspect_workspace(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    (repo / "tracked.txt").write_text("after\n", encoding="utf-8")
+    (repo / "notes.txt").write_text("new\n", encoding="utf-8")
+    expected_scope = {
+        "cwd": str(repo.resolve()),
+        "workspace_root": str(repo.resolve()),
+        "base_ref": "HEAD",
+        "reviewed_files": ["notes.txt", "tracked.txt"],
+    }
     review = {
         "verdict": "pass",
         "summary": "No findings.",
         "findings": [],
         "recommended_actions": [],
+        "review_scope": expected_scope,
     }
-    service = make_service(tmp_path / "transcripts", [json.dumps(review)], workspace_root=tmp_path, allowed_roots=(tmp_path,))
+    service = make_service(tmp_path / "transcripts", [json.dumps(review)], workspace_root=repo, allowed_roots=(repo,))
     try:
-        result = service.review_current_diff_with_antigravity("HEAD")
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(repo))
         assert result["status"] == "valid"
         assert result["budget"]["prompt_chars"] > 0
         assert result["budget"]["response_chars"] == len(json.dumps(review))
-        assert service.runner.calls[0]["cwd"] == tmp_path.resolve()
+        assert result["data"]["review_scope"] == expected_scope
+        assert result["review_scope"] == expected_scope
+        assert service.runner.calls[0]["cwd"] == repo.resolve()
         prompt = service.runner.calls[0]["prompt"]
         assert "Gemness has not embedded a diff" in prompt
+        assert "Workspace review scope" in prompt
+        assert json.dumps(str(repo.resolve()))[1:-1] in prompt
+        assert "tracked.txt" in prompt
+        assert "notes.txt" in prompt
         assert "Base ref: HEAD" in prompt
         assert FENCED_DIFF_MARKER not in prompt
         assert PATCH_HEADER_MARKER not in prompt
@@ -492,21 +517,270 @@ def test_review_current_diff_asks_antigravity_to_inspect_workspace(tmp_path) -> 
         service.shutdown()
 
 
-def test_review_current_diff_does_not_run_gemness_side_comparison(tmp_path, monkeypatch) -> None:
+def test_review_current_diff_rejects_non_git_workspace(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = make_service(tmp_path / "transcripts", [json.dumps({})], workspace_root=workspace, allowed_roots=(workspace,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(workspace))
+
+        assert result["status"] == "error"
+        assert result["reason"] == "diff_unavailable_not_git_repo"
+        assert "not a git repository" in result["message"]
+        assert service.runner.calls == []
+    finally:
+        service.shutdown()
+
+
+def test_review_current_diff_returns_structured_error_when_git_unavailable(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def missing_git(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("gemness.review.subprocess_run", missing_git)
+    service = make_service(tmp_path / "transcripts", [json.dumps({})], workspace_root=workspace, allowed_roots=(workspace,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(workspace))
+
+        assert result["status"] == "error"
+        assert result["reason"] == "diff_unavailable_git_error"
+        assert "git" in result["message"]
+        assert service.runner.calls == []
+    finally:
+        service.shutdown()
+
+
+def test_review_current_diff_returns_structured_error_when_git_times_out(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    seen_timeouts = []
+
+    def timed_out(*args, **kwargs):  # noqa: ANN002, ANN003
+        seen_timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(["git"], timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr("gemness.review.subprocess_run", timed_out)
+    service = make_service(tmp_path / "transcripts", [json.dumps({})], workspace_root=workspace, allowed_roots=(workspace,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(workspace))
+
+        assert result["status"] == "error"
+        assert result["reason"] == "diff_unavailable_git_error"
+        assert "timed out" in result["message"]
+        assert seen_timeouts == [2]
+        assert service.runner.calls == []
+    finally:
+        service.shutdown()
+
+
+def test_review_workspace_uses_nul_file_output_and_configured_timeout(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    calls = []
+
+    def fake_run(command, **kwargs):  # noqa: ANN002, ANN003
+        calls.append((command, kwargs))
+        args = command[1:]
+        text = kwargs.get("text") is True
+        empty = "" if text else b""
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+        if args == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=f"{workspace.resolve()}\n", stderr="")
+        if args == ["rev-parse", "--verify", "--quiet", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", "HEAD", "--", "."]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=b" leading.txt\0src/a\nb.txt\0src/back\\slash.txt\0src/tab\tfile.txt\0trailing.txt \0",
+                stderr=b"",
+            )
+        if args == ["ls-files", "-z", "--others", "--exclude-standard", "--", "."]:
+            return subprocess.CompletedProcess(command, 0, stdout=empty, stderr=empty)
+        raise AssertionError(f"Unexpected git command: {command!r}")
+
+    monkeypatch.setattr("gemness.review.subprocess_run", fake_run)
+
+    review_workspace = inspect_review_workspace(workspace, "HEAD", git_timeout_sec=42)
+
+    assert review_workspace.changed_files == (" leading.txt", "src/a\nb.txt", "src/back\\slash.txt", "src/tab\tfile.txt", "trailing.txt ")
+    assert all(kwargs["timeout"] == 42 for _, kwargs in calls)
+    assert any(command[1:4] == ["diff", "--name-only", "-z"] for command, _ in calls)
+    assert any(command[1:3] == ["ls-files", "-z"] for command, _ in calls)
+
+
+def test_review_workspace_rejects_non_utf8_git_paths_without_loss(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    def fake_run(command, **kwargs):  # noqa: ANN002, ANN003
+        args = command[1:]
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+        if args == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=f"{workspace.resolve()}\n", stderr="")
+        if args == ["rev-parse", "--verify", "--quiet", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", "HEAD", "--", "."]:
+            return subprocess.CompletedProcess(command, 0, stdout=b"bad\x80.txt\0bad\x81.txt\0", stderr=b"")
+        if args == ["ls-files", "-z", "--others", "--exclude-standard", "--", "."]:
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+        raise AssertionError(f"Unexpected git command: {command!r}")
+
+    monkeypatch.setattr("gemness.review.subprocess_run", fake_run)
+
+    with pytest.raises(ReviewWorkspaceError) as exc_info:
+        inspect_review_workspace(workspace, "HEAD", git_timeout_sec=42)
+
+    assert exc_info.value.reason == "diff_unavailable_git_error"
+    assert "non-UTF-8 path" in str(exc_info.value)
+
+
+def test_review_current_diff_handles_unborn_head(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "staged.txt")
+    (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    expected_scope = {
+        "cwd": str(repo.resolve()),
+        "workspace_root": str(repo.resolve()),
+        "base_ref": "HEAD",
+        "reviewed_files": ["staged.txt", "untracked.txt"],
+    }
     review = {
         "verdict": "pass",
         "summary": "No findings.",
         "findings": [],
         "recommended_actions": [],
+        "review_scope": expected_scope,
+    }
+    service = make_service(tmp_path / "transcripts", [json.dumps(review)], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(repo))
+
+        assert result["status"] == "valid"
+        assert result["data"]["review_scope"] == expected_scope
+        assert service.runner.calls[0]["cwd"] == repo.resolve()
+    finally:
+        service.shutdown()
+
+
+def test_review_current_diff_limits_changed_files_to_requested_subdirectory(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    subdir = repo / "src"
+    subdir.mkdir(parents=True)
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "outside.txt").write_text("before\n", encoding="utf-8")
+    (subdir / "inside.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", "outside.txt", "src/inside.txt")
+    _git(repo, "commit", "-m", "initial")
+    (repo / "outside.txt").write_text("after\n", encoding="utf-8")
+    (repo / "outside-new.txt").write_text("new\n", encoding="utf-8")
+    (subdir / "inside.txt").write_text("after\n", encoding="utf-8")
+    (subdir / "new.txt").write_text("new\n", encoding="utf-8")
+    expected_scope = {
+        "cwd": str(subdir.resolve()),
+        "workspace_root": str(repo.resolve()),
+        "base_ref": "HEAD",
+        "reviewed_files": ["src/inside.txt", "src/new.txt"],
+    }
+    review = {
+        "verdict": "pass",
+        "summary": "No findings.",
+        "findings": [],
+        "recommended_actions": [],
+        "review_scope": expected_scope,
+    }
+    service = make_service(tmp_path / "transcripts", [json.dumps(review)], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(subdir))
+
+        assert result["status"] == "valid"
+        assert result["data"]["review_scope"] == expected_scope
+        prompt = service.runner.calls[0]["prompt"]
+        assert "src/inside.txt" in prompt
+        assert "src/new.txt" in prompt
+        assert "outside.txt" not in prompt
+        assert "outside-new.txt" not in prompt
+    finally:
+        service.shutdown()
+
+
+def test_review_current_diff_rejects_out_of_scope_advisory(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    (repo / "tracked.txt").write_text("after\n", encoding="utf-8")
+    stale_review = {
+        "verdict": "needs_work",
+        "summary": "Findings from another repository.",
+        "findings": [{"severity": "high", "title": "Wrong repo", "file": "src/other.py", "explanation": "Out of scope."}],
+        "recommended_actions": [],
+        "review_scope": {
+            "cwd": str((tmp_path / "other").resolve()),
+            "workspace_root": str((tmp_path / "other").resolve()),
+            "base_ref": "HEAD",
+            "reviewed_files": ["src/other.py"],
+        },
+    }
+    service = make_service(tmp_path / "transcripts", [json.dumps(stale_review)], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(repo))
+
+        assert result["status"] == "invalid"
+        assert result["conversation_id"]
+        assert result["review_scope_errors"]
+        assert any("review_scope.cwd" == error["path"] for error in result["review_scope_errors"])
+    finally:
+        service.shutdown()
+
+
+def test_review_current_diff_does_not_run_gemness_side_comparison(tmp_path, monkeypatch) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    (repo / "tracked.txt").write_text("after\n", encoding="utf-8")
+    review = {
+        "verdict": "pass",
+        "summary": "No findings.",
+        "findings": [],
+        "recommended_actions": [],
+        "review_scope": {
+            "cwd": str(repo.resolve()),
+            "workspace_root": str(repo.resolve()),
+            "base_ref": "HEAD",
+            "reviewed_files": ["tracked.txt"],
+        },
     }
 
     def fail_if_called(*args, **kwargs):  # noqa: ANN002, ANN003
-        raise AssertionError("review_current_diff_with_antigravity must not run a Gemness-side repository comparison")
+        raise AssertionError("review_current_diff_with_antigravity must not run a Gemness-side diff comparison")
 
     monkeypatch.setattr("gemness.tools.subprocess.run", fail_if_called)
-    service = make_service(tmp_path, [json.dumps(review)])
+    service = make_service(tmp_path / "transcripts", [json.dumps(review)], workspace_root=repo, allowed_roots=(repo,))
     try:
-        result = service.review_current_diff_with_antigravity("HEAD")
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(repo))
         assert result["status"] == "valid"
         assert result["data"]["verdict"] == "pass"
         events = service.hub.get_events(result["session_id"], raw=True)
@@ -567,9 +841,14 @@ def test_start_antigravity_returns_detached_run_and_await_collects_result(tmp_pa
         started = service.start_antigravity("slow prompt")
         assert started["status"] == "accepted"
         assert started["run_id"]
+        assert started["result_pending"] is True
+        assert started["incomplete_reason"] == "antigravity_run_not_terminal"
         early = service.await_antigravity_run(started["run_id"], timeout_sec=0.01)
         assert early["status"] in {"queued", "sending", "running"}
         assert "result" not in early
+        assert early["result_pending"] is True
+        assert early["incomplete_reason"] == "antigravity_run_not_terminal"
+        assert "Do not invent advisory content" in early["agent_guidance"]
 
         release.set()
         done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
@@ -586,16 +865,61 @@ def test_start_antigravity_returns_detached_run_and_await_collects_result(tmp_pa
 
 
 def test_idempotency_key_reuses_existing_detached_run(tmp_path) -> None:
-    service = make_service(tmp_path, ["once"])
+    release = threading.Event()
+
+    def slow_response(session_id, **kwargs):  # noqa: ANN001, ANN003
+        release.wait(timeout=2)
+        stdout = json.dumps({"response": "once", "metadata": {"streaming": False, "run_id": session_id}})
+        return AgyRunResult.completed(stdout, metadata={"streaming": False, "run_id": session_id})
+
+    service = make_service(tmp_path, [slow_response])
     try:
         first = service.start_antigravity("first", idempotency_key="same-request")
         second = service.start_antigravity("second", idempotency_key="same-request")
+        release.set()
         done = service.await_antigravity_run(first["run_id"], timeout_sec=2)
 
         assert second["run_id"] == first["run_id"]
         assert second["idempotent"] is True
         assert done["result"]["text"] == "once"
         assert len(service.runner.calls) == 1
+    finally:
+        service.shutdown()
+
+
+def test_idempotency_key_is_scoped_by_cwd(tmp_path) -> None:
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    service = make_service(tmp_path / "transcripts", ["one", "two"], workspace_root=tmp_path, allowed_roots=(tmp_path,), agy_concurrency_limit=1)
+    try:
+        first = service.start_antigravity("first", cwd=str(one), idempotency_key="same-request")
+        second = service.start_antigravity("second", cwd=str(two), idempotency_key="same-request")
+        first_done = service.await_antigravity_run(first["run_id"], timeout_sec=2)
+        second_done = service.await_antigravity_run(second["run_id"], timeout_sec=2)
+
+        assert second["run_id"] != first["run_id"]
+        assert first_done["result"]["text"] == "one"
+        assert second_done["result"]["text"] == "two"
+        assert [call["cwd"] for call in service.runner.calls] == [one.resolve(), two.resolve()]
+    finally:
+        service.shutdown()
+
+
+def test_degraded_workspace_idempotency_does_not_reuse_completed_session(tmp_path) -> None:
+    service = make_service(tmp_path, ["first", "second"])
+    try:
+        first = service.start_antigravity("first", idempotency_key="same-request")
+        first_done = service.await_antigravity_run(first["run_id"], timeout_sec=2)
+        second = service.start_antigravity("second", idempotency_key="same-request")
+        second_done = service.await_antigravity_run(second["run_id"], timeout_sec=2)
+
+        assert first_done["workspace_fingerprint_degraded"] is True
+        assert second_done["workspace_fingerprint_degraded"] is True
+        assert second["run_id"] != first["run_id"]
+        assert second.get("idempotent") is not True
+        assert second_done["result"]["text"] == "second"
     finally:
         service.shutdown()
 
@@ -703,8 +1027,8 @@ def test_idempotency_key_concurrent_start_creates_single_detached_run(tmp_path) 
     service = make_service(tmp_path, [slow_response])
     original_find = service.run_manager.find_by_idempotency_key
 
-    def slow_find(idempotency_key):  # noqa: ANN001
-        found = original_find(idempotency_key)
+    def slow_find(idempotency_key, *, idempotency_context=None):  # noqa: ANN001
+        found = original_find(idempotency_key, idempotency_context=idempotency_context)
         if found is None:
             time.sleep(0.05)
         return found
@@ -782,6 +1106,23 @@ def test_follow_up_idempotency_lock_does_not_block_unrelated_start(tmp_path) -> 
         service.shutdown()
 
 
+def test_completed_follow_up_idempotency_recovers_from_events(tmp_path) -> None:
+    service = make_service(tmp_path, ["parent", "follow"])
+    try:
+        parent = service.ask_antigravity("parent prompt")
+        started = service.start_follow_up_antigravity(parent["session_id"], "follow", idempotency_key="follow-key")
+        done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
+        repeated = service.start_follow_up_antigravity(parent["session_id"], "different follow", idempotency_key="follow-key")
+
+        assert done["status"] == "completed"
+        assert service.run_manager.get(started["run_id"]) is None
+        assert repeated["run_id"] == started["run_id"]
+        assert repeated["idempotent"] is True
+        assert len(service.runner.calls) == 2
+    finally:
+        service.shutdown()
+
+
 def test_get_antigravity_run_event_cursor_returns_only_later_events(tmp_path) -> None:
     release = threading.Event()
 
@@ -806,7 +1147,16 @@ def test_get_antigravity_run_event_cursor_returns_only_later_events(tmp_path) ->
 
 
 def test_completed_detached_run_is_evictable_and_recovers_from_events(tmp_path) -> None:
-    service = make_service(tmp_path, ["once"])
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "gemness@example.invalid")
+    _git(repo, "config", "user.name", "Gemness Test")
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "initial")
+    service = make_service(tmp_path / "transcripts", ["once"], workspace_root=repo, allowed_roots=(repo,))
     try:
         started = service.start_antigravity("first", idempotency_key="same-request")
         done = service.await_antigravity_run(started["run_id"], timeout_sec=2)
