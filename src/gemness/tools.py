@@ -951,6 +951,7 @@ class GemnessService:
             "review_scope_errors": review_scope_errors,
             "session_id": session_id,
             "run_id": session_id,
+            "conversation_id": self.hub.get_session(session_id, raw=True).get("conversation_id"),
             "observer_url": observer_url,
             "stats": stats,
             "metadata": metadata,

@@ -551,6 +551,58 @@ def test_review_current_diff_returns_structured_error_when_git_unavailable(tmp_p
         service.shutdown()
 
 
+def test_review_current_diff_returns_structured_error_when_git_times_out(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def timed_out(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise subprocess.TimeoutExpired(["git"], timeout=10)
+
+    monkeypatch.setattr("gemness.review.subprocess_run", timed_out)
+    service = make_service(tmp_path / "transcripts", [json.dumps({})], workspace_root=workspace, allowed_roots=(workspace,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(workspace))
+
+        assert result["status"] == "error"
+        assert result["reason"] == "diff_unavailable_git_error"
+        assert "timed out" in result["message"]
+        assert service.runner.calls == []
+    finally:
+        service.shutdown()
+
+
+def test_review_current_diff_handles_unborn_head(tmp_path) -> None:
+    _require_git()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "staged.txt")
+    (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    expected_scope = {
+        "cwd": str(repo.resolve()),
+        "workspace_root": str(repo.resolve()),
+        "base_ref": "HEAD",
+        "reviewed_files": ["staged.txt", "untracked.txt"],
+    }
+    review = {
+        "verdict": "pass",
+        "summary": "No findings.",
+        "findings": [],
+        "recommended_actions": [],
+        "review_scope": expected_scope,
+    }
+    service = make_service(tmp_path / "transcripts", [json.dumps(review)], workspace_root=repo, allowed_roots=(repo,))
+    try:
+        result = service.review_current_diff_with_antigravity("HEAD", cwd=str(repo))
+
+        assert result["status"] == "valid"
+        assert result["data"]["review_scope"] == expected_scope
+        assert service.runner.calls[0]["cwd"] == repo.resolve()
+    finally:
+        service.shutdown()
+
+
 def test_review_current_diff_limits_changed_files_to_requested_subdirectory(tmp_path) -> None:
     _require_git()
     repo = tmp_path / "repo"
@@ -623,6 +675,7 @@ def test_review_current_diff_rejects_out_of_scope_advisory(tmp_path) -> None:
         result = service.review_current_diff_with_antigravity("HEAD", cwd=str(repo))
 
         assert result["status"] == "invalid"
+        assert result["conversation_id"]
         assert result["review_scope_errors"]
         assert any("review_scope.cwd" == error["path"] for error in result["review_scope_errors"])
     finally:

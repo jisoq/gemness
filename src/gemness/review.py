@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from subprocess import run as subprocess_run
+from subprocess import SubprocessError, run as subprocess_run
 from typing import Iterable
 
 REVIEW_SCHEMA = {
@@ -163,6 +163,9 @@ def validate_review_scope(data: object, review_workspace: ReviewWorkspace) -> li
 
 def _changed_files(cwd: Path, root: Path, base_ref: str) -> list[str]:
     pathspec = _cwd_pathspec(cwd, root)
+    if base_ref == "HEAD" and not _ref_exists(root, "HEAD"):
+        files = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "--", pathspec).splitlines()
+        return _dedupe_sorted(_normalize_relative_path(path) for path in files)
     diff_files = _git(root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base_ref, "--", pathspec).splitlines()
     untracked = _git(root, "ls-files", "--others", "--exclude-standard", "--", pathspec).splitlines()
     return _dedupe_sorted(_normalize_relative_path(path) for path in (*diff_files, *untracked))
@@ -180,7 +183,7 @@ def _git(cwd: Path, *args: str) -> str:
             check=False,
             timeout=10,
         )
-    except OSError as exc:
+    except (OSError, SubprocessError) as exc:
         raise ReviewWorkspaceError(f"Current diff unavailable for cwd {cwd}: {exc}", reason="diff_unavailable_git_error", cwd=cwd) from exc
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout).strip() or f"git {' '.join(args)} failed with exit code {completed.returncode}"
@@ -193,6 +196,23 @@ def _cwd_pathspec(cwd: Path, root: Path) -> str:
     if cwd == root:
         return "."
     return cwd.relative_to(root).as_posix()
+
+
+def _ref_exists(root: Path, ref: str) -> bool:
+    try:
+        completed = subprocess_run(
+            ["git", "rev-parse", "--verify", "--quiet", ref],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, SubprocessError) as exc:
+        raise ReviewWorkspaceError(f"Current diff unavailable for cwd {root}: {exc}", reason="diff_unavailable_git_error", cwd=root) from exc
+    return completed.returncode == 0
 
 
 def _dedupe_sorted(paths: Iterable[str]) -> list[str]:
