@@ -44,7 +44,7 @@ TOOLS = [
     },
     {
         "name": "start_antigravity",
-        "description": "Start a background Antigravity run and return immediately with a run id. This is the delegated reviewer-owned flow; the main agent should call it only for explicit takeover or non-delegated fallback. Use mode=ask, json, review_current_diff, or follow_up.",
+        "description": "Start a background Antigravity run and return immediately with a run id. This is the delegated reviewer-owned flow; the main agent should call it only for explicit takeover or non-delegated fallback. Use mode=ask, json, or review_current_diff normally. When the parent handoff delegates follow_up, the reviewer must forward that follow-up to Antigravity and must not answer it itself.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -59,7 +59,7 @@ TOOLS = [
                     "type": "string",
                     "enum": ["ask", "json", "review_current_diff", "follow_up"],
                     "default": "ask",
-                    "description": "Run type. ask uses prompt, json uses prompt+schema, review_current_diff uses base_ref, and follow_up uses parent_session_id+prompt.",
+                    "description": "Run type. ask uses prompt, json uses prompt+schema, review_current_diff uses base_ref, and follow_up uses parent_session_id+prompt. A delegated reviewer must use follow_up to forward a parent follow-up handoff to Antigravity instead of answering it itself.",
                 },
                 "prompt": {"type": "string"},
                 "schema": {"type": "object"},
@@ -75,7 +75,7 @@ TOOLS = [
     },
     {
         "name": "follow_up_antigravity",
-        "description": "Blocking final-result follow-up for a previous Antigravity observer conversation. Intended for reviewer subagents in the default Codex flow.",
+        "description": "Blocking final-result follow-up for a previous Antigravity observer conversation. When the parent handoff delegates follow-up mode with a parent_session_id and prompt, reviewer subagents must call this or start mode=follow_up to forward the instruction to Antigravity, not answer the follow-up themselves. They must not self-initiate unrelated follow-up turns.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -114,7 +114,7 @@ TOOLS = [
     },
     {
         "name": "await_antigravity_run",
-        "description": "Wait briefly for a background Antigravity run, then return completion or the current running state. Use only by the delegated run owner or during explicit main-agent takeover; timeout_sec=0 polls without waiting.",
+        "description": "Wait briefly for a background Antigravity run, then return completion or the current running state. Use only by the delegated run owner or during explicit main-agent takeover; timeout_sec=0 polls without waiting. A non-terminal response means no final Antigravity answer exists yet: keep polling or hand off pending state, and do not invent advisory content.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -129,7 +129,7 @@ TOOLS = [
     },
     {
         "name": "cancel_antigravity_run",
-        "description": "Background run control API: request cancellation for a detached Antigravity run by run id.",
+        "description": "Background run control API: request cancellation for a detached Antigravity run by run id. Do not use this merely because an await call timed out or the run is taking longer than expected; cancel only for an explicit user/parent request or a known wrong run.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,

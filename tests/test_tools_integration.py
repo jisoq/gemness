@@ -841,9 +841,14 @@ def test_start_antigravity_returns_detached_run_and_await_collects_result(tmp_pa
         started = service.start_antigravity("slow prompt")
         assert started["status"] == "accepted"
         assert started["run_id"]
+        assert started["result_pending"] is True
+        assert started["incomplete_reason"] == "antigravity_run_not_terminal"
         early = service.await_antigravity_run(started["run_id"], timeout_sec=0.01)
         assert early["status"] in {"queued", "sending", "running"}
         assert "result" not in early
+        assert early["result_pending"] is True
+        assert early["incomplete_reason"] == "antigravity_run_not_terminal"
+        assert "Do not invent advisory content" in early["agent_guidance"]
 
         release.set()
         done = service.await_antigravity_run(started["run_id"], timeout_sec=2)

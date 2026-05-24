@@ -35,6 +35,11 @@ from .workspace import WorkspaceAccessError, inspect_workspace_policy, normalize
 
 
 RESPONSE_PREVIEW_CHARS = 4000
+PENDING_AGENT_GUIDANCE = (
+    "No final Antigravity result is available yet. Treat this as pending, not failure or silence: "
+    "poll await_antigravity_run again or return an explicit pending handoff with run_id and observer_url. "
+    "Do not invent advisory content, summarize from progress events, or cancel solely because this await call timed out."
+)
 PROGRESS_NOISE_PATTERNS = (
     re.compile(r"^\s*(?:Searching|Reading|Inspecting|Scanning|Running|Waiting)\b.{0,160}(?:\.\.\.|…)\s*$", re.IGNORECASE),
     re.compile(
@@ -453,6 +458,10 @@ class GemnessService:
                 payload["budget"] = result["budget"]
             if isinstance(result.get("message"), str):
                 payload["message"] = result["message"]
+        else:
+            payload["result_pending"] = True
+            payload["incomplete_reason"] = "antigravity_run_not_terminal"
+            payload["agent_guidance"] = PENDING_AGENT_GUIDANCE
         return payload
 
     def _run_status_payload(
@@ -491,6 +500,10 @@ class GemnessService:
             payload["result"] = result
             if isinstance(result.get("budget"), dict):
                 payload["budget"] = result["budget"]
+        elif session["status"] not in FINAL_STATUSES:
+            payload["result_pending"] = True
+            payload["incomplete_reason"] = "antigravity_run_not_terminal"
+            payload["agent_guidance"] = PENDING_AGENT_GUIDANCE
         payload.update(_event_provenance_fields(raw_events))
         return payload
 

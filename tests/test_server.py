@@ -223,11 +223,22 @@ def test_tool_metadata_declares_delegated_run_ownership() -> None:
 
     assert "delegated reviewer-owned flow" in start_tool["description"]
     assert "explicit takeover" in start_tool["description"]
+    assert "must forward that follow-up to Antigravity" in start_tool["description"]
+    assert "must not answer it itself" in start_tool["description"]
     idempotency_description = start_tool["inputSchema"]["properties"]["idempotency_key"]["description"]
     assert "Parent-supplied delegation key" in idempotency_description
     assert "delegation_id" in idempotency_description
     assert "delegated run owner" in await_tool["description"]
     assert "explicit main-agent takeover" in await_tool["description"]
+    assert "do not invent advisory content" in await_tool["description"]
+    cancel_tool = next(tool for tool in TOOLS if tool["name"] == "cancel_antigravity_run")
+    assert "Do not use this merely because an await call timed out" in cancel_tool["description"]
+    follow_up_tool = next(tool for tool in TOOLS if tool["name"] == "follow_up_antigravity")
+    assert "must call this or start mode=follow_up to forward the instruction to Antigravity" in follow_up_tool["description"]
+    assert "not answer the follow-up themselves" in follow_up_tool["description"]
+    start_mode_description = start_tool["inputSchema"]["properties"]["mode"]["description"]
+    assert "forward a parent follow-up handoff to Antigravity" in start_mode_description
+    assert "instead of answering it itself" in start_mode_description
 
 
 def test_start_antigravity_consolidated_modes_route_to_detached_runs(tmp_path) -> None:
