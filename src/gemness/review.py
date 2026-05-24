@@ -179,7 +179,14 @@ def _git(cwd: Path, *args: str, timeout_sec: float | None) -> str:
 def _git_paths(cwd: Path, *args: str, timeout_sec: float | None) -> list[str]:
     completed = _run_git(cwd, *args, text=False, timeout_sec=timeout_sec)
     stdout = completed.stdout if isinstance(completed.stdout, bytes) else str(completed.stdout).encode("utf-8", errors="replace")
-    return _decode_nul_paths(stdout)
+    try:
+        return _decode_nul_paths(stdout)
+    except UnicodeDecodeError as exc:
+        raise ReviewWorkspaceError(
+            f"Current diff unavailable for cwd {cwd}: git reported a non-UTF-8 path",
+            reason="diff_unavailable_git_error",
+            cwd=cwd,
+        ) from exc
 
 
 def _run_git(cwd: Path, *args: str, text: bool, timeout_sec: float | None):
@@ -232,7 +239,7 @@ def _dedupe_sorted(paths: Iterable[str]) -> list[str]:
 
 
 def _decode_nul_paths(stdout: bytes) -> list[str]:
-    return [part.decode("utf-8", errors="replace") for part in stdout.split(b"\0") if part]
+    return [part.decode("utf-8") for part in stdout.split(b"\0") if part]
 
 
 def _completed_output_text(value: object) -> str:
@@ -242,7 +249,7 @@ def _completed_output_text(value: object) -> str:
 
 
 def _normalize_relative_path(path: str) -> str:
-    value = str(path).strip().strip("/")
+    value = str(path).strip("/")
     parts = [part for part in value.split("/") if part and part != "."]
     if any(part == ".." for part in parts):
         return value
