@@ -279,7 +279,7 @@ class GemnessService:
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
         try:
-            review_workspace = inspect_review_workspace(resolved_cwd, base_ref)
+            review_workspace = inspect_review_workspace(resolved_cwd, base_ref, git_timeout_sec=self.config.agy_timeout_sec)
         except ReviewWorkspaceError as exc:
             return exc.to_payload()
         prompt = build_review_prompt(base_ref, review_workspace)

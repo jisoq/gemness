@@ -76,10 +76,10 @@ class ReviewWorkspaceError(ValueError):
         }
 
 
-def inspect_review_workspace(cwd: Path, base_ref: str) -> ReviewWorkspace:
+def inspect_review_workspace(cwd: Path, base_ref: str, *, git_timeout_sec: float | None = None) -> ReviewWorkspace:
     resolved = cwd.expanduser().resolve()
     try:
-        inside = _git(resolved, "rev-parse", "--is-inside-work-tree").strip().lower()
+        inside = _git(resolved, "rev-parse", "--is-inside-work-tree", timeout_sec=git_timeout_sec).strip().lower()
     except ReviewWorkspaceError as exc:
         if exc.reason != "diff_unavailable_not_git_repo":
             raise
@@ -95,8 +95,8 @@ def inspect_review_workspace(cwd: Path, base_ref: str) -> ReviewWorkspace:
             cwd=resolved,
         )
     try:
-        root = Path(_git(resolved, "rev-parse", "--show-toplevel").strip()).expanduser().resolve()
-        changed_files = _changed_files(resolved, root, base_ref)
+        root = Path(_git(resolved, "rev-parse", "--show-toplevel", timeout_sec=git_timeout_sec).strip()).expanduser().resolve()
+        changed_files = _changed_files(resolved, root, base_ref, timeout_sec=git_timeout_sec)
     except ReviewWorkspaceError:
         raise
     except OSError as exc:
@@ -161,35 +161,47 @@ def validate_review_scope(data: object, review_workspace: ReviewWorkspace) -> li
     return errors
 
 
-def _changed_files(cwd: Path, root: Path, base_ref: str) -> list[str]:
+def _changed_files(cwd: Path, root: Path, base_ref: str, *, timeout_sec: float | None) -> list[str]:
     pathspec = _cwd_pathspec(cwd, root)
-    if base_ref == "HEAD" and not _ref_exists(root, "HEAD"):
-        files = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "--", pathspec).splitlines()
+    if base_ref == "HEAD" and not _ref_exists(root, "HEAD", timeout_sec=timeout_sec):
+        files = _git_paths(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", pathspec, timeout_sec=timeout_sec)
         return _dedupe_sorted(_normalize_relative_path(path) for path in files)
-    diff_files = _git(root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base_ref, "--", pathspec).splitlines()
-    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "--", pathspec).splitlines()
+    diff_files = _git_paths(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base_ref, "--", pathspec, timeout_sec=timeout_sec)
+    untracked = _git_paths(root, "ls-files", "-z", "--others", "--exclude-standard", "--", pathspec, timeout_sec=timeout_sec)
     return _dedupe_sorted(_normalize_relative_path(path) for path in (*diff_files, *untracked))
 
 
-def _git(cwd: Path, *args: str) -> str:
+def _git(cwd: Path, *args: str, timeout_sec: float | None) -> str:
+    completed = _run_git(cwd, *args, text=True, timeout_sec=timeout_sec)
+    return str(completed.stdout)
+
+
+def _git_paths(cwd: Path, *args: str, timeout_sec: float | None) -> list[str]:
+    completed = _run_git(cwd, *args, text=False, timeout_sec=timeout_sec)
+    stdout = completed.stdout if isinstance(completed.stdout, bytes) else str(completed.stdout).encode("utf-8", errors="replace")
+    return _decode_nul_paths(stdout)
+
+
+def _run_git(cwd: Path, *args: str, text: bool, timeout_sec: float | None):
     try:
         completed = subprocess_run(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            text=text,
+            encoding="utf-8" if text else None,
+            errors="replace" if text else None,
             check=False,
-            timeout=10,
+            timeout=timeout_sec,
         )
     except (OSError, SubprocessError) as exc:
         raise ReviewWorkspaceError(f"Current diff unavailable for cwd {cwd}: {exc}", reason="diff_unavailable_git_error", cwd=cwd) from exc
     if completed.returncode != 0:
-        message = (completed.stderr or completed.stdout).strip() or f"git {' '.join(args)} failed with exit code {completed.returncode}"
+        message = _completed_output_text(completed.stderr) or _completed_output_text(completed.stdout)
+        message = message.strip() or f"git {' '.join(args)} failed with exit code {completed.returncode}"
         reason = "diff_unavailable_not_git_repo" if "rev-parse" in args else "diff_unavailable_git_error"
         raise ReviewWorkspaceError(f"Current diff unavailable for cwd {cwd}: {message}", reason=reason, cwd=cwd)
-    return completed.stdout
+    return completed
 
 
 def _cwd_pathspec(cwd: Path, root: Path) -> str:
@@ -198,7 +210,7 @@ def _cwd_pathspec(cwd: Path, root: Path) -> str:
     return cwd.relative_to(root).as_posix()
 
 
-def _ref_exists(root: Path, ref: str) -> bool:
+def _ref_exists(root: Path, ref: str, *, timeout_sec: float | None) -> bool:
     try:
         completed = subprocess_run(
             ["git", "rev-parse", "--verify", "--quiet", ref],
@@ -207,7 +219,7 @@ def _ref_exists(root: Path, ref: str) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=timeout_sec,
             check=False,
         )
     except (OSError, SubprocessError) as exc:
@@ -219,8 +231,18 @@ def _dedupe_sorted(paths: Iterable[str]) -> list[str]:
     return sorted({path for path in paths if path})
 
 
+def _decode_nul_paths(stdout: bytes) -> list[str]:
+    return [part.decode("utf-8", errors="replace") for part in stdout.split(b"\0") if part]
+
+
+def _completed_output_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
 def _normalize_relative_path(path: str) -> str:
-    value = str(path).strip().replace("\\", "/").strip("/")
+    value = str(path).strip().strip("/")
     parts = [part for part in value.split("/") if part and part != "."]
     if any(part == ".." for part in parts):
         return value

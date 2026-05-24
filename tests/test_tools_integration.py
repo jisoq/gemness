@@ -11,6 +11,7 @@ import pytest
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
 from gemness.observer import ObserverHub
+from gemness.review import inspect_review_workspace
 from gemness.runner import AgyCapabilities, AgyRunResult
 from gemness.tools import GemnessService, validate_base_ref
 
@@ -554,9 +555,11 @@ def test_review_current_diff_returns_structured_error_when_git_unavailable(tmp_p
 def test_review_current_diff_returns_structured_error_when_git_times_out(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    seen_timeouts = []
 
     def timed_out(*args, **kwargs):  # noqa: ANN002, ANN003
-        raise subprocess.TimeoutExpired(["git"], timeout=10)
+        seen_timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(["git"], timeout=kwargs.get("timeout"))
 
     monkeypatch.setattr("gemness.review.subprocess_run", timed_out)
     service = make_service(tmp_path / "transcripts", [json.dumps({})], workspace_root=workspace, allowed_roots=(workspace,))
@@ -566,9 +569,42 @@ def test_review_current_diff_returns_structured_error_when_git_times_out(tmp_pat
         assert result["status"] == "error"
         assert result["reason"] == "diff_unavailable_git_error"
         assert "timed out" in result["message"]
+        assert seen_timeouts == [2]
         assert service.runner.calls == []
     finally:
         service.shutdown()
+
+
+def test_review_workspace_uses_nul_file_output_and_configured_timeout(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    calls = []
+
+    def fake_run(command, **kwargs):  # noqa: ANN002, ANN003
+        calls.append((command, kwargs))
+        args = command[1:]
+        text = kwargs.get("text") is True
+        empty = "" if text else b""
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+        if args == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, stdout=f"{workspace.resolve()}\n", stderr="")
+        if args == ["rev-parse", "--verify", "--quiet", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", "HEAD", "--", "."]:
+            return subprocess.CompletedProcess(command, 0, stdout=b"src/a\nb.txt\0src/back\\slash.txt\0src/tab\tfile.txt\0", stderr=b"")
+        if args == ["ls-files", "-z", "--others", "--exclude-standard", "--", "."]:
+            return subprocess.CompletedProcess(command, 0, stdout=empty, stderr=empty)
+        raise AssertionError(f"Unexpected git command: {command!r}")
+
+    monkeypatch.setattr("gemness.review.subprocess_run", fake_run)
+
+    review_workspace = inspect_review_workspace(workspace, "HEAD", git_timeout_sec=42)
+
+    assert review_workspace.changed_files == ("src/a\nb.txt", "src/back\\slash.txt", "src/tab\tfile.txt")
+    assert all(kwargs["timeout"] == 42 for _, kwargs in calls)
+    assert any(command[1:4] == ["diff", "--name-only", "-z"] for command, _ in calls)
+    assert any(command[1:3] == ["ls-files", "-z"] for command, _ in calls)
 
 
 def test_review_current_diff_handles_unborn_head(tmp_path) -> None:
