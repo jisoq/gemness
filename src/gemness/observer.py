@@ -18,9 +18,10 @@ from .observer_client import get_json, post_json
 from .process_registry import (
     ProcessRecord,
     ProcessRegistry,
+    REGISTRY_STALE_SEC,
     record_is_orphan,
     record_is_takeover_eligible,
-    terminate_process,
+    terminate_record_process,
     workspace_id_for_path,
 )
 from .redaction import redact_payload, redact_text
@@ -116,7 +117,7 @@ class ObserverHub:
         with self._lock:
             if self._web_server is not None:
                 return
-            if self._observer_mode in {"owner", "attached", "blocked"}:
+            if self._observer_mode in {"owner", "attached"}:
                 return
             self._observer_mode = "starting"
         self._write_registry_state()
@@ -151,6 +152,13 @@ class ObserverHub:
         status, status_error = get_json(f"{base_url}/api/status")
         if _is_gemness_status(status):
             owner_record = self._owner_record_from_status(status)
+            if owner_record is None or not owner_record.management_token:
+                self._set_observer_mode(
+                    "blocked",
+                    owner_status=status,
+                    observer_error="Gemness observer owner is reachable, but its registry token is unavailable.",
+                )
+                return
             if owner_record is not None and record_is_takeover_eligible(owner_record):
                 self._set_observer_mode("takeover_pending", attached_to=base_url)
                 if self._request_takeover(base_url, owner_record) and self._retry_start_owner():
@@ -167,7 +175,7 @@ class ObserverHub:
             if owner_record.pid == os.getpid():
                 continue
             try:
-                terminate_process(owner_record.pid)
+                terminate_record_process(owner_record)
             except OSError as exc:
                 self._takeover_error = str(exc)
             else:
@@ -182,6 +190,12 @@ class ObserverHub:
             return None
         pid = status.get("pid")
         if not isinstance(pid, int):
+            return None
+        registry_id = status.get("registry_id")
+        if isinstance(registry_id, str) and registry_id:
+            for record in self._registry.list_records():
+                if record.pid == pid and record.registry_id == registry_id:
+                    return record
             return None
         return self._registry.read_pid(pid)
 
@@ -307,9 +321,11 @@ class ObserverHub:
             web_server = self._web_server
             observer_error = self._web_server_error
             attached_to = self._attached_base_url
+        registry_record = self._registry.read_current()
         return {
             "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "pid": os.getpid(),
+            "registry_id": registry_record.registry_id if registry_record is not None else None,
             "parent_pid": os.getppid(),
             "started_at": self._started_at_wall,
             "uptime_ms": int((time.monotonic() - self._started_at_monotonic) * 1000),
@@ -346,10 +362,12 @@ class ObserverHub:
         ]
 
     def takeover_eligibility(self) -> dict[str, Any]:
-        record = self._registry.read_pid(os.getpid())
+        record = self._registry.read_current()
         reasons: list[str] = []
         if record is not None and record_is_orphan(record):
             reasons.append("parent_process_exited")
+        if record is not None and record.last_seen_at < time.time() - REGISTRY_STALE_SEC:
+            reasons.append("stale_registry_heartbeat")
         eligible = bool(reasons)
         return {"eligible": eligible, "reasons": reasons}
 
@@ -407,6 +425,11 @@ class ObserverHub:
             return
         owner_record = self._owner_record_from_status(owner_status)
         token = owner_record.management_token if owner_record is not None else None
+        if not token:
+            with self._lock:
+                self._ingest_error = "attached observer owner registry token is unavailable"
+            self._recover_attached_owner(base_url, owner_record)
+            return
         data, error, status_code = post_json(f"{base_url}/api/ingest", {"event": event.to_dict()}, token=token, timeout=1.0)
         with self._lock:
             if status_code and 200 <= status_code < 300 and data and data.get("accepted"):
@@ -419,6 +442,14 @@ class ObserverHub:
     def _recover_attached_owner(self, base_url: str, owner_record: ProcessRecord | None) -> None:
         status, _ = get_json(f"{base_url}/api/status")
         if _is_gemness_status(status):
+            refreshed_record = self._owner_record_from_status(status)
+            if refreshed_record is None or not refreshed_record.management_token:
+                self._set_observer_mode(
+                    "blocked",
+                    owner_status=status,
+                    observer_error="Gemness observer owner is reachable, but its registry token is unavailable.",
+                )
+                return
             with self._lock:
                 self._attached_owner_status = status
             return
@@ -429,7 +460,7 @@ class ObserverHub:
             return
         if owner_record is not None and owner_record.pid != os.getpid():
             try:
-                terminate_process(owner_record.pid)
+                terminate_record_process(owner_record)
             except OSError as exc:
                 self._takeover_error = str(exc)
             else:

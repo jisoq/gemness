@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import shutil
+import socket
 import subprocess
 from urllib.parse import urlparse
 from urllib.request import urlopen
@@ -92,6 +93,69 @@ def test_second_observer_on_same_port_reuses_existing_dashboard_url(tmp_path) ->
         ingested = next(session for session in sessions if session["session_id"] == result["session_id"])
         assert ingested["workspace_id"] == second.hub.workspace_id
         assert ingested["workspace_label"] == "repo-two"
+    finally:
+        if second is not None:
+            second.shutdown()
+        first.shutdown()
+
+
+def test_blocked_observer_retries_after_port_conflict_clears(tmp_path) -> None:
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    service = GemnessService(
+        GemnessConfig(
+            transcript_dir=tmp_path / "transcripts",
+            process_registry_dir=tmp_path / "processes",
+            observer_enabled=True,
+            observer_port=port,
+            workspace_root=tmp_path,
+        ),
+        runner=ServerFakeRunner(),
+    )
+    try:
+        assert service.hub.observer_mode == "blocked"
+        assert service.hub.web_server_running is False
+
+        blocker.close()
+        service.hub.start_web_server()
+
+        assert service.hub.web_server_running is True
+        assert service.hub.observer_mode == "owner"
+    finally:
+        blocker.close()
+        service.shutdown()
+
+
+def test_second_observer_blocks_when_owner_registry_token_is_unavailable(tmp_path) -> None:
+    first = GemnessService(
+        GemnessConfig(
+            transcript_dir=tmp_path / "one",
+            process_registry_dir=tmp_path / "processes-one",
+            observer_enabled=True,
+            observer_port=0,
+            workspace_root=tmp_path / "repo-one",
+        ),
+        runner=ServerFakeRunner(),
+    )
+    second = None
+    try:
+        port = urlparse(first.hub.base_url).port
+        assert port is not None
+        second = GemnessService(
+            GemnessConfig(
+                transcript_dir=tmp_path / "two",
+                process_registry_dir=tmp_path / "processes-two",
+                observer_enabled=True,
+                observer_port=port,
+                workspace_root=tmp_path / "repo-two",
+            ),
+            runner=ServerFakeRunner(),
+        )
+
+        assert second.hub.observer_mode == "blocked"
+        assert second.hub.observer_state()["bind_error"] == "Gemness observer owner is reachable, but its registry token is unavailable."
     finally:
         if second is not None:
             second.shutdown()

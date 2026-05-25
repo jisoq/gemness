@@ -8,7 +8,7 @@ import signal
 import sys
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,7 @@ class ProcessRecord:
     attached_to: str | None = None
     management_token: str | None = None
     registry_id: str = ""
+    process_identity: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProcessRecord":
@@ -59,6 +60,7 @@ class ProcessRecord:
             attached_to=data.get("attached_to") if isinstance(data.get("attached_to"), str) else None,
             management_token=data.get("management_token") if isinstance(data.get("management_token"), str) else None,
             registry_id=str(data.get("registry_id") or ""),
+            process_identity=data.get("process_identity") if isinstance(data.get("process_identity"), dict) else {},
         )
 
     def to_dict(self, *, include_token: bool = True) -> dict[str, Any]:
@@ -107,6 +109,7 @@ class ProcessRegistry:
             version=SERVER_VERSION,
             management_token=management_token,
             registry_id=self.registry_id,
+            process_identity=process_identity(self.pid),
         )
         self._write_record(record)
         return record
@@ -179,7 +182,7 @@ class ProcessRegistry:
             should_terminate = terminate_orphans and process_is_running(record.pid) and record_is_orphan(record)
             if should_terminate:
                 try:
-                    terminate_process(record.pid)
+                    terminate_record_process(record)
                     terminated.append(record.pid)
                     should_remove = True
                 except OSError as exc:
@@ -207,6 +210,7 @@ class ProcessRegistry:
                     "running": process_is_running(record.pid),
                     "orphan": record_is_orphan(record),
                     "stale": record.last_seen_at < now - REGISTRY_STALE_SEC,
+                    "identity_verified": record_identity_matches(record),
                 }
                 for record in records
             ],
@@ -243,6 +247,22 @@ def record_is_takeover_eligible(record: ProcessRecord) -> bool:
     return record_is_orphan(record) or record.last_seen_at < time.time() - REGISTRY_STALE_SEC
 
 
+def record_identity_matches(record: ProcessRecord) -> bool:
+    expected = record.process_identity or {}
+    if not expected:
+        return False
+    current = process_identity(record.pid)
+    if not current:
+        return False
+    expected_marker = expected.get("start_marker")
+    current_marker = current.get("start_marker")
+    if expected_marker is not None and current_marker is not None:
+        return str(expected_marker) == str(current_marker)
+    expected_argv = expected.get("argv")
+    current_argv = current.get("argv")
+    return bool(expected_argv and current_argv and expected_argv == current_argv)
+
+
 def process_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -263,6 +283,49 @@ def terminate_process(pid: int) -> None:
     os.kill(pid, signal.SIGTERM)
 
 
+def terminate_record_process(record: ProcessRecord) -> None:
+    if not record_identity_matches(record):
+        raise OSError(f"Refusing to terminate pid {record.pid}: process identity does not match registry record")
+    terminate_process(record.pid)
+
+
+def process_identity(pid: int) -> dict[str, Any]:
+    if pid <= 0:
+        return {}
+    if os.name == "nt":
+        start_marker = _windows_process_start_marker(pid)
+        return {"start_marker": start_marker, "source": "win32"} if start_marker is not None else {}
+    identity = _procfs_process_identity(pid)
+    if identity:
+        return identity
+    if pid == os.getpid():
+        return {"argv": [str(item) for item in sys.argv], "source": "current"}
+    return {}
+
+
+def _procfs_process_identity(pid: int) -> dict[str, Any]:
+    proc_dir = Path("/proc") / str(pid)
+    stat_path = proc_dir / "stat"
+    if not stat_path.exists():
+        return {}
+    try:
+        stat_text = stat_path.read_text(encoding="utf-8", errors="replace")
+        after_name = stat_text.rsplit(")", 1)[1].strip().split()
+        start_marker = after_name[19]
+    except (OSError, IndexError):
+        return {}
+    argv: list[str] = []
+    try:
+        raw_cmdline = (proc_dir / "cmdline").read_bytes()
+        argv = [part.decode("utf-8", errors="replace") for part in raw_cmdline.split(b"\0") if part]
+    except OSError:
+        pass
+    result: dict[str, Any] = {"start_marker": start_marker, "source": "procfs"}
+    if argv:
+        result["argv"] = argv
+    return result
+
+
 def _windows_process_is_running(pid: int) -> bool:
     process_query_limited_information = 0x1000
     still_active = 259
@@ -281,5 +344,39 @@ def _windows_process_is_running(pid: int) -> bool:
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
             return False
         return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_process_start_marker(pid: int) -> int | None:
+    process_query_limited_information = 0x1000
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_ulong), ("dwHighDateTime", ctypes.c_ulong)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return None
+    try:
+        creation = FILETIME()
+        exit_time = FILETIME()
+        kernel = FILETIME()
+        user = FILETIME()
+        if not kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exit_time), ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        return (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
     finally:
         kernel32.CloseHandle(handle)

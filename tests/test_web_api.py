@@ -279,6 +279,36 @@ def test_orphaned_observer_owner_accepts_authenticated_takeover(tmp_path, monkey
         service.shutdown()
 
 
+def test_stale_observer_owner_accepts_authenticated_takeover(tmp_path, monkeypatch) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, process_registry_dir=tmp_path / "processes", observer_enabled=True, observer_port=0, workspace_root=tmp_path)
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        record = service.hub._registry.read_current()
+        assert record is not None
+        record.last_seen_at = time.time() - 120
+        monkeypatch.setattr(service.hub._registry, "read_current", lambda: record)
+        base_url = service.hub.base_url
+        request = Request(
+            f"{base_url}/api/takeover",
+            data=json.dumps({"requester_pid": 1}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Gemness-Management-Token": service.hub.token},
+            method="POST",
+        )
+
+        with urlopen(request, timeout=2) as response:
+            body = json.loads(response.read().decode("utf-8"))
+
+        deadline = time.monotonic() + 2
+        while service.hub.web_server_running and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert response.status == 202
+        assert body["accepted"] is True
+        assert "stale_registry_heartbeat" in body["takeover"]["reasons"]
+    finally:
+        service.shutdown()
+
+
 def test_conversation_transcript_view_model_handles_core_events(tmp_path) -> None:
     node = shutil.which("node")
     assert node is not None, "node is required for Observer UI rendering tests"
