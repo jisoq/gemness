@@ -38,6 +38,7 @@ class ObserverWebServer:
 
 class _HubHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = False
+    daemon_threads = True
 
     def __init__(self, server_address: tuple[str, int], handler_cls: type[BaseHTTPRequestHandler], hub: ObserverHub) -> None:
         self.hub = hub
@@ -80,6 +81,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/config":
             self._json({"redact_raw_by_default": True})
+            return
+        if path == "/api/status":
+            self._json(self.server.hub.status_payload())
             return
         if path == "/api/events":
             self._sse(raw=_truthy(query.get("raw", ["0"])[0]))
@@ -159,7 +163,25 @@ class _Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        self._read_json()
+        parsed = urlparse(self.path)
+        payload = self._read_json()
+        if parsed.path == "/api/ingest":
+            if not self.server.hub.validate_token(self.headers.get("X-Gemness-Management-Token")):
+                self._json({"accepted": False, "error": "invalid management token"}, HTTPStatus.UNAUTHORIZED)
+                return
+            event = payload.get("event")
+            if not isinstance(event, dict):
+                self._json({"accepted": False, "error": "event is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                self._json(self.server.hub.ingest_event(event), HTTPStatus.ACCEPTED)
+            except (KeyError, TypeError, ValueError) as exc:
+                self._json({"accepted": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/takeover":
+            result, status_code = self.server.hub.request_takeover(self.headers.get("X-Gemness-Management-Token"))
+            self._json(result, HTTPStatus(status_code))
+            return
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def _authorized(self, query: dict[str, list[str]]) -> bool:
@@ -515,6 +537,7 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="toolbar">
         <label><input id="raw" type="checkbox"> 원본 보기</label>
+        <select id="workspaceFilter" title="workspace filter"></select>
       </div>
       <div id="sessionList" class="session-list"></div>
     </aside>
@@ -552,6 +575,7 @@ INDEX_HTML = r"""<!doctype html>
     let refreshInFlight = null;
     let transcriptRequestSeq = 0;
     let loadingSessionId = "";
+    let workspaceFilter = "all";
     if (explicitSessionPath) canonicalizeDashboardUrl();
 
     const statusLabels = {
@@ -794,7 +818,11 @@ INDEX_HTML = r"""<!doctype html>
       };
     }
     function renderSessions() {
-      const conversationItems = groupSessionsByConversation(sessions);
+      renderWorkspaceFilter();
+      const filteredSessions = workspaceFilter === "all"
+        ? sessions
+        : sessions.filter((session) => (session.workspace_id || "unknown") === workspaceFilter);
+      const conversationItems = groupSessionsByConversation(filteredSessions);
       const liveSessions = conversationItems.filter((session) => !isTerminalStatus(session.status));
       const historySessions = conversationItems.filter((session) => isTerminalStatus(session.status));
       const html = [
@@ -802,6 +830,20 @@ INDEX_HTML = r"""<!doctype html>
         renderSessionGroup("History", historySessions, "이전 세션이 없습니다.")
       ].join("");
       setInnerHtmlIfChanged("sessionList", html);
+    }
+    function renderWorkspaceFilter() {
+      const workspaces = new Map();
+      for (const session of sessions || []) {
+        const id = session.workspace_id || "unknown";
+        if (!workspaces.has(id)) workspaces.set(id, session.workspace_label || session.project_root || id);
+      }
+      if (workspaceFilter !== "all" && !workspaces.has(workspaceFilter)) workspaceFilter = "all";
+      const options = [`<option value="all">All workspaces</option>`]
+        .concat([...workspaces.entries()]
+          .sort((a, b) => String(a[1]).localeCompare(String(b[1])))
+          .map(([id, label]) => `<option value="${escapeHtml(id)}" ${id === workspaceFilter ? "selected" : ""}>${escapeHtml(label)}</option>`));
+      setInnerHtmlIfChanged("workspaceFilter", options.join(""));
+      qs("workspaceFilter").value = workspaceFilter;
     }
     function bindSessionListEvents() {
       qs("sessionList").onclick = async (event) => {
@@ -889,6 +931,7 @@ INDEX_HTML = r"""<!doctype html>
           <button class="session-main" data-session="${escapeHtml(s.session_id)}">
             <span class="session-heading">${statusDotHtml(telemetry)}<span><span class="session-title">${escapeHtml(title)}</span> <span class="badge ${escapeHtml(s.status)}">${escapeHtml(statusLabel(s.status))}</span></span></span>
             <span class="meta">${escapeHtml(toolMeta)}</span>
+            <span class="meta">${escapeHtml(s.workspace_label || s.project_root || s.workspace_id || "")}</span>
             <span class="meta">${escapeHtml(s.model || "")}</span>
             <span class="meta">${escapeHtml(formatDate(s.started_at))}${s.duration_ms ? ` · ${formatDuration(s.duration_ms)}` : ""}</span>
           </button>
@@ -953,6 +996,7 @@ INDEX_HTML = r"""<!doctype html>
         ["상태", statusLabel(session.status)],
         ["시작", formatDate(session.started_at)],
         ["종료", formatDate(session.completed_at)],
+        ["workspace", session.workspace_label || session.project_root || session.workspace_id || "기록 없음"],
         ["cwd", cwd || "기록 없음"],
         ["conversation id", session.conversation_id || conversation.conversation_id || "없음"],
         ["run id", session.run_id || session.session_id || "없음"],
@@ -1541,6 +1585,22 @@ INDEX_HTML = r"""<!doctype html>
       return JSON.stringify(value);
     }
     qs("refresh").onclick = () => loadSessions();
+    qs("workspaceFilter").onchange = async () => {
+      workspaceFilter = qs("workspaceFilter").value || "all";
+      renderSessions();
+      const visible = workspaceFilter === "all"
+        ? sessions
+        : sessions.filter((session) => (session.workspace_id || "unknown") === workspaceFilter);
+      if (currentSessionId && !visible.some((session) => session.session_id === currentSessionId)) {
+        liveMode = true;
+        currentSessionId = preferredLiveSession(visible)?.session_id || "";
+        if (currentSessionId) await loadTranscript(currentSessionId);
+        else {
+          transcript = null;
+          renderTranscript();
+        }
+      }
+    };
     qs("raw").onchange = async () => {
       if (qs("raw").checked && !confirm("원본 payload에는 민감한 내용이 포함될 수 있습니다. 이 로컬 토큰으로 원본을 보시겠습니까?")) qs("raw").checked = false;
       openEvents();

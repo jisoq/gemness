@@ -53,20 +53,45 @@ def test_service_can_defer_observer_until_antigravity_probe(tmp_path) -> None:
 
 
 def test_second_observer_on_same_port_reuses_existing_dashboard_url(tmp_path) -> None:
-    first = GemnessService(GemnessConfig(transcript_dir=tmp_path / "one", observer_enabled=True, observer_port=0, workspace_root=tmp_path), runner=ServerFakeRunner())
+    repo_one = tmp_path / "repo-one"
+    repo_two = tmp_path / "repo-two"
+    repo_one.mkdir()
+    repo_two.mkdir()
+    first = GemnessService(
+        GemnessConfig(
+            transcript_dir=tmp_path / "one",
+            process_registry_dir=tmp_path / "processes",
+            observer_enabled=True,
+            observer_port=0,
+            workspace_root=repo_one,
+        ),
+        runner=ServerFakeRunner(),
+    )
     second = None
     try:
         port = urlparse(first.hub.base_url).port
         assert port is not None
         second = GemnessService(
-            GemnessConfig(transcript_dir=tmp_path / "two", observer_enabled=True, observer_port=port, workspace_root=tmp_path),
+            GemnessConfig(
+                transcript_dir=tmp_path / "two",
+                process_registry_dir=tmp_path / "processes",
+                observer_enabled=True,
+                observer_port=port,
+                workspace_root=repo_two,
+            ),
             runner=ServerFakeRunner(),
         )
 
         assert second.hub.web_server_running is False
+        assert second.hub.observer_mode == "attached"
         assert second.hub.base_url == f"http://127.0.0.1:{port}"
         result = second.ask_antigravity("hello from second")
         assert result["observer_url"] == f"http://127.0.0.1:{port}/"
+        with urlopen(f"{first.hub.base_url}/api/sessions", timeout=2) as response:
+            sessions = json.loads(response.read().decode("utf-8"))["sessions"]
+        ingested = next(session for session in sessions if session["session_id"] == result["session_id"])
+        assert ingested["workspace_id"] == second.hub.workspace_id
+        assert ingested["workspace_label"] == "repo-two"
     finally:
         if second is not None:
             second.shutdown()

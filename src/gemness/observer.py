@@ -12,7 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from .config import GemnessConfig
+from .mcp_metadata import SERVER_NAME, SERVER_VERSION
 from .models import ConversationRecord, ObserverEvent, SessionRecord, SessionStatus, utc_now
+from .observer_client import get_json, post_json
+from .process_registry import (
+    ProcessRecord,
+    ProcessRegistry,
+    record_is_orphan,
+    record_is_takeover_eligible,
+    terminate_process,
+    workspace_id_for_path,
+)
 from .redaction import redact_payload, redact_text
 
 
@@ -59,6 +69,11 @@ class EventBus:
             except queue.Full:
                 pass
 
+    @property
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
+
 
 class ObserverHub:
     def __init__(self, config: GemnessConfig) -> None:
@@ -67,6 +82,8 @@ class ObserverHub:
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         self.token = secrets.token_urlsafe(24)
         self._write_token_file()
+        self._started_at_monotonic = time.monotonic()
+        self._started_at_wall = time.time()
         self._conversation_index_path = self.transcript_dir / "conversation-index.json"
         self.bus = EventBus()
         self.conversations: dict[str, ConversationRecord] = {}
@@ -76,9 +93,19 @@ class ObserverHub:
         self._lock = threading.RLock()
         self._web_server: Any = None
         self._web_server_error: str | None = None
+        self._observer_mode = "disabled" if not config.observer_enabled else "stopped"
+        self._attached_base_url: str | None = None
+        self._attached_owner_status: dict[str, Any] | None = None
+        self._takeover_error: str | None = None
+        self._ingest_error: str | None = None
+        self._registry = ProcessRegistry(config)
+        self._registry_stop = threading.Event()
+        self._registry_thread: threading.Thread | None = None
         self.service: Any = None
         self._load_conversation_index()
         self._load_existing_events()
+        self._write_registry_state()
+        self._start_registry_heartbeat()
 
     def attach_service(self, service: Any) -> None:
         self.service = service
@@ -89,15 +116,113 @@ class ObserverHub:
         with self._lock:
             if self._web_server is not None:
                 return
-            from .web import ObserverWebServer
-
-            try:
-                self._web_server = ObserverWebServer(self, self.config.observer_host, self.config.observer_port)
-            except OSError as exc:
-                self._web_server_error = str(exc)
+            if self._observer_mode in {"owner", "attached", "blocked"}:
                 return
+            self._observer_mode = "starting"
+        self._write_registry_state()
+        if self._try_start_owner():
+            return
+        self._handle_bind_failure()
+
+    def _try_start_owner(self) -> bool:
+        if not self.config.observer_enabled:
+            return False
+        from .web import ObserverWebServer
+
+        try:
+            web_server = ObserverWebServer(self, self.config.observer_host, self.config.observer_port)
+        except OSError as exc:
+            with self._lock:
+                self._web_server_error = str(exc)
+            return False
+        with self._lock:
+            self._web_server = web_server
             self._web_server_error = None
-            self._web_server.start()
+            self._attached_base_url = None
+            self._attached_owner_status = None
+            self._takeover_error = None
+            self._observer_mode = "owner"
+        self._write_registry_state()
+        web_server.start()
+        return True
+
+    def _handle_bind_failure(self) -> None:
+        base_url = _observer_base_url(self.config.observer_host, self.config.observer_port)
+        status, status_error = get_json(f"{base_url}/api/status")
+        if _is_gemness_status(status):
+            owner_record = self._owner_record_from_status(status)
+            if owner_record is not None and record_is_takeover_eligible(owner_record):
+                self._set_observer_mode("takeover_pending", attached_to=base_url)
+                if self._request_takeover(base_url, owner_record) and self._retry_start_owner():
+                    return
+            self._set_observer_mode("attached", attached_to=base_url, owner_status=status)
+            return
+
+        for owner_record in self._registry.observer_owner_records(self.config.observer_host, self.config.observer_port):
+            if not record_is_takeover_eligible(owner_record):
+                continue
+            self._set_observer_mode("takeover_pending", attached_to=base_url)
+            if owner_record.management_token and self._request_takeover(base_url, owner_record) and self._retry_start_owner():
+                return
+            if owner_record.pid == os.getpid():
+                continue
+            try:
+                terminate_process(owner_record.pid)
+            except OSError as exc:
+                self._takeover_error = str(exc)
+            else:
+                if self._retry_start_owner():
+                    return
+
+        message = status_error or self._web_server_error or "observer port is unavailable"
+        self._set_observer_mode("blocked", observer_error=message)
+
+    def _owner_record_from_status(self, status: dict[str, Any] | None) -> ProcessRecord | None:
+        if not isinstance(status, dict):
+            return None
+        pid = status.get("pid")
+        if not isinstance(pid, int):
+            return None
+        return self._registry.read_pid(pid)
+
+    def _request_takeover(self, base_url: str, owner_record: ProcessRecord) -> bool:
+        token = owner_record.management_token
+        if not token:
+            self._takeover_error = "owner registry record has no management token"
+            return False
+        payload = {"requester_pid": os.getpid(), "requester_workspace_id": self.workspace_id, "reason": "stale_or_orphan_owner"}
+        data, error, status_code = post_json(f"{base_url}/api/takeover", payload, token=token, timeout=1.0)
+        if status_code and 200 <= status_code < 300 and data and data.get("accepted") is True:
+            self._takeover_error = None
+            return True
+        if isinstance(data, dict) and data.get("error"):
+            self._takeover_error = str(data["error"])
+        else:
+            self._takeover_error = str(error or status_code or "takeover rejected")
+        return False
+
+    def _retry_start_owner(self) -> bool:
+        for _ in range(20):
+            time.sleep(0.1)
+            if self._try_start_owner():
+                return True
+        return False
+
+    def _set_observer_mode(
+        self,
+        mode: str,
+        *,
+        attached_to: str | None = None,
+        owner_status: dict[str, Any] | None = None,
+        observer_error: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._observer_mode = mode
+            self._attached_base_url = attached_to if mode in {"attached", "takeover_pending"} else None
+            self._attached_owner_status = owner_status
+            if observer_error is not None:
+                self._web_server_error = observer_error
+        self._write_registry_state()
 
     @property
     def web_server_running(self) -> bool:
@@ -105,20 +230,31 @@ class ObserverHub:
             return self._web_server is not None
 
     def shutdown(self) -> None:
+        self._registry_stop.set()
+        registry_thread = self._registry_thread
+        if registry_thread is not None:
+            registry_thread.join(timeout=1)
         with self._lock:
             web_server = self._web_server
             self._web_server = None
+            self._observer_mode = "stopped" if self.config.observer_enabled else "disabled"
         if web_server is not None:
             web_server.stop()
+        self._registry.remove_current()
 
     @property
     def base_url(self) -> str:
         self.start_web_server()
-        if self._web_server is None:
+        with self._lock:
+            web_server = self._web_server
+            attached_base_url = self._attached_base_url
+        if web_server is None:
+            if attached_base_url:
+                return attached_base_url
             if not self.config.observer_enabled or not self.config.observer_port:
                 return ""
             return _observer_base_url(self.config.observer_host, self.config.observer_port)
-        return self._web_server.base_url
+        return web_server.base_url
 
     def observer_url(self, session_id: str) -> str:
         if not self.config.observer_enabled:
@@ -129,6 +265,204 @@ class ObserverHub:
         if not self.config.observer_enabled:
             return ""
         return f"{self.base_url}/"
+
+    @property
+    def workspace_id(self) -> str:
+        return workspace_id_for_path(self.config.workspace_root or Path.cwd())
+
+    @property
+    def observer_mode(self) -> str:
+        with self._lock:
+            return self._observer_mode
+
+    def observer_state(self) -> dict[str, Any]:
+        if self.config.observer_enabled:
+            self.start_web_server()
+        with self._lock:
+            owner_status = self._attached_owner_status or {}
+            owner_pid = os.getpid() if self._observer_mode == "owner" else owner_status.get("pid")
+            attached_to = self._attached_base_url
+            web_server = self._web_server
+            mode = self._observer_mode
+            bind_error = self._web_server_error
+            takeover_error = self._takeover_error
+            ingest_error = self._ingest_error
+        return {
+            "mode": mode,
+            "owner_pid": owner_pid,
+            "attached_to": attached_to,
+            "workspace_id": self.workspace_id,
+            "bind_error": bind_error,
+            "takeover_error": takeover_error,
+            "ingest_error": ingest_error,
+            "running": web_server is not None,
+            "url": self.base_url if self.config.observer_enabled else "",
+        }
+
+    def status_payload(self) -> dict[str, Any]:
+        self.refresh_from_disk()
+        with self._lock:
+            active_run_count = sum(1 for session in self.sessions.values() if session.status in OPEN_SESSION_STATUSES)
+            mode = self._observer_mode
+            web_server = self._web_server
+            observer_error = self._web_server_error
+            attached_to = self._attached_base_url
+        return {
+            "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "pid": os.getpid(),
+            "parent_pid": os.getppid(),
+            "started_at": self._started_at_wall,
+            "uptime_ms": int((time.monotonic() - self._started_at_monotonic) * 1000),
+            "cwd": str(Path.cwd()),
+            "workspace_id": self.workspace_id,
+            "transcript_dir": str(self.transcript_dir),
+            "observer": {
+                "mode": mode,
+                "host": self.config.observer_host,
+                "port": self.config.observer_port,
+                "url": self.base_url if self.config.observer_enabled else "",
+                "owns_observer": web_server is not None,
+                "attached_to": attached_to,
+                "error": observer_error,
+            },
+            "known_workspaces": self.known_workspaces(),
+            "active_run_count": active_run_count,
+            "open_client_count": self.bus.subscriber_count,
+            "takeover": self.takeover_eligibility(),
+        }
+
+    def known_workspaces(self) -> list[dict[str, Any]]:
+        with self._lock:
+            roots = sorted({session.project_root or "" for session in self.sessions.values()})
+        if not roots:
+            roots = [str(self.config.workspace_root or Path.cwd())]
+        return [
+            {
+                "workspace_id": workspace_id_for_path(root or self.config.workspace_root or Path.cwd()),
+                "cwd": root or str(self.config.workspace_root or Path.cwd()),
+                "label": _workspace_label(root or str(self.config.workspace_root or Path.cwd())),
+            }
+            for root in roots
+        ]
+
+    def takeover_eligibility(self) -> dict[str, Any]:
+        record = self._registry.read_pid(os.getpid())
+        reasons: list[str] = []
+        if record is not None and record_is_orphan(record):
+            reasons.append("parent_process_exited")
+        eligible = bool(reasons)
+        return {"eligible": eligible, "reasons": reasons}
+
+    def request_takeover(self, token: str | None) -> tuple[dict[str, Any], int]:
+        if not self.validate_token(token):
+            return {"accepted": False, "error": "invalid management token"}, 401
+        eligibility = self.takeover_eligibility()
+        if not eligibility["eligible"]:
+            return {"accepted": False, "error": "observer owner is healthy", "takeover": eligibility}, 409
+        self.bus.broadcast({"type": "observer.reconnect", "session_id": "", "payload": {"reason": "takeover"}})
+        threading.Thread(target=self._shutdown_for_takeover, name="gemness-observer-takeover-shutdown", daemon=True).start()
+        return {"accepted": True, "takeover": eligibility}, 202
+
+    def ingest_event(self, event_data: dict[str, Any]) -> dict[str, Any]:
+        event = ObserverEvent(
+            event_id=str(event_data["event_id"]),
+            session_id=str(event_data["session_id"]),
+            parent_session_id=event_data.get("parent_session_id") if isinstance(event_data.get("parent_session_id"), str) else None,
+            ts=str(event_data["ts"]),
+            type=str(event_data["type"]),
+            role=event_data["role"],
+            tool_name=event_data.get("tool_name") if isinstance(event_data.get("tool_name"), str) else None,
+            phase=event_data.get("phase") if isinstance(event_data.get("phase"), str) else None,
+            payload=event_data.get("payload", {}) if isinstance(event_data.get("payload", {}), dict) else {},
+            redacted=bool(event_data.get("redacted", False)),
+        )
+        with self._lock:
+            if event.event_id in self._loaded_event_ids:
+                return {"accepted": True, "duplicate": True}
+            self._loaded_event_ids.add(event.event_id)
+            self.events.setdefault(event.session_id, []).append(event)
+            self._write_event(event)
+            self._rebuild_session_from_event(event)
+            self._write_conversation_index()
+            public_event = self._public_event(event, raw=False)
+        self.bus.broadcast(public_event)
+        return {"accepted": True, "duplicate": False}
+
+    def _shutdown_for_takeover(self) -> None:
+        time.sleep(0.05)
+        with self._lock:
+            web_server = self._web_server
+            self._web_server = None
+            self._observer_mode = "takeover_pending"
+        self._write_registry_state()
+        if web_server is not None:
+            web_server.stop()
+
+    def _publish_attached_event(self, event: ObserverEvent) -> None:
+        with self._lock:
+            mode = self._observer_mode
+            base_url = self._attached_base_url
+            owner_status = self._attached_owner_status or {}
+        if mode != "attached" or not base_url:
+            return
+        owner_record = self._owner_record_from_status(owner_status)
+        token = owner_record.management_token if owner_record is not None else None
+        data, error, status_code = post_json(f"{base_url}/api/ingest", {"event": event.to_dict()}, token=token, timeout=1.0)
+        with self._lock:
+            if status_code and 200 <= status_code < 300 and data and data.get("accepted"):
+                self._ingest_error = None
+            else:
+                self._ingest_error = str(data.get("error") if isinstance(data, dict) and data.get("error") else error or status_code or "ingest failed")
+        if self._ingest_error:
+            self._recover_attached_owner(base_url, owner_record)
+
+    def _recover_attached_owner(self, base_url: str, owner_record: ProcessRecord | None) -> None:
+        status, _ = get_json(f"{base_url}/api/status")
+        if _is_gemness_status(status):
+            with self._lock:
+                self._attached_owner_status = status
+            return
+        if owner_record is not None and not record_is_takeover_eligible(owner_record):
+            return
+        self._set_observer_mode("takeover_pending", attached_to=base_url)
+        if owner_record is not None and owner_record.management_token and self._request_takeover(base_url, owner_record) and self._retry_start_owner():
+            return
+        if owner_record is not None and owner_record.pid != os.getpid():
+            try:
+                terminate_process(owner_record.pid)
+            except OSError as exc:
+                self._takeover_error = str(exc)
+            else:
+                if self._retry_start_owner():
+                    return
+        if self._try_start_owner():
+            return
+        self._set_observer_mode("blocked", observer_error=self._web_server_error or self._ingest_error or "attached observer owner is unavailable")
+
+    def _write_registry_state(self) -> None:
+        with self._lock:
+            mode = self._observer_mode
+            owns_observer = self._web_server is not None
+            observer_error = self._web_server_error
+            attached_to = self._attached_base_url
+        self._registry.write_current(
+            observer_mode=mode,
+            owns_observer=owns_observer,
+            observer_error=observer_error,
+            attached_to=attached_to,
+            management_token=self.token,
+        )
+
+    def _start_registry_heartbeat(self) -> None:
+        if self._registry_thread is not None:
+            return
+
+        def heartbeat() -> None:
+            while not self._registry_stop.wait(5):
+                self._write_registry_state()
+
+        self._registry_thread = threading.Thread(target=heartbeat, name="gemness-process-registry", daemon=True)
+        self._registry_thread.start()
 
     def create_session(
         self,
@@ -160,6 +494,7 @@ class ObserverHub:
             conversation_id=conversation_id,
             parent_run_id=parent_run_id,
             branch_from_run_id=branch_from_run_id,
+            workspace_id=self.workspace_id,
             project_root=project_root,
             agy_conversation_id=agy_conversation_id,
             fallback_used=fallback_used,
@@ -212,6 +547,7 @@ class ObserverHub:
                 "model": model,
                 "status": "queued",
                 "title": title,
+                "workspace_id": self.workspace_id,
                 "project_root": project_root,
                 "agy_conversation_id": session.agy_conversation_id,
                 "fallback_used": fallback_used,
@@ -365,8 +701,9 @@ class ObserverHub:
             self._loaded_event_ids.add(event.event_id)
             self._write_event(event)
             public_event = self._public_event(event, raw=False)
-            self.bus.broadcast(public_event)
-            return event
+        self.bus.broadcast(public_event)
+        self._publish_attached_event(event)
+        return event
 
     def set_title(self, session_id: str, title: str | None) -> None:
         title = (title or "").strip()
@@ -653,6 +990,8 @@ class ObserverHub:
 
     def _session_dict(self, session: SessionRecord, *, raw: bool) -> dict[str, Any]:
         data = session.to_dict() | {"observer_url": self.observer_url(session.session_id)}
+        data.setdefault("workspace_id", workspace_id_for_path(session.project_root or self.config.workspace_root or Path.cwd()))
+        data.setdefault("workspace_label", _workspace_label(session.project_root or str(self.config.workspace_root or Path.cwd())))
         if session.conversation_id and session.conversation_id in self.conversations:
             conversation_title = self.conversations[session.conversation_id].title
             if conversation_title:
@@ -889,6 +1228,7 @@ class ObserverHub:
                     parent_run_id=payload.get("parent_run_id") if isinstance(payload.get("parent_run_id"), str) else None,
                     branch_from_run_id=payload.get("branch_from_run_id") if isinstance(payload.get("branch_from_run_id"), str) else None,
                     turn_index=payload.get("turn_index") if isinstance(payload.get("turn_index"), int) else None,
+                    workspace_id=payload.get("workspace_id") if isinstance(payload.get("workspace_id"), str) else None,
                     project_root=payload.get("project_root") if isinstance(payload.get("project_root"), str) else None,
                     agy_conversation_id=agy_conversation_id,
                     fallback_used=bool(payload.get("fallback_used", False)),
@@ -1040,6 +1380,23 @@ def _observer_base_url(host: str, port: int) -> str:
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"http://{host}:{port}"
+
+
+def _is_gemness_status(status: dict[str, Any] | None) -> bool:
+    if not isinstance(status, dict):
+        return False
+    server = status.get("server")
+    return isinstance(server, dict) and server.get("name") == SERVER_NAME
+
+
+def _workspace_label(path: str | Path | None) -> str:
+    if path is None:
+        return "workspace"
+    text = str(path).rstrip("\\/")
+    if not text:
+        return "workspace"
+    name = Path(text).name
+    return name or text
 
 
 def _is_managed_run(service: Any, session_id: str) -> bool:

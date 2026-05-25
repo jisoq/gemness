@@ -157,7 +157,8 @@ class GemnessService:
             "is_git_repo": _is_git_repo(workspace_decision.cwd) if workspace_decision.exists and workspace_decision.is_dir else False,
             "allowed_roots": [str(root) for root in normalized_allowed_roots(self.config)],
         }
-        observer_url = self.hub.base_url if self.config.observer_enabled else ""
+        observer_state = self.hub.observer_state() if self.config.observer_enabled else {}
+        observer_url = str(observer_state.get("url") or "")
         observer = {
             "enabled": self.config.observer_enabled,
             "host": self.config.observer_host,
@@ -165,7 +166,18 @@ class GemnessService:
             "start_on_init": self.config.observer_start_on_init,
             "running": self.hub.web_server_running,
             "url": observer_url,
+            "mode": observer_state.get("mode", "disabled"),
+            "owner_pid": observer_state.get("owner_pid"),
+            "attached_to": observer_state.get("attached_to"),
+            "workspace_id": observer_state.get("workspace_id"),
+            "bind_error": observer_state.get("bind_error"),
+            "takeover_error": observer_state.get("takeover_error"),
+            "ingest_error": observer_state.get("ingest_error"),
         }
+        warning_keys = ("takeover_error", "ingest_error") if observer.get("mode") == "attached" else ("bind_error", "takeover_error", "ingest_error")
+        for key in warning_keys:
+            if observer.get(key):
+                warnings.append(f"Observer {key}: {observer[key]}")
         status = "warning" if warnings else "ok"
         return {
             "status": status,

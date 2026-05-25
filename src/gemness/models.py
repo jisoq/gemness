@@ -75,6 +75,7 @@ class SessionRecord:
     parent_run_id: str | None = None
     branch_from_run_id: str | None = None
     turn_index: int | None = None
+    workspace_id: str | None = None
     project_root: str | None = None
     agy_conversation_id: str | None = None
     fallback_used: bool = False

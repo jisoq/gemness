@@ -182,6 +182,17 @@ class RunManager:
 
     def shutdown(self) -> None:
         self._shutdown.set()
+        with self._lock:
+            runs = list(self._runs.values())
+        for managed in runs:
+            managed.cancel_event.set()
+            process = managed.process
+            if process is None:
+                continue
+            try:
+                process.terminate()
+            except Exception as exc:  # noqa: BLE001 - shutdown is best-effort cleanup.
+                self.hub.append_event(managed.run_id, "run.shutdown_terminate_failed", "system", {"run_id": managed.run_id, "message": str(exc)})
         for worker in self._workers:
             worker.join(timeout=1)
 
