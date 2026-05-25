@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,14 @@ def main(argv: list[str] | None = None) -> None:
     smoke.add_argument("--timeout", type=float, default=10.0)
     smoke.add_argument("server_command", nargs=argparse.REMAINDER, help="Server command after --.")
 
+    status = subparsers.add_parser("status", help="Show Gemness process and Observer status.")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    cleanup = subparsers.add_parser("cleanup", help="Clean stale Gemness process registry records.")
+    cleanup.add_argument("--stale", action="store_true", help="Remove registry records whose process is gone.")
+    cleanup.add_argument("--terminate-orphans", action="store_true", help="Terminate registered Gemness processes whose parent process is gone.")
+    cleanup.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
     args = parser.parse_args(argv)
     if args.command == "start-mcp-server":
         from .server import main as server_main
@@ -70,6 +79,10 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("Usage: gemness smoke-test [--real] -- gemness start-mcp-server")
         for line in run_smoke(command, real=args.real, timeout=args.timeout):
             print(line)
+    elif args.command == "status":
+        _status(args)
+    elif args.command == "cleanup":
+        _cleanup(args)
 
 
 def _bootstrap_codex(args: argparse.Namespace) -> None:
@@ -130,10 +143,66 @@ def _check_agy_version(agy_command: str, cwd: Path) -> None:
     print(f"agy version: {output}")
 
 
+def _status(args: argparse.Namespace) -> None:
+    from .config import GemnessConfig
+    from .observer_client import get_json
+    from .process_registry import ProcessRegistry
+
+    config = GemnessConfig.from_env()
+    registry = ProcessRegistry(config)
+    base_url = _observer_base_url(config.observer_host, config.observer_port)
+    observer, observer_error = get_json(f"{base_url}/api/status")
+    payload = {
+        "observer_url": base_url,
+        "observer": observer,
+        "observer_error": observer_error,
+        "unmanaged_port_owner_possible": observer is None and observer_error is not None,
+        "process_registry": registry.status(),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    print(f"observer url: {base_url}")
+    if observer:
+        print(f"observer mode: {observer.get('observer', {}).get('mode')} pid={observer.get('pid')}")
+        print(f"known workspaces: {len(observer.get('known_workspaces') or [])}")
+    else:
+        print(f"observer unavailable: {observer_error}")
+    records = payload["process_registry"]["records"]
+    print(f"registered processes: {len(records)}")
+    for record in records:
+        state = "running" if record.get("running") else "dead"
+        mode = record.get("observer_mode")
+        cwd = record.get("cwd")
+        print(f"- pid={record.get('pid')} {state} mode={mode} cwd={cwd}")
+
+
+def _cleanup(args: argparse.Namespace) -> None:
+    from .config import GemnessConfig
+    from .process_registry import ProcessRegistry
+
+    config = GemnessConfig.from_env()
+    registry = ProcessRegistry(config)
+    result = registry.cleanup(stale=True, terminate_orphans=args.terminate_orphans)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    print(f"removed stale records: {', '.join(str(pid) for pid in result['removed']) or '(none)'}")
+    print(f"terminated orphans: {', '.join(str(pid) for pid in result['terminated']) or '(none)'}")
+    if result["errors"]:
+        print(f"errors: {json.dumps(result['errors'], ensure_ascii=False)}")
+
+
 def _normalize_command(command: list[str]) -> list[str]:
     if command and command[0] == "--":
         return command[1:]
     return command
+
+
+def _observer_base_url(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
 
 
 if __name__ == "__main__":

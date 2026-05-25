@@ -4,6 +4,8 @@ import json
 import re
 import shutil
 import subprocess
+import time
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
@@ -203,6 +205,106 @@ def test_observer_api_ignores_stale_url_token(tmp_path) -> None:
             data = json.loads(response.read().decode("utf-8"))
 
         assert data["sessions"][0]["session_id"] == result["session_id"]
+    finally:
+        service.shutdown()
+
+
+def test_observer_status_api_reports_owner_and_workspaces(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, process_registry_dir=tmp_path / "processes", observer_enabled=True, observer_port=0, workspace_root=tmp_path)
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        result = service.ask_antigravity("hello")
+        base_url = _observer_base(result["observer_url"])
+
+        status = _get_json(f"{base_url}/api/status")
+
+        assert status["server"]["name"] == "gemness"
+        assert status["pid"] > 0
+        assert status["observer"]["mode"] == "owner"
+        assert status["observer"]["owns_observer"] is True
+        assert status["known_workspaces"][0]["workspace_id"] == service.hub.workspace_id
+    finally:
+        service.shutdown()
+
+
+def test_healthy_observer_owner_rejects_takeover(tmp_path) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, process_registry_dir=tmp_path / "processes", observer_enabled=True, observer_port=0, workspace_root=tmp_path)
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        base_url = service.hub.base_url
+        request = Request(
+            f"{base_url}/api/takeover",
+            data=json.dumps({"requester_pid": 1}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Gemness-Management-Token": service.hub.token},
+            method="POST",
+        )
+
+        try:
+            urlopen(request, timeout=2)
+        except HTTPError as exc:
+            body = json.loads(exc.read().decode("utf-8"))
+            assert exc.code == 409
+            assert body["accepted"] is False
+            assert body["error"] == "observer owner is healthy"
+        else:
+            raise AssertionError("healthy owner should reject takeover")
+    finally:
+        service.shutdown()
+
+
+def test_orphaned_observer_owner_accepts_authenticated_takeover(tmp_path, monkeypatch) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, process_registry_dir=tmp_path / "processes", observer_enabled=True, observer_port=0, workspace_root=tmp_path)
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        monkeypatch.setattr("gemness.observer.record_is_orphan", lambda record: True)
+        base_url = service.hub.base_url
+        request = Request(
+            f"{base_url}/api/takeover",
+            data=json.dumps({"requester_pid": 1}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Gemness-Management-Token": service.hub.token},
+            method="POST",
+        )
+
+        with urlopen(request, timeout=2) as response:
+            body = json.loads(response.read().decode("utf-8"))
+
+        deadline = time.monotonic() + 2
+        while service.hub.web_server_running and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert response.status == 202
+        assert body["accepted"] is True
+        assert service.hub.web_server_running is False
+    finally:
+        service.shutdown()
+
+
+def test_stale_observer_owner_accepts_authenticated_takeover(tmp_path, monkeypatch) -> None:
+    config = GemnessConfig(transcript_dir=tmp_path, process_registry_dir=tmp_path / "processes", observer_enabled=True, observer_port=0, workspace_root=tmp_path)
+    service = GemnessService(config, runner=WebFakeRunner())
+    try:
+        record = service.hub._registry.read_current()
+        assert record is not None
+        record.last_seen_at = time.time() - 120
+        monkeypatch.setattr(service.hub._registry, "read_current", lambda: record)
+        base_url = service.hub.base_url
+        request = Request(
+            f"{base_url}/api/takeover",
+            data=json.dumps({"requester_pid": 1}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Gemness-Management-Token": service.hub.token},
+            method="POST",
+        )
+
+        with urlopen(request, timeout=2) as response:
+            body = json.loads(response.read().decode("utf-8"))
+
+        deadline = time.monotonic() + 2
+        while service.hub.web_server_running and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert response.status == 202
+        assert body["accepted"] is True
+        assert "stale_registry_heartbeat" in body["takeover"]["reasons"]
     finally:
         service.shutdown()
 

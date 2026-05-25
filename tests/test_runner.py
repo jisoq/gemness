@@ -15,6 +15,7 @@ import pytest
 
 from gemness.config import DEFAULT_MODEL_LABEL, GemnessConfig
 from gemness.observer import ObserverHub
+from gemness.run_manager import RunManager
 from gemness.runner import AgyCliRunner, clean_console_output, command_exists, gemness_env, resolve_agy_command
 
 
@@ -551,6 +552,45 @@ def test_runner_preserves_error_when_cancel_arrives_after_process_exit(tmp_path)
     else:
         assert result.stderr.strip() == "bad"
     assert "cancelled" not in result.metadata
+
+
+def test_run_manager_shutdown_terminates_registered_process(tmp_path) -> None:
+    hub = ObserverHub(
+        GemnessConfig(
+            transcript_dir=tmp_path / "transcripts",
+            process_registry_dir=tmp_path / "processes",
+            observer_enabled=False,
+            workspace_root=tmp_path,
+        )
+    )
+    manager = RunManager(hub.config, hub)
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL)
+    registered = threading.Event()
+    fake_process = _TerminableProcess()
+
+    def run_callable(cancel_event, register_process, heartbeat):  # noqa: ANN001
+        register_process(fake_process)
+        registered.set()
+        cancel_event.wait(timeout=5)
+        return {"status": "cancelled", "run_id": session.session_id}
+
+    try:
+        manager.start(session.session_id, run_callable)
+        assert registered.wait(timeout=2)
+
+        manager.shutdown()
+
+        assert fake_process.terminated is True
+    finally:
+        hub.shutdown()
+
+
+class _TerminableProcess:
+    def __init__(self) -> None:
+        self.terminated = False
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 def make_fake_agy(

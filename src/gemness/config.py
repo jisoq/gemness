@@ -6,6 +6,7 @@ from pathlib import Path
 
 DEFAULT_OBSERVER_PORT = 56755
 DEFAULT_TRANSCRIPT_DIR = Path.home() / ".gemness" / "transcripts"
+DEFAULT_PROCESS_REGISTRY_DIR = Path.home() / ".gemness" / "processes"
 DEFAULT_CODEX_HOST_CAPABILITIES_FILE = Path.home() / ".gemness" / "codex-host-capabilities.json"
 DEFAULT_MODEL_LABEL = "Antigravity CLI default"
 DEFAULT_AGY_COMMAND = "agy"
@@ -78,6 +79,9 @@ class GemnessConfig:
     observer_port: int = field(default_factory=lambda: _int_env("GEMNESS_OBSERVER_PORT", DEFAULT_OBSERVER_PORT))
     observer_start_on_init: bool = field(default_factory=lambda: _bool_env("GEMNESS_OBSERVER_START_ON_INIT", True))
     transcript_dir: Path = field(default_factory=lambda: Path(os.getenv("GEMNESS_TRANSCRIPT_DIR", str(DEFAULT_TRANSCRIPT_DIR))).expanduser())
+    process_registry_dir: Path = field(
+        default_factory=lambda: Path(os.getenv("GEMNESS_PROCESS_REGISTRY_DIR", str(DEFAULT_PROCESS_REGISTRY_DIR))).expanduser()
+    )
     redact_raw_by_default: bool = field(default_factory=lambda: _bool_env("GEMNESS_REDACT_RAW_BY_DEFAULT", True))
     agy_command: str = field(default_factory=lambda: os.getenv("GEMNESS_AGY_COMMAND", DEFAULT_AGY_COMMAND))
     agy_timeout_sec: float = field(default_factory=lambda: _float_env("GEMNESS_AGY_TIMEOUT", 600.0))
