@@ -288,7 +288,8 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--text); }
+    html, body { height: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--text); overflow: hidden; }
     button, textarea, input { font: inherit; }
     button {
       border: 1px solid var(--line);
@@ -299,12 +300,29 @@ INDEX_HTML = r"""<!doctype html>
       cursor: pointer;
     }
     button.primary { background: var(--accent); border-color: var(--accent); color: white; }
-    .layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); min-height: 100vh; }
-    aside, main { min-width: 0; padding: 16px; }
-    aside { border-right: 1px solid var(--line); background: var(--panel); }
+    .layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); height: 100vh; min-height: 0; }
+    aside, main { min-width: 0; min-height: 0; padding: 16px; }
+    aside {
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      gap: 10px;
+      overflow: hidden;
+    }
+    main { overflow-y: auto; }
     h1, h2 { margin: 0 0 12px; font-size: 16px; }
     .toolbar, .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .session-list { display: grid; gap: 8px; }
+    .session-list {
+      display: grid;
+      align-content: start;
+      gap: 8px;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding-right: 4px;
+      scrollbar-gutter: stable;
+    }
     .session-group { display: grid; gap: 8px; }
     .session-group + .session-group { margin-top: 16px; }
     .session-group-title {
@@ -516,11 +534,12 @@ INDEX_HTML = r"""<!doctype html>
     .debug-panel { margin-top: 14px; }
     .debug-panel > summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
     @media (max-width: 1100px) {
-      .layout { grid-template-columns: 1fr; }
+      .layout { grid-template-columns: 1fr; grid-template-rows: minmax(180px, 36vh) minmax(0, 1fr); }
       aside { border: 0; border-bottom: 1px solid var(--line); }
     }
     @media (max-width: 700px) {
       aside, main { padding: 12px; }
+      .layout { grid-template-rows: minmax(160px, 34vh) minmax(0, 1fr); }
       .turn { grid-template-columns: 1fr; gap: 5px; }
       .turn-time { font-size: 11px; }
       .transcript-flow { padding: 0 12px; }

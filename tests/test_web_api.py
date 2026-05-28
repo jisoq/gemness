@@ -143,6 +143,12 @@ def test_observer_ui_uses_korean_labels_and_readable_transcript_renderer() -> No
     assert "function runTelemetry" in INDEX_HTML
     assert "function selectSession" in INDEX_HTML
     assert "function bindSessionListEvents" in INDEX_HTML
+    assert "body { margin: 0; background: var(--bg); color: var(--text); overflow: hidden; }" in INDEX_HTML
+    assert ".layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); height: 100vh; min-height: 0; }" in INDEX_HTML
+    assert "grid-template-rows: auto auto minmax(0, 1fr)" in INDEX_HTML
+    assert "overscroll-behavior: contain" in INDEX_HTML
+    assert "scrollbar-gutter: stable" in INDEX_HTML
+    assert "main { overflow-y: auto; }" in INDEX_HTML
     assert ".status-dot.live" in INDEX_HTML
     assert "conversation id" in INDEX_HTML
     assert "run id" in INDEX_HTML
