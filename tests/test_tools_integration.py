@@ -284,6 +284,20 @@ def test_ask_antigravity_extracts_final_response_from_raw_stdout_not_synthetic_w
         service.shutdown()
 
 
+def test_ask_antigravity_rejects_non_trailing_logged_response_payload(tmp_path) -> None:
+    raw_stdout = 'command log {"response":"logged payload"}\ncontinuing without a final envelope'
+    synthetic_stdout = json.dumps({"response": raw_stdout, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(synthetic_stdout, raw_stdout=raw_stdout)])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "error"
+        assert "final-response JSON envelope" in result["message"]
+        assert "logged payload" not in result["message"]
+    finally:
+        service.shutdown()
+
+
 def test_ask_antigravity_preserves_advice_that_starts_like_progress(tmp_path) -> None:
     advice = "\n".join(
         [
@@ -484,6 +498,18 @@ def test_cli_envelope_error_returns_status_error(tmp_path) -> None:
         result = service.ask_antigravity("Say hello")
         assert result["status"] == "error"
         assert "auth failed" in result["message"]
+    finally:
+        service.shutdown()
+
+
+def test_cli_error_envelope_without_response_returns_specific_error(tmp_path) -> None:
+    stdout = json.dumps({"error": {"message": "rate limit"}, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(stdout)])
+    try:
+        result = service.ask_antigravity("Say hello")
+        assert result["status"] == "error"
+        assert "rate limit" in result["message"]
+        assert "final-response JSON envelope" not in result["message"]
     finally:
         service.shutdown()
 

@@ -645,6 +645,9 @@ class GemnessService:
             metadata=metadata,
         )
         clean_text = _text_response_from_envelope(envelope)
+        envelope_error = _envelope_error(envelope)
+        if envelope_error:
+            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata, budget=budget, request_provenance=request_provenance)
         if clean_text is None:
             return self._envelope_error_result(
                 session_id,
@@ -656,9 +659,6 @@ class GemnessService:
                 budget=budget,
                 request_provenance=request_provenance,
             )
-        envelope_error = _envelope_error(envelope)
-        if envelope_error:
-            return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata, budget=budget, request_provenance=request_provenance)
         payload = {
             "status": "completed",
             "text": clean_text,

@@ -44,8 +44,11 @@ def extract_cli_response(stdout: str) -> tuple[str, dict[str, Any] | None]:
     envelope = _parse_json_prefix(stripped)
     if isinstance(envelope, dict):
         text = _extract_envelope_text(envelope)
-        return (text, envelope) if text is not None else (stdout, envelope)
-    embedded = _last_embedded_response_envelope(stripped)
+        if text is not None:
+            return text, envelope
+        if _has_envelope_error(envelope):
+            return stdout, envelope
+    embedded = _trailing_response_envelope(stripped)
     if embedded is not None:
         text = _extract_envelope_text(embedded)
         if text is not None:
@@ -63,19 +66,24 @@ def _parse_json_prefix(text: str) -> Any | None:
         return None
 
 
-def _last_embedded_response_envelope(text: str) -> dict[str, Any] | None:
-    last: dict[str, Any] | None = None
+def _trailing_response_envelope(text: str) -> dict[str, Any] | None:
     for match in re.finditer(r"[{[]", text):
         candidate = _balanced_prefix(text[match.start() :])
         if not candidate:
+            continue
+        if text[match.start() + len(candidate) :].strip():
             continue
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict) and _extract_envelope_text(parsed) is not None:
-            last = parsed
-    return last
+            return parsed
+    return None
+
+
+def _has_envelope_error(envelope: dict[str, Any]) -> bool:
+    return bool(envelope.get("error"))
 
 
 def _extract_envelope_text(envelope: dict[str, Any]) -> str | None:
