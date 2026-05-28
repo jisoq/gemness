@@ -126,6 +126,7 @@ http://127.0.0.1:56755
 ```
 
 대시보드에는 세션/대화 목록이 표시되며, 가장 최근에 실행된 세션이 자동으로 활성화되어 추적됩니다. 대시보드를 통해 프롬프트, Antigravity 실행 시작, 최종 출력, stderr 진단 로그, JSON 추출 결과, 스키마 유효성 검증(validation) 및 실패 시 복구(repair) 시도 과정, 리뷰 결과 등을 편리하게 모니터링할 수 있습니다.
+일반 텍스트 advisory 실행은 `{"response": "..."}` 형태의 final-response 계약을 사용합니다. Observer는 raw stdout을 artifact로 보관하되, `Antigravity -> Agents` 대화 본문에는 구조화된 `response` 값만 표시합니다. 계약 envelope가 없으면 raw stdout을 대화 답변으로 승격하지 않고 artifact-only 안내를 표시합니다.
 또한 세션 목록에서 완료된 로컬 대화 기록의 이름을 변경(rename)하거나 삭제(delete)하는 등의 세션 관리 작업이 가능합니다. Antigravity의 텍스트 출력은 프로세스 실행이 완료된 후 한꺼번에 캡처되므로, 메타데이터는 `streaming=false` 상태로 기록됩니다. 실행 중에는 `antigravity.heartbeat` 이벤트가 주기적으로 기록되고, Observer 기본 화면은 이를 채팅 메시지로 누적하지 않고 상태 LED와 runtime telemetry로 요약합니다. 원본 이벤트 / 디버그 정보 패널에서는 elapsed time, timeout까지 남은 시간, pid, capture mode, stdout/stderr byte count, last activity age를 확인할 수 있습니다.
 
 ---

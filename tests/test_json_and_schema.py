@@ -25,6 +25,12 @@ def test_extract_cli_response_tolerates_warning_after_json_envelope() -> None:
     assert envelope["stats"]["tools"]["totalCalls"] == 0
 
 
+def test_extract_cli_response_finds_embedded_response_envelope() -> None:
+    text, envelope = extract_cli_response('I will inspect files first.\\n{"response":"final only"}')
+    assert text == "final only"
+    assert envelope == {"response": "final only"}
+
+
 def test_schema_validation_pass_and_fail() -> None:
     schema = {
         "type": "object",

@@ -19,7 +19,7 @@ The default reviewer flow uses `start_antigravity` and `await_antigravity_run`. 
 
 The blocking final-result tools `ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, and `review_current_diff_with_antigravity` are convenience wrappers. They return cleaned advisory text or structured data plus `observer_url`; they do not return the full raw transcript.
 
-The runner discovers capabilities with `agy --help`, selects `-p`, `--print`, or `--prompt`, and then executes one non-interactive process per run. It captures final output, stores raw stdout as a local Observer artifact, and emits only a response preview plus artifact reference in the `antigravity.response` event. On Windows, Gemness always uses `pywinpty` because Antigravity CLI writes print-mode text to the console instead of stdout/stderr.
+The runner discovers capabilities with `agy --help`, selects `-p`, `--print`, or `--prompt`, and then executes one non-interactive process per run. Text advisory runs include a Gemness final-response contract: Antigravity must return a JSON object with a string `response` field. Gemness stores raw stdout as a local Observer artifact, but the public `Antigravity -> Agents` preview uses only that structured final `response`; if the envelope is missing, the UI shows an artifact-only notice instead of promoting raw stdout into the conversation. On Windows, Gemness always uses `pywinpty` because Antigravity CLI writes print-mode text to the console instead of stdout/stderr.
 
 ## Metadata
 

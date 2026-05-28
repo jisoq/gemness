@@ -41,24 +41,51 @@ def extract_cli_response(stdout: str) -> tuple[str, dict[str, Any] | None]:
     stripped = stdout.strip()
     if not stripped:
         return "", None
-    json_text = stripped
-    if stripped.startswith(("{", "[")):
-        json_text = _balanced_prefix(stripped) or stripped
-    try:
-        envelope = json.loads(json_text)
-    except json.JSONDecodeError:
-        return stdout, None
+    envelope = _parse_json_prefix(stripped)
     if isinstance(envelope, dict):
-        for key in ("response", "text", "content", "output"):
-            value = envelope.get(key)
-            if isinstance(value, str):
-                return value, envelope
-        candidates = envelope.get("candidates")
-        if isinstance(candidates, list) and candidates:
-            text = _extract_candidate_text(candidates[0])
-            if text is not None:
-                return text, envelope
-    return stdout, envelope if isinstance(envelope, dict) else None
+        text = _extract_envelope_text(envelope)
+        return (text, envelope) if text is not None else (stdout, envelope)
+    embedded = _first_embedded_response_envelope(stripped)
+    if embedded is not None:
+        text = _extract_envelope_text(embedded)
+        if text is not None:
+            return text, embedded
+    return stdout, None
+
+
+def _parse_json_prefix(text: str) -> Any | None:
+    if not text.startswith(("{", "[")):
+        return None
+    json_text = _balanced_prefix(text) or text
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _first_embedded_response_envelope(text: str) -> dict[str, Any] | None:
+    for match in re.finditer(r"[{[]", text):
+        candidate = _balanced_prefix(text[match.start() :])
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and _extract_envelope_text(parsed) is not None:
+            return parsed
+    return None
+
+
+def _extract_envelope_text(envelope: dict[str, Any]) -> str | None:
+    for key in ("response", "text", "content", "output"):
+        value = envelope.get(key)
+        if isinstance(value, str):
+            return value
+    candidates = envelope.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        return _extract_candidate_text(candidates[0])
+    return None
 
 
 def _extract_candidate_text(candidate: Any) -> str | None:
