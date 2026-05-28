@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .config import DEFAULT_AGY_COMMAND, DEFAULT_MODEL_LABEL, GemnessConfig
+from .json_utils import extract_cli_response
 from .observer import ObserverHub
 
 
@@ -391,20 +392,20 @@ class AgyCliRunner:
             metadata["cancelled"] = True
         envelope = _response_envelope(raw_stdout, metadata)
         if raw_stdout:
+            response_text, response_envelope = extract_cli_response(raw_stdout)
+            has_text_response_envelope = _has_text_response_envelope(response_envelope)
+            if _session_requires_text_response_envelope(hub, session_id) and not has_text_response_envelope:
+                response_text = "Antigravity stdout captured as an artifact; no Gemness final-response envelope was found."
             stdout_artifact = hub.write_text_artifact(session_id, "stdout.txt" if phase is None else f"{phase}.stdout.txt", raw_stdout)
-            hub.append_event(
-                session_id,
-                "antigravity.response",
-                "gemness",
-                {
-                    "response_preview": _preview(raw_stdout),
-                    "stdout_artifact": stdout_artifact,
-                    "stdout_bytes": stdout_artifact["bytes"],
-                    "metadata": metadata,
-                    "streaming": False,
-                },
-                phase=phase,
-            )
+            response_payload = {
+                "response_preview": _preview(response_text),
+                "stdout_artifact": stdout_artifact,
+                "stdout_bytes": stdout_artifact["bytes"],
+                "metadata": metadata,
+                "structured_response": has_text_response_envelope,
+                "streaming": False,
+            }
+            hub.append_event(session_id, "antigravity.response", "gemness", response_payload, phase=phase)
         if stderr:
             hub.append_event(session_id, "antigravity.stderr", "gemness", {"stderr": _tail(stderr)}, phase=phase)
         hub.append_event(session_id, "antigravity.exited", "gemness", metadata, phase=phase)
@@ -868,6 +869,15 @@ def _metadata(
 def _conversation_id(hub: ObserverHub, session_id: str) -> str | None:
     session = hub.sessions.get(session_id)
     return session.conversation_id if session is not None else None
+
+
+def _session_requires_text_response_envelope(hub: ObserverHub, session_id: str) -> bool:
+    session = hub.sessions.get(session_id)
+    return session is not None and session.tool_name == "ask_antigravity"
+
+
+def _has_text_response_envelope(envelope: dict[str, Any] | None) -> bool:
+    return isinstance(envelope, dict) and isinstance(envelope.get("response"), str)
 
 
 def detect_auth_status(stdout: str, stderr: str, exit_code: int | None) -> str:

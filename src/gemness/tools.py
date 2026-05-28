@@ -40,18 +40,6 @@ PENDING_AGENT_GUIDANCE = (
     "poll await_antigravity_run again or return an explicit pending handoff with run_id and observer_url. "
     "Do not invent advisory content, summarize from progress events, or cancel solely because this await call timed out."
 )
-PROGRESS_NOISE_PATTERNS = (
-    re.compile(r"^\s*(?:Searching|Reading|Inspecting|Scanning|Running|Waiting)\b.{0,160}(?:\.\.\.|…)\s*$", re.IGNORECASE),
-    re.compile(
-        r"^\s*(?:I(?:'|’)ll|I will|I(?:'|’)m going to|Let me)\s+"
-        r"(?:inspect|search|check|look|scan|review|find|run|open|read)\b.{0,160}(?:\.\.\.|…)\s*$",
-        re.IGNORECASE,
-    ),
-    re.compile(r"^\s*.*(?:background task|background job).*(?:wait|waiting|complete|finished).*$", re.IGNORECASE),
-    re.compile(r"^\s*.*백그라운드\s*작업.*(?:대기|기다|완료|종료).*$"),
-    re.compile(r"^\s*.*(?:파일|코드|워크스페이스|리포지토리|저장소).*(?:검색|확인|살펴보|찾아보).*(?:중|겠습니다|볼게요).*$"),
-    re.compile(r"^\s*(?:잠시\s*)?(?:대기|기다리)겠(?:습니다|어요)\.?\s*$"),
-)
 
 
 @dataclass(slots=True)
@@ -576,7 +564,7 @@ class GemnessService:
                 native_conversation_id=native_conversation_id,
             )
         self._record_request_provenance(session_id, request_provenance)
-        prompt_to_send = self.hub.prepare_prompt(session_id, prompt)
+        prompt_to_send = self.hub.prepare_prompt(session_id, _text_prompt(prompt))
 
         runner_started = time.monotonic()
         result = self._call_runner(
@@ -642,23 +630,35 @@ class GemnessService:
             )
             return self._runner_error(session_id, observer_url, result, budget=budget, request_provenance=request_provenance, metadata=metadata)
 
-        text, envelope = extract_cli_response(result.stdout)
-        clean_text = clean_advisory_text(text)
+        contract_stdout = result.raw_stdout or result.stdout
+        response_text, envelope = extract_cli_response(contract_stdout)
         stats = _merged_stats(result.stats, envelope)
         metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
         budget = build_budget(
             prompt=prompt_to_send,
-            response=text,
-            raw_stdout=result.raw_stdout or result.stdout,
-            result=clean_text,
+            response=response_text,
+            raw_stdout=contract_stdout,
+            result=response_text,
             duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
             envelope=envelope,
             stats=stats,
             metadata=metadata,
         )
+        clean_text = _text_response_from_envelope(envelope)
         envelope_error = _envelope_error(envelope)
         if envelope_error:
             return self._envelope_error_result(session_id, observer_url, envelope_error, result, stats, metadata, budget=budget, request_provenance=request_provenance)
+        if clean_text is None:
+            return self._envelope_error_result(
+                session_id,
+                observer_url,
+                "Antigravity CLI did not return a Gemness final-response JSON envelope with a string `response` field.",
+                result,
+                stats,
+                metadata,
+                budget=budget,
+                request_provenance=request_provenance,
+            )
         payload = {
             "status": "completed",
             "text": clean_text,
@@ -672,10 +672,7 @@ class GemnessService:
             "budget": budget,
             **request_provenance.result_fields(),
         }
-        if clean_text != text:
-            payload["filtered_progress"] = True
-        if envelope is not None:
-            payload["stats"] = stats | {"cli_envelope_keys": sorted(envelope.keys())}
+        payload["stats"] = stats | {"cli_envelope_keys": sorted(envelope.keys())}
         self.hub.set_status(session_id, "completed", "session.completed", {"result": payload})
         return payload
 
@@ -1442,6 +1439,24 @@ def _json_prompt(prompt: str, schema: dict[str, Any]) -> str:
     )
 
 
+def _text_prompt(prompt: str) -> str:
+    response_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["response"],
+        "properties": {"response": {"type": "string"}},
+    }
+    return (
+        f"{prompt}\n\n"
+        "Gemness final-response contract:\n"
+        "After completing any needed workspace inspection, return exactly one JSON object that matches this schema. "
+        "The `response` value is the only text Gemness will show as the Antigravity -> Agents answer. Put only the "
+        "final advisory for Codex in `response`; exclude planning, progress narration, tool logs, command logs, "
+        "scratch notes, and status updates. Do not include Markdown fences or prose outside the JSON object.\n"
+        f"JSON Schema:\n{json.dumps(response_schema, ensure_ascii=False, indent=2)}"
+    )
+
+
 def _repair_prompt(schema: dict[str, Any], raw_response: str, parse_error: str | None, validation_errors: list[dict[str, Any]] | None) -> str:
     return (
         "Repair only the previous Antigravity response so it conforms to the schema. Gemness is not resending "
@@ -1555,6 +1570,12 @@ def _envelope_error(envelope: dict[str, Any] | None) -> str | None:
     return str(error)
 
 
+def _text_response_from_envelope(envelope: dict[str, Any] | None) -> str | None:
+    if isinstance(envelope, dict) and isinstance(envelope.get("response"), str):
+        return envelope["response"]
+    return None
+
+
 def _events_after_cursor(events: list[dict[str, Any]], event_cursor: str | None) -> list[dict[str, Any]]:
     if not event_cursor:
         return events
@@ -1642,20 +1663,6 @@ def _is_uuid(value: str) -> bool:
     except ValueError:
         return False
     return True
-
-
-def clean_advisory_text(text: str) -> str:
-    lines = str(text or "").splitlines()
-    kept = [line for line in lines if not _is_progress_noise_line(line)]
-    cleaned = "\n".join(kept).strip()
-    return cleaned or str(text or "").strip()
-
-
-def _is_progress_noise_line(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return False
-    return any(pattern.match(stripped) for pattern in PROGRESS_NOISE_PATTERNS)
 
 
 def _advisory_summary(text: str) -> str:

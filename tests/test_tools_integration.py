@@ -199,7 +199,7 @@ def test_ask_antigravity_happy_path(tmp_path) -> None:
         assert result["status"] == "completed"
         assert result["text"] == "hello"
         assert result["summary"] == "hello"
-        assert result["budget"]["prompt_chars"] == len("Say hello")
+        assert result["budget"]["prompt_chars"] > len("Say hello")
         assert result["budget"]["response_chars"] == len("hello")
         assert result["budget"]["response_est_tokens"] >= 1
         assert result["budget"]["response_mode"] == "full"
@@ -214,26 +214,86 @@ def test_ask_antigravity_happy_path(tmp_path) -> None:
         events = service.hub.get_events(result["session_id"], raw=False)
         assert "prompt.sent" in [event["type"] for event in events]
         completed = next(event for event in events if event["type"] == "session.completed")
-        assert completed["payload"]["result"]["budget"]["prompt_chars"] == len("Say hello")
+        assert completed["payload"]["result"]["budget"]["prompt_chars"] > len("Say hello")
     finally:
         service.shutdown()
 
 
-def test_ask_antigravity_filters_progress_noise_from_final_result(tmp_path) -> None:
+def test_ask_antigravity_rejects_unstructured_text_response(tmp_path) -> None:
+    service = make_service(tmp_path, [AgyRunResult.completed("plain final answer")])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "error"
+        assert "final-response JSON envelope" in result["message"]
+        assert "plain final answer" not in result["message"]
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_rejects_synthetic_runner_wrapper_without_raw_envelope(tmp_path) -> None:
+    raw_stdout = "plain final answer"
+    synthetic_stdout = json.dumps({"response": raw_stdout, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(synthetic_stdout, raw_stdout=raw_stdout)])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "error"
+        assert "final-response JSON envelope" in result["message"]
+        assert "plain final answer" not in result["message"]
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_uses_structured_response_contract_for_final_result(tmp_path) -> None:
     noisy = "\n".join(
         [
-            "Searching repository files...",
-            "백그라운드 작업 완료까지 대기하겠습니다.",
-            "최종 검토 결과입니다.",
+            "I will start by exploring the codebase to understand the project structure.",
+            "I will list the files in the app directory.",
+            json.dumps({"response": "새로운 모바일 하단 네비게이션 `기록` 탭 명세입니다."}, ensure_ascii=False),
         ]
     )
-    service = make_service(tmp_path, [noisy])
+    service = make_service(tmp_path, [AgyRunResult.completed(noisy)])
     try:
         result = service.ask_antigravity("Review")
 
         assert result["status"] == "completed"
-        assert result["text"] == "최종 검토 결과입니다."
-        assert result["filtered_progress"] is True
+        assert result["text"] == "새로운 모바일 하단 네비게이션 `기록` 탭 명세입니다."
+        assert "filtered_progress" not in result
+        assert "Gemness final-response contract" in service.runner.calls[0]["prompt"]
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_extracts_final_response_from_raw_stdout_not_synthetic_wrapper(tmp_path) -> None:
+    raw_stdout = "\n".join(
+        [
+            "I will inspect files first.",
+            json.dumps({"response": "wrong intermediate"}),
+            json.dumps({"response": "final advisory"}),
+        ]
+    )
+    synthetic_stdout = json.dumps({"response": raw_stdout, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(synthetic_stdout, raw_stdout=raw_stdout)])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "completed"
+        assert result["text"] == "final advisory"
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_rejects_non_trailing_logged_response_payload(tmp_path) -> None:
+    raw_stdout = 'command log {"response":"logged payload"}\ncontinuing without a final envelope'
+    synthetic_stdout = json.dumps({"response": raw_stdout, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(synthetic_stdout, raw_stdout=raw_stdout)])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "error"
+        assert "final-response JSON envelope" in result["message"]
+        assert "logged payload" not in result["message"]
     finally:
         service.shutdown()
 
@@ -243,6 +303,24 @@ def test_ask_antigravity_preserves_advice_that_starts_like_progress(tmp_path) ->
         [
             "Searching broadly before narrowing the scope is risky advice here.",
             "Running tests before committing is required.",
+        ]
+    )
+    service = make_service(tmp_path, [advice])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "completed"
+        assert result["text"] == advice
+        assert "filtered_progress" not in result
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_preserves_single_first_person_advice_line(tmp_path) -> None:
+    advice = "\n".join(
+        [
+            "I will not recommend hiding final advisory details.",
+            "Keep the observer focused on the final answer.",
         ]
     )
     service = make_service(tmp_path, [advice])
@@ -420,6 +498,18 @@ def test_cli_envelope_error_returns_status_error(tmp_path) -> None:
         result = service.ask_antigravity("Say hello")
         assert result["status"] == "error"
         assert "auth failed" in result["message"]
+    finally:
+        service.shutdown()
+
+
+def test_cli_error_envelope_without_response_returns_specific_error(tmp_path) -> None:
+    stdout = json.dumps({"error": {"message": "rate limit"}, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(stdout)])
+    try:
+        result = service.ask_antigravity("Say hello")
+        assert result["status"] == "error"
+        assert "rate limit" in result["message"]
+        assert "final-response JSON envelope" not in result["message"]
     finally:
         service.shutdown()
 
@@ -813,13 +903,16 @@ def test_prompt_sends_without_observer_approval_pause(tmp_path) -> None:
         events = service.hub.get_events(result["session_id"], raw=True)
 
         assert result["status"] == "completed"
-        assert service.runner.calls[0]["prompt"] == "original"
+        assert "original" in service.runner.calls[0]["prompt"]
+        assert "Gemness final-response contract" in service.runner.calls[0]["prompt"]
         assert "prompt.pending_approval" not in [event["type"] for event in events]
         sent = next(event for event in events if event["type"] == "prompt.sent")
         rendered = next(event for event in events if event["type"] == "prompt.rendered")
-        assert rendered["payload"]["prompt"] == "original"
+        assert "original" in rendered["payload"]["prompt"]
+        assert "Gemness final-response contract" in rendered["payload"]["prompt"]
         assert sent["payload"]["prompt_ref"] == "prompt.rendered"
-        assert sent["payload"]["prompt_preview"] == "original"
+        assert "original" in sent["payload"]["prompt_preview"]
+        assert "Gemness final-response contract" in sent["payload"]["prompt_preview"]
         assert "prompt" not in sent["payload"]
     finally:
         service.shutdown()
@@ -829,7 +922,8 @@ def test_start_antigravity_returns_detached_run_and_await_collects_result(tmp_pa
     release = threading.Event()
 
     def slow_response(prompt, session_id, hub, **kwargs):  # noqa: ANN001, ANN003
-        assert prompt == "slow prompt"
+        assert "slow prompt" in prompt
+        assert "Gemness final-response contract" in prompt
         release.wait(timeout=2)
         stdout = json.dumps({"response": "slow answer", "metadata": {"streaming": False, "run_id": session_id}})
         hub.append_event(session_id, "antigravity.response", "gemness", {"response": stdout, "streaming": False})
@@ -1255,7 +1349,8 @@ def test_completed_follow_up_uses_native_conversation_id_when_available(tmp_path
         second = service.follow_up_antigravity(first["session_id"], "go deeper")
         assert second["status"] == "completed"
         assert service.hub.get_session(second["session_id"])["parent_session_id"] == first["session_id"]
-        assert service.runner.calls[1]["prompt"] == "go deeper"
+        assert "go deeper" in service.runner.calls[1]["prompt"]
+        assert "Gemness final-response contract" in service.runner.calls[1]["prompt"]
         assert "first" not in service.runner.calls[1]["prompt"]
         assert "first prompt" not in service.runner.calls[1]["prompt"]
         assert service.runner.calls[1]["native_conversation_id"] == native_id

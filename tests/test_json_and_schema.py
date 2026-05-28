@@ -25,6 +25,39 @@ def test_extract_cli_response_tolerates_warning_after_json_envelope() -> None:
     assert envelope["stats"]["tools"]["totalCalls"] == 0
 
 
+def test_extract_cli_response_finds_embedded_response_envelope() -> None:
+    text, envelope = extract_cli_response('I will inspect files first.\\n{"response":"final only"}')
+    assert text == "final only"
+    assert envelope == {"response": "final only"}
+
+
+def test_extract_cli_response_prefers_last_embedded_response_envelope() -> None:
+    stdout = 'command log {"response":"wrong intermediate"}\n{"response":"final only"}'
+
+    text, envelope = extract_cli_response(stdout)
+
+    assert text == "final only"
+    assert envelope == {"response": "final only"}
+
+
+def test_extract_cli_response_scans_after_non_response_json_prefix() -> None:
+    stdout = '{"status":"running"}\n{"response":"final only"}'
+
+    text, envelope = extract_cli_response(stdout)
+
+    assert text == "final only"
+    assert envelope == {"response": "final only"}
+
+
+def test_extract_cli_response_rejects_non_trailing_embedded_response() -> None:
+    stdout = 'command log {"response":"logged payload"}\ncontinuing without a final envelope'
+
+    text, envelope = extract_cli_response(stdout)
+
+    assert text == stdout
+    assert envelope is None
+
+
 def test_schema_validation_pass_and_fail() -> None:
     schema = {
         "type": "object",

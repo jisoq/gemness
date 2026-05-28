@@ -277,11 +277,34 @@ def test_runner_synthesizes_non_streaming_envelope_and_metadata(tmp_path) -> Non
     if os.name != "nt":
         assert "antigravity.stderr" in [event["type"] for event in events]
     assert "antigravity.exited" in [event["type"] for event in events]
-    assert "final answer" in response_event["payload"]["response_preview"]
+    assert response_event["payload"]["response_preview"] == "Antigravity stdout captured as an artifact; no Gemness final-response envelope was found."
+    assert response_event["payload"]["structured_response"] is False
     assert "response" not in response_event["payload"]
     assert "stdout" not in response_event["payload"]
     artifact_path = Path(response_event["payload"]["stdout_artifact"]["path"])
     assert "final answer" in artifact_path.read_text(encoding="utf-8")
+
+
+def test_runner_extracts_embedded_response_envelope_for_observer_preview(tmp_path) -> None:
+    stdout = "\n".join(
+        [
+            "I will start by exploring the codebase to understand the project structure.",
+            "I will search for package.json files to locate the project.",
+            json.dumps({"response": "Final advisory result."}),
+        ]
+    )
+    command, _record_path = make_fake_agy(tmp_path, stdout=stdout)
+    hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False))
+    session = hub.create_session("ask_antigravity", DEFAULT_MODEL_LABEL, project_root=str(tmp_path))
+    runner = AgyCliRunner(GemnessConfig(transcript_dir=tmp_path / "transcripts", observer_enabled=False, agy_command=command, agy_timeout_sec=5, agy_capture_mode="pipe"))
+
+    runner.run("hello", session_id=session.session_id, hub=hub, cwd=tmp_path)
+
+    response_event = next(event for event in hub.get_events(session.session_id, raw=True) if event["type"] == "antigravity.response")
+    assert response_event["payload"]["response_preview"] == "Final advisory result."
+    assert response_event["payload"]["structured_response"] is True
+    artifact_path = Path(response_event["payload"]["stdout_artifact"]["path"])
+    assert "I will start by exploring" in artifact_path.read_text(encoding="utf-8")
 
 
 def test_runner_preserves_cli_envelope_stats_when_present(tmp_path) -> None:
