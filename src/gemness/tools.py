@@ -630,13 +630,14 @@ class GemnessService:
             )
             return self._runner_error(session_id, observer_url, result, budget=budget, request_provenance=request_provenance, metadata=metadata)
 
-        response_text, envelope = extract_cli_response(result.stdout)
+        contract_stdout = result.raw_stdout or result.stdout
+        response_text, envelope = extract_cli_response(contract_stdout)
         stats = _merged_stats(result.stats, envelope)
         metadata = _metadata_with_provenance(_result_metadata(result, envelope), request_provenance)
         budget = build_budget(
             prompt=prompt_to_send,
             response=response_text,
-            raw_stdout=result.raw_stdout or result.stdout,
+            raw_stdout=contract_stdout,
             result=response_text,
             duration_ms=_metadata_duration_ms(metadata, runner_duration_ms),
             envelope=envelope,

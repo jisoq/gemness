@@ -231,6 +231,20 @@ def test_ask_antigravity_rejects_unstructured_text_response(tmp_path) -> None:
         service.shutdown()
 
 
+def test_ask_antigravity_rejects_synthetic_runner_wrapper_without_raw_envelope(tmp_path) -> None:
+    raw_stdout = "plain final answer"
+    synthetic_stdout = json.dumps({"response": raw_stdout, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(synthetic_stdout, raw_stdout=raw_stdout)])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "error"
+        assert "final-response JSON envelope" in result["message"]
+        assert "plain final answer" not in result["message"]
+    finally:
+        service.shutdown()
+
+
 def test_ask_antigravity_uses_structured_response_contract_for_final_result(tmp_path) -> None:
     noisy = "\n".join(
         [
@@ -247,6 +261,25 @@ def test_ask_antigravity_uses_structured_response_contract_for_final_result(tmp_
         assert result["text"] == "새로운 모바일 하단 네비게이션 `기록` 탭 명세입니다."
         assert "filtered_progress" not in result
         assert "Gemness final-response contract" in service.runner.calls[0]["prompt"]
+    finally:
+        service.shutdown()
+
+
+def test_ask_antigravity_extracts_final_response_from_raw_stdout_not_synthetic_wrapper(tmp_path) -> None:
+    raw_stdout = "\n".join(
+        [
+            "I will inspect files first.",
+            json.dumps({"response": "wrong intermediate"}),
+            json.dumps({"response": "final advisory"}),
+        ]
+    )
+    synthetic_stdout = json.dumps({"response": raw_stdout, "metadata": {"streaming": False}})
+    service = make_service(tmp_path, [AgyRunResult.completed(synthetic_stdout, raw_stdout=raw_stdout)])
+    try:
+        result = service.ask_antigravity("Review")
+
+        assert result["status"] == "completed"
+        assert result["text"] == "final advisory"
     finally:
         service.shutdown()
 

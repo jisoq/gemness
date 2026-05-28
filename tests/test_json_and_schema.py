@@ -31,6 +31,15 @@ def test_extract_cli_response_finds_embedded_response_envelope() -> None:
     assert envelope == {"response": "final only"}
 
 
+def test_extract_cli_response_prefers_last_embedded_response_envelope() -> None:
+    stdout = 'command log {"response":"wrong intermediate"}\n{"response":"final only"}'
+
+    text, envelope = extract_cli_response(stdout)
+
+    assert text == "final only"
+    assert envelope == {"response": "final only"}
+
+
 def test_schema_validation_pass_and_fail() -> None:
     schema = {
         "type": "object",

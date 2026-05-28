@@ -45,7 +45,7 @@ def extract_cli_response(stdout: str) -> tuple[str, dict[str, Any] | None]:
     if isinstance(envelope, dict):
         text = _extract_envelope_text(envelope)
         return (text, envelope) if text is not None else (stdout, envelope)
-    embedded = _first_embedded_response_envelope(stripped)
+    embedded = _last_embedded_response_envelope(stripped)
     if embedded is not None:
         text = _extract_envelope_text(embedded)
         if text is not None:
@@ -63,7 +63,8 @@ def _parse_json_prefix(text: str) -> Any | None:
         return None
 
 
-def _first_embedded_response_envelope(text: str) -> dict[str, Any] | None:
+def _last_embedded_response_envelope(text: str) -> dict[str, Any] | None:
+    last: dict[str, Any] | None = None
     for match in re.finditer(r"[{[]", text):
         candidate = _balanced_prefix(text[match.start() :])
         if not candidate:
@@ -73,8 +74,8 @@ def _first_embedded_response_envelope(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict) and _extract_envelope_text(parsed) is not None:
-            return parsed
-    return None
+            last = parsed
+    return last
 
 
 def _extract_envelope_text(envelope: dict[str, Any]) -> str | None:
