@@ -42,7 +42,6 @@ def main(argv: list[str] | None = None) -> None:
         help="Strict allowed workspace root. May be repeated. When set, Codex trusted-project automatic mode is disabled.",
     )
     bootstrap.add_argument("--agy-command", default=None, help="Antigravity CLI command/path. Defaults to resolving agy from PATH.")
-    bootstrap.add_argument("--skip-trigger", action="store_true", help="Do not install the gemness skill guidance.")
     bootstrap.add_argument("--skip-smoke-test", action="store_true", help="Write config without launching the configured MCP command.")
     bootstrap.add_argument("--smoke-timeout", type=float, default=60.0)
 
@@ -109,9 +108,8 @@ def _bootstrap_codex(args: argparse.Namespace) -> None:
     agy_command = options.agy_command or "agy"
     _check_agy_version(agy_command, workspace_root or Path.cwd())
 
-    if not args.skip_trigger:
-        for path in install_trigger("user", workspace_root or Path.cwd()):
-            print(f"updated {path}")
+    for path in install_trigger("user", workspace_root or Path.cwd()):
+        print(f"updated {path}")
 
     if not args.skip_smoke_test:
         command = [options.command, *options.args]

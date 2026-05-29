@@ -156,6 +156,34 @@ def test_build_mcp_env_omits_local_paths_by_default() -> None:
     assert "GEMNESS_ALLOWED_ROOTS" not in env
 
 
+def test_bootstrap_codex_installs_user_skill_only(tmp_path, monkeypatch) -> None:
+    from gemness import cli
+
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(cli, "_check_agy_version", lambda agy_command, cwd: None)
+
+    cli.main(
+        [
+            "bootstrap-codex",
+            "--server-source",
+            "git+https://example.test/gemness",
+            "--workspace-root",
+            str(project),
+            "--skip-smoke-test",
+        ]
+    )
+
+    assert (home / ".agents" / "skills" / "gemness" / "SKILL.md").exists()
+    assert not (project / ".agents" / "skills" / "gemness" / "SKILL.md").exists()
+
+
 def test_upsert_marked_block_removes_orphan_end_marker() -> None:
     from gemness.codex_install import END_MARKER, START_MARKER, upsert_marked_block
 
