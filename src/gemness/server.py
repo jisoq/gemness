@@ -8,10 +8,32 @@ from .mcp_metadata import SERVER_NAME, SERVER_VERSION
 from .tools import GemnessService
 
 
+CALLER_ROLE_PROPERTY = {
+    "type": "string",
+    "enum": ["reviewer_subagent", "main_agent_takeover", "non_codex_client", "codex_main_agent"],
+    "description": (
+        "Who owns this Gemness run. In Codex, use reviewer_subagent for the delegated reviewer, "
+        "main_agent_takeover only with a takeover_reason, and avoid codex_main_agent direct execution "
+        "when multi-agent support is available."
+    ),
+}
+TAKEOVER_REASON_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Required context when caller_role is main_agent_takeover, such as reviewer_spawn_failed, "
+        "reviewer_task_failed, pending_handoff_takeover, or explicit_user_direct_request."
+    ),
+}
+
+
 TOOLS = [
     {
         "name": "antigravity_health",
-        "description": "Check MCP server, workspace, observer, Antigravity CLI readiness, and record Codex host multi-agent capability when the main agent has probed it.",
+        "description": (
+            "Check MCP server, workspace, observer, Antigravity CLI readiness, record Codex host "
+            "multi-agent capability when the main agent has probed it, and return the recommended "
+            "Codex delegation flow."
+        ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -20,7 +42,10 @@ TOOLS = [
                 "check_antigravity": {"type": "boolean", "default": True},
                 "codex_multi_agent_available": {
                     "type": "boolean",
-                    "description": "Set by the main Codex agent after host-side spawn/delegation tool discovery. Stored in the user-level Gemness host capability cache.",
+                    "description": (
+                        "Set by the main Codex agent after host-side spawn/delegation tool discovery. "
+                        "Stored in the user-level Gemness host capability cache."
+                    ),
                 },
                 "codex_multi_agent_evidence": {
                     "type": "string",
@@ -30,21 +55,15 @@ TOOLS = [
         },
     },
     {
-        "name": "ask_antigravity",
-        "description": "Blocking final-result Antigravity advisory tool. Intended for an antigravity reviewer subagent in the default Codex flow; returns a cleaned final result and observer URL, not raw transcript.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["prompt"],
-            "properties": {
-                "prompt": {"type": "string"},
-                "cwd": {"type": "string"},
-            },
-        },
-    },
-    {
         "name": "start_antigravity",
-        "description": "Start a background Antigravity run and return immediately with a run id. This is the delegated reviewer-owned flow; the main agent should call it only for explicit takeover or non-delegated fallback. Use mode=ask, json, or review_current_diff normally. When the parent handoff delegates follow_up, the reviewer must forward that follow-up to Antigravity and must not answer it itself.",
+        "description": (
+            "Default Codex delegated reviewer-owned flow. Start a background Antigravity run and return "
+            "immediately with a run id. A Codex main agent should spawn/delegate to a reviewer subagent "
+            "first when multi-agent support is available, then the reviewer calls this tool. Main-agent "
+            "direct calls are only for explicit takeover or non-delegated fallback. Use mode=ask, json, "
+            "review_current_diff, or follow_up. When the parent handoff delegates follow_up, the reviewer "
+            "must forward that follow-up to Antigravity and must not answer it itself."
+        ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -59,7 +78,12 @@ TOOLS = [
                     "type": "string",
                     "enum": ["ask", "json", "review_current_diff", "follow_up"],
                     "default": "ask",
-                    "description": "Run type. ask uses prompt, json uses prompt+schema, review_current_diff uses base_ref, and follow_up uses parent_session_id+prompt. A delegated reviewer must use follow_up to forward a parent follow-up handoff to Antigravity instead of answering it itself.",
+                    "description": (
+                        "Run type. ask uses prompt, json uses prompt+schema, review_current_diff uses "
+                        "base_ref, and follow_up uses parent_session_id+prompt. A delegated reviewer "
+                        "must use follow_up to forward a parent follow-up handoff to Antigravity instead "
+                        "of answering it itself."
+                    ),
                 },
                 "prompt": {"type": "string"},
                 "schema": {"type": "object"},
@@ -68,53 +92,24 @@ TOOLS = [
                 "cwd": {"type": "string"},
                 "idempotency_key": {
                     "type": "string",
-                    "description": "Parent-supplied delegation key. A reviewer subagent should reuse the exact delegation_id from the parent handoff so duplicate starts return the existing run.",
+                    "description": (
+                        "Parent-supplied delegation key. A reviewer subagent should reuse the exact "
+                        "delegation_id from the parent handoff so duplicate starts return the existing run."
+                    ),
                 },
-            },
-        },
-    },
-    {
-        "name": "follow_up_antigravity",
-        "description": "Blocking final-result follow-up for a previous Antigravity observer conversation. When the parent handoff delegates follow-up mode with a parent_session_id and prompt, reviewer subagents must call this or start mode=follow_up to forward the instruction to Antigravity, not answer the follow-up themselves. They must not self-initiate unrelated follow-up turns.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["parent_session_id", "prompt"],
-            "properties": {
-                "parent_session_id": {"type": "string"},
-                "prompt": {"type": "string"},
-            },
-        },
-    },
-    {
-        "name": "ask_antigravity_json",
-        "description": "Blocking final-result Antigravity JSON tool. Validates the final response against a schema and returns data plus observer URL without raw transcript.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["prompt", "schema"],
-            "properties": {
-                "prompt": {"type": "string"},
-                "schema": {"type": "object"},
-                "cwd": {"type": "string"},
-            },
-        },
-    },
-    {
-        "name": "review_current_diff_with_antigravity",
-        "description": "Blocking final-result current-diff review. Intended for an antigravity reviewer subagent; Antigravity inspects the workspace itself and Gemness returns cleaned advisory data plus observer URL.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "base_ref": {"type": "string", "default": "HEAD"},
-                "cwd": {"type": "string"},
+                "caller_role": CALLER_ROLE_PROPERTY,
+                "takeover_reason": TAKEOVER_REASON_PROPERTY,
             },
         },
     },
     {
         "name": "await_antigravity_run",
-        "description": "Wait briefly for a background Antigravity run, then return completion or the current running state. Use only by the delegated run owner or during explicit main-agent takeover; timeout_sec=0 polls without waiting. A non-terminal response means no final Antigravity answer exists yet: keep polling or hand off pending state, and do not invent advisory content.",
+        "description": (
+            "Wait briefly for a background Antigravity run, then return completion or the current running "
+            "state. Use only by the delegated run owner or during explicit main-agent takeover; "
+            "timeout_sec=0 polls without waiting. A non-terminal response means no final Antigravity "
+            "answer exists yet: keep polling or hand off pending state, and do not invent advisory content."
+        ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -124,18 +119,107 @@ TOOLS = [
                 "timeout_sec": {"type": "number", "default": 5, "minimum": 0, "maximum": 30},
                 "event_cursor": {"type": "string"},
                 "recent_event_limit": {"type": "integer", "default": 20, "minimum": 0, "maximum": 100},
+                "caller_role": CALLER_ROLE_PROPERTY,
+                "takeover_reason": TAKEOVER_REASON_PROPERTY,
             },
         },
     },
     {
         "name": "cancel_antigravity_run",
-        "description": "Background run control API: request cancellation for a detached Antigravity run by run id. Do not use this merely because an await call timed out or the run is taking longer than expected; cancel only for an explicit user/parent request or a known wrong run.",
+        "description": (
+            "Background run control API: request cancellation for a detached Antigravity run by run id. "
+            "Do not use this merely because an await call timed out or the run is taking longer than "
+            "expected; cancel only for an explicit user/parent request or a known wrong run."
+        ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "required": ["run_id"],
             "properties": {
                 "run_id": {"type": "string"},
+                "caller_role": CALLER_ROLE_PROPERTY,
+                "takeover_reason": TAKEOVER_REASON_PROPERTY,
+            },
+        },
+    },
+    {
+        "name": "ask_antigravity",
+        "description": (
+            "Blocking final-result Antigravity advisory wrapper. In Codex this is not the default "
+            "main-agent path when multi-agent support is available; spawn/delegate to a reviewer "
+            "subagent and prefer start_antigravity plus await_antigravity_run. Use this only from the "
+            "reviewer subagent, an explicit main-agent takeover, or a non-Codex client."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["prompt"],
+            "properties": {
+                "prompt": {"type": "string"},
+                "cwd": {"type": "string"},
+                "caller_role": CALLER_ROLE_PROPERTY,
+                "takeover_reason": TAKEOVER_REASON_PROPERTY,
+            },
+        },
+    },
+    {
+        "name": "follow_up_antigravity",
+        "description": (
+            "Blocking final-result follow-up wrapper. In Codex, reviewer subagents must call this or "
+            "start mode=follow_up to forward the instruction to Antigravity, not answer the follow-up "
+            "themselves, only when the parent delegated follow-up mode with a parent_session_id and "
+            "prompt. Otherwise prefer start_antigravity mode=follow_up. Main-agent direct use requires "
+            "explicit takeover or non-delegated fallback."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["parent_session_id", "prompt"],
+            "properties": {
+                "parent_session_id": {"type": "string"},
+                "prompt": {"type": "string"},
+                "caller_role": CALLER_ROLE_PROPERTY,
+                "takeover_reason": TAKEOVER_REASON_PROPERTY,
+            },
+        },
+    },
+    {
+        "name": "ask_antigravity_json",
+        "description": (
+            "Blocking final-result Antigravity JSON wrapper. In Codex this is not the default main-agent "
+            "path when multi-agent support is available; delegate to a reviewer subagent and prefer "
+            "start_antigravity mode=json plus await_antigravity_run. Use this only from the reviewer "
+            "subagent, an explicit main-agent takeover, or a non-Codex client."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["prompt", "schema"],
+            "properties": {
+                "prompt": {"type": "string"},
+                "schema": {"type": "object"},
+                "cwd": {"type": "string"},
+                "caller_role": CALLER_ROLE_PROPERTY,
+                "takeover_reason": TAKEOVER_REASON_PROPERTY,
+            },
+        },
+    },
+    {
+        "name": "review_current_diff_with_antigravity",
+        "description": (
+            "Blocking final-result current-diff review wrapper. In Codex this is not the default "
+            "main-agent path when multi-agent support is available; delegate to a reviewer subagent and "
+            "prefer start_antigravity mode=review_current_diff plus await_antigravity_run. Antigravity "
+            "inspects the workspace itself and Gemness returns cleaned advisory data plus observer URL."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "base_ref": {"type": "string", "default": "HEAD"},
+                "cwd": {"type": "string"},
+                "caller_role": CALLER_ROLE_PROPERTY,
+                "takeover_reason": TAKEOVER_REASON_PROPERTY,
             },
         },
     },
@@ -204,33 +288,60 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
             codex_multi_agent_evidence=arguments.get("codex_multi_agent_evidence"),
         )
     elif name == "ask_antigravity":
-        result = service.ask_antigravity(str(arguments["prompt"]), cwd=arguments.get("cwd"))
+        result = service.ask_antigravity(
+            str(arguments["prompt"]),
+            cwd=arguments.get("cwd"),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
+        )
     elif name == "start_antigravity":
         result = _call_start_antigravity(service, arguments)
     elif name == "follow_up_antigravity":
-        result = service.follow_up_antigravity(str(arguments["parent_session_id"]), str(arguments["prompt"]))
+        result = service.follow_up_antigravity(
+            str(arguments["parent_session_id"]),
+            str(arguments["prompt"]),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
+        )
     elif name == "start_follow_up_antigravity":
         result = service.start_follow_up_antigravity(
             str(arguments["parent_session_id"]),
             str(arguments["prompt"]),
             idempotency_key=arguments.get("idempotency_key"),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     elif name == "ask_antigravity_json":
-        result = service.ask_antigravity_json(str(arguments["prompt"]), arguments["schema"], cwd=arguments.get("cwd"))
+        result = service.ask_antigravity_json(
+            str(arguments["prompt"]),
+            arguments["schema"],
+            cwd=arguments.get("cwd"),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
+        )
     elif name == "start_antigravity_json":
         result = service.start_antigravity_json(
             str(arguments["prompt"]),
             arguments["schema"],
             cwd=arguments.get("cwd"),
             idempotency_key=arguments.get("idempotency_key"),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     elif name == "review_current_diff_with_antigravity":
-        result = service.review_current_diff_with_antigravity(base_ref=str(arguments.get("base_ref") or "HEAD"), cwd=arguments.get("cwd"))
+        result = service.review_current_diff_with_antigravity(
+            base_ref=str(arguments.get("base_ref") or "HEAD"),
+            cwd=arguments.get("cwd"),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
+        )
     elif name == "start_review_current_diff_with_antigravity":
         result = service.start_review_current_diff_with_antigravity(
             base_ref=str(arguments.get("base_ref") or "HEAD"),
             cwd=arguments.get("cwd"),
             idempotency_key=arguments.get("idempotency_key"),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     elif name == "get_antigravity_run":
         result = service.get_antigravity_run(
@@ -244,9 +355,15 @@ def _call_tool(params: dict[str, Any], service: GemnessService) -> dict[str, Any
             timeout_sec=float(arguments.get("timeout_sec", 5)),
             event_cursor=arguments.get("event_cursor"),
             recent_event_limit=int(arguments.get("recent_event_limit", 20)),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     elif name == "cancel_antigravity_run":
-        result = service.cancel_antigravity_run(str(arguments["run_id"]))
+        result = service.cancel_antigravity_run(
+            str(arguments["run_id"]),
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
+        )
     else:
         raise ValueError(f"Unknown tool: {params.get('name')}")
     return {
@@ -266,6 +383,8 @@ def _call_start_antigravity(service: GemnessService, arguments: dict[str, Any]) 
             _required_string(arguments, "prompt", mode=mode),
             cwd=arguments.get("cwd"),
             idempotency_key=idempotency_key,
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     if mode == "json":
         if "schema" not in arguments:
@@ -275,18 +394,24 @@ def _call_start_antigravity(service: GemnessService, arguments: dict[str, Any]) 
             arguments["schema"],
             cwd=arguments.get("cwd"),
             idempotency_key=idempotency_key,
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     if mode in {"review", "review_current_diff"}:
         return service.start_review_current_diff_with_antigravity(
             base_ref=str(arguments.get("base_ref") or "HEAD"),
             cwd=arguments.get("cwd"),
             idempotency_key=idempotency_key,
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     if mode in {"follow_up", "follow-up"}:
         return service.start_follow_up_antigravity(
             _required_string(arguments, "parent_session_id", mode=mode),
             _required_string(arguments, "prompt", mode=mode),
             idempotency_key=idempotency_key,
+            caller_role=arguments.get("caller_role"),
+            takeover_reason=arguments.get("takeover_reason"),
         )
     raise ValueError(f"Unknown start_antigravity mode: {arguments.get('mode')}")
 

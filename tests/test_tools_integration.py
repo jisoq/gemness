@@ -141,11 +141,16 @@ def test_health_records_codex_multi_agent_host_capability(tmp_path) -> None:
         assert recorded["codex_host"]["multi_agent"]["status"] == "available"
         assert recorded["codex_host"]["multi_agent"]["available"] is True
         assert recorded["codex_host"]["multi_agent"]["priority"] == "first"
+        assert recorded["codex_delegation"]["recommended_flow"] == "spawn_reviewer_subagent"
+        assert recorded["codex_delegation"]["reviewer_tool_sequence"] == ["start_antigravity", "await_antigravity_run"]
+        assert "ask_antigravity" in recorded["codex_delegation"]["blocking_wrapper_tools"]
+        assert recorded["codex_delegation"]["handoff_template"]["gemness_health_handoff"]["antigravity_health_already_called"] is True
         assert cache_path.exists()
 
         reused = service.antigravity_health(check_antigravity=False)
         assert reused["codex_host"]["multi_agent"]["status"] == "available"
         assert reused["codex_host"]["multi_agent"]["evidence"] == "multi_agent_v1.spawn_agent"
+        assert reused["codex_delegation"]["recommended_flow"] == "spawn_reviewer_subagent"
     finally:
         service.shutdown()
 
@@ -159,7 +164,41 @@ def test_health_reports_unrecorded_codex_multi_agent_host_capability(tmp_path) -
         assert result["codex_host"]["cache_path"] == str(cache_path.resolve())
         assert result["codex_host"]["multi_agent"]["status"] == "not_recorded"
         assert result["codex_host"]["multi_agent"]["available"] is None
+        assert result["codex_delegation"]["recommended_flow"] == "probe_multi_agent_then_record_health"
         assert "Codex multi-agent capability has not been recorded yet." in result["warnings"]
+    finally:
+        service.shutdown()
+
+
+def test_codex_multi_agent_cache_adds_direct_call_warning(tmp_path) -> None:
+    cache_path = tmp_path / "codex-host-capabilities.json"
+    service = make_service(tmp_path, ["hello", "reviewer"], codex_host_capabilities_file=cache_path)
+    try:
+        service.antigravity_health(
+            check_antigravity=False,
+            codex_multi_agent_available=True,
+            codex_multi_agent_evidence="multi_agent_v1.spawn_agent",
+        )
+
+        direct = service.ask_antigravity("Say hello")
+        warning = direct["codex_delegation_warning"]
+        assert warning["recommended_flow"] == "spawn_reviewer_subagent"
+        assert warning["reason"] == "codex_multi_agent_available_without_run_owner"
+        assert warning["tool"] == "ask_antigravity"
+
+        reviewer = service.ask_antigravity("Say hello", caller_role="reviewer_subagent")
+        assert "codex_delegation_warning" not in reviewer
+    finally:
+        service.shutdown()
+
+
+def test_main_agent_takeover_without_reason_warns(tmp_path) -> None:
+    service = make_service(tmp_path, ["hello"])
+    try:
+        result = service.ask_antigravity("Say hello", caller_role="main_agent_takeover")
+        warning = result["codex_delegation_warning"]
+        assert warning["reason"] == "takeover_reason_missing"
+        assert "main_agent_takeover" in warning["allowed_direct_roles"]
     finally:
         service.shutdown()
 

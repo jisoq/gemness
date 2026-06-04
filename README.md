@@ -10,12 +10,12 @@ Gemness는 Codex가 Antigravity CLI(`agy`)의 조언을 구하고, 브라우저 
 | `start_antigravity` | 백그라운드 run을 시작하고 바로 `run_id`를 받음 | delegated run owner인 subagent가 Antigravity 작업을 시작할 때 | 기본 흐름 |
 | `await_antigravity_run` | 백그라운드 run 상태나 결과를 확인 | run owner가 `run_id`로 결과를 기다리거나 `timeout_sec=0`으로 즉시 조회 | 기본 흐름 |
 | `cancel_antigravity_run` | 실행 중인 백그라운드 run 중단 요청 | 명시적인 취소 요청이 있거나 잘못 시작한 run일 때 | 중단용 |
-| `ask_antigravity` | 일반 질문을 시작부터 완료까지 한 번에 처리 | 단순 second opinion이 필요하고 별도 polling이 필요 없을 때 | 편의 도구 |
-| `follow_up_antigravity` | 이전 Gemness 실행에 이어서 후속 질문 | 같은 대화의 맥락을 간단히 이어갈 때 | 편의 도구 |
-| `ask_antigravity_json` | 답변을 JSON Schema에 맞춰 한 번에 받음 | 자동화, 분류, 구조화된 리뷰 결과가 필요할 때 | 편의 도구 |
-| `review_current_diff_with_antigravity` | 현재 워크스페이스 변경사항 리뷰를 한 번에 요청 | 커밋/PR 전 변경 검토 | 편의 도구 |
+| `ask_antigravity` | 일반 질문을 시작부터 완료까지 한 번에 처리 | reviewer subagent, 명시적 takeover, non-Codex 호환 호출 | 편의/후퇴 도구 |
+| `follow_up_antigravity` | 이전 Gemness 실행에 이어서 후속 질문 | parent가 follow-up handoff를 reviewer에게 위임했거나 non-Codex 호환 호출이 필요할 때 | 편의/후퇴 도구 |
+| `ask_antigravity_json` | 답변을 JSON Schema에 맞춰 한 번에 받음 | reviewer subagent, 명시적 takeover, non-Codex 호환 호출 | 편의/후퇴 도구 |
+| `review_current_diff_with_antigravity` | 현재 워크스페이스 변경사항 리뷰를 한 번에 요청 | reviewer subagent, 명시적 takeover, non-Codex 호환 호출 | 편의/후퇴 도구 |
 
-`start_antigravity`는 `mode`로 작업 종류를 고릅니다. 일반 질문은 `mode="ask"`, JSON 결과는 `mode="json"`, 현재 diff 리뷰는 `mode="review_current_diff"`, 후속 질문은 `mode="follow_up"`을 사용합니다. `ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`는 같은 작업을 blocking final-result 형태로 감싼 편의 도구입니다.
+`start_antigravity`는 `mode`로 작업 종류를 고릅니다. 일반 질문은 `mode="ask"`, JSON 결과는 `mode="json"`, 현재 diff 리뷰는 `mode="review_current_diff"`, 후속 질문은 `mode="follow_up"`을 사용합니다. `ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`는 같은 작업을 blocking final-result 형태로 감싼 호환 wrapper입니다. Codex host에서 multi-agent가 가능하면 main agent의 기본 선택지가 아니며, 직접 호출 시 `caller_role`/`takeover_reason` 힌트와 `codex_delegation_warning`으로 흐름을 드러냅니다.
 
 각 루트 도구 호출은 Gemness 실행(run)과 Gemness 대화(conversation)를 생성합니다. main agent는 Antigravity 작업을 직접 오래 점유하지 않고, subagent가 백그라운드 run을 관리한 뒤 정리된 요약, 주요 findings, `observer_url`을 parent에게 반환하는 흐름을 최우선으로 사용합니다. main agent가 reviewer를 띄운 뒤에는 같은 작업에 대해 `start_antigravity`, `await_antigravity_run`, blocking wrapper 도구를 중복 호출하지 않습니다.
 
@@ -95,19 +95,23 @@ uvx --from git+https://github.com/jisoq/gemness gemness bootstrap-codex
 - `default_tools_approval_mode = "prompt"`
 - `GEMNESS_AGY_TIMEOUT = "600"`
 
-`use gemness` 트리거 가이던스는 Codex main agent가 Gemness MCP 도구를 직접 오래 점유하지 않도록 설계되어 있습니다. main agent는 reviewer subagent에 Antigravity 검토를 위임하고, reviewer subagent가 delegated run owner로서 `start_antigravity`와 `await_antigravity_run`으로 백그라운드 run을 관리한 뒤 정제된 요약, 주요 findings, `observer_url`을 parent에게 반환합니다.
+`use gemness` 트리거 가이던스는 Codex main agent가 Gemness MCP 도구를 직접 오래 점유하지 않도록 설계되어 있습니다. main agent는 reviewer subagent에 Antigravity 검토를 위임하고, reviewer subagent가 delegated run owner로서 `start_antigravity`와 `await_antigravity_run`으로 백그라운드 run을 관리한 뒤 정제된 요약, 주요 findings, `observer_url`을 parent에게 반환합니다. `antigravity_health` 응답의 `codex_delegation.recommended_flow`가 `spawn_reviewer_subagent`이면 이 흐름이 기본입니다.
 
 Gemness health check는 작업당 main agent나 reviewer subagent 중 한 주체만 맡습니다. main agent가 health와 host capability를 확인한 뒤 reviewer를 띄우는 경우, reviewer prompt에 `Gemness health handoff`로 cwd, health status, `codex_host.multi_agent.available`, `antigravity_health` 호출 여부를 넘깁니다. reviewer는 같은 cwd의 `ok` 또는 `warning` handoff를 받으면 `antigravity_health`를 반복하지 않고 바로 `start_antigravity`부터 진행합니다. handoff가 없고 reviewer가 첫 Gemness 실행 주체라면 reviewer가 health를 한 번만 확인하고 이어서 작업합니다.
 
-첫 `use gemness health check`에서는 Codex host의 subagent/spawn/delegation 도구 가능 여부를 먼저 확인한 뒤, `antigravity_health`의 `codex_multi_agent_available`과 `codex_multi_agent_evidence` 인자로 그 결과를 기록합니다. 이 결과는 `~/.gemness/codex-host-capabilities.json`에 저장되며, 이후 다른 레포에서 Gemness를 사용할 때도 같은 Codex host capability로 재사용됩니다. 캐시가 available이면 main agent는 매번 재탐색하지 않고 reviewer subagent 흐름을 먼저 사용합니다.
+첫 `use gemness health check`에서는 Codex host의 subagent/spawn/delegation 도구 가능 여부를 먼저 확인한 뒤, `antigravity_health`의 `codex_multi_agent_available`과 `codex_multi_agent_evidence` 인자로 그 결과를 기록합니다. 이 결과는 `~/.gemness/codex-host-capabilities.json`에 저장되며, 이후 다른 레포에서 Gemness를 사용할 때도 같은 Codex host capability로 재사용됩니다. 캐시가 available이면 main agent는 매번 재탐색하지 않고 reviewer subagent 흐름을 먼저 사용합니다. health 응답은 `codex_delegation.handoff_template`도 함께 반환하므로 parent는 이 값을 reviewer prompt의 `Gemness health handoff`와 `delegated_run handoff` 골격으로 사용할 수 있습니다.
 
 reviewer subagent가 백그라운드 run을 관리하는 동안 main agent는 빈손으로 기다리지 않습니다. main agent는 관련 코드와 diff를 읽고, 테스트나 검증 루틴을 준비하거나 실행하고, reviewer 조언을 받았을 때 적용 여부를 판단할 수 있도록 비중복 작업을 먼저 진행합니다.
 
 main agent가 reviewer를 spawn할 때는 `delegated_run handoff`에 cwd, task, mode, 필요한 schema 또는 parent session id, parent-generated `delegation_id`를 담습니다. reviewer는 이 `delegation_id`를 `start_antigravity`의 `idempotency_key`로 그대로 넘겨 같은 위임 작업이 중복 시작되지 않게 합니다. reviewer subagent는 추가 subagent를 다시 spawn하지 않습니다.
 
+`multi_agent_v1.spawn_agent`가 호출 형식 제약 때문에 거부되면 main agent는 즉시 Gemness MCP wrapper로 후퇴하지 않고, `message`와 `items`를 함께 쓰지 않거나, full-history fork와 model/profile override를 같이 쓰지 않는 단순한 spawn 형태로 재시도합니다. 단순화한 reviewer spawn도 실패했을 때만 direct fallback이나 takeover를 고려합니다.
+
 reviewer subagent의 기본 spawn profile은 `model="gpt-5.5"`, `reasoning_effort="medium"`입니다. reviewer는 Gemness 실행과 결과 요약을 맡고, 핵심 reasoning은 Antigravity CLI가 수행한다는 전제의 프로파일입니다.
 
 main agent가 delegated Gemness run을 takeover할 수 있는 경우는 reviewer spawn 실패, reviewer의 명시적 실패나 subagent/task 레벨 타임아웃, reviewer가 pending handoff 또는 `run_id`만 반환하고 종료된 경우, 사용자가 main 직접 실행을 명시적으로 요청한 경우입니다. 단일 `await_antigravity_run` timeout이나 `accepted`/`queued`/`running` 상태는 reviewer 실패나 Antigravity 무응답의 증거가 아닙니다. takeover 시에는 새 run을 시작하지 않고 기존 `run_id`나 session identifier를 이용해 await, cancel, follow-up만 수행하며, run이 terminal 상태가 되기 전에는 advisory를 지어내지 않습니다.
+
+호환 wrapper(`ask_antigravity`, `follow_up_antigravity`, `ask_antigravity_json`, `review_current_diff_with_antigravity`)를 Codex에서 직접 호출해야 한다면 `caller_role="reviewer_subagent"`, `caller_role="main_agent_takeover"`와 `takeover_reason`, 또는 `caller_role="non_codex_client"`를 명시합니다. multi-agent 가능 캐시가 있는데 run owner 힌트 없이 직접 호출하면 결과에 `codex_delegation_warning`이 포함됩니다.
 
 특정 경로의 Antigravity CLI 실행 파일을 고정하여 사용하려면 다음과 같이 실행하십시오:
 

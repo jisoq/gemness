@@ -40,6 +40,13 @@ PENDING_AGENT_GUIDANCE = (
     "poll await_antigravity_run again or return an explicit pending handoff with run_id and observer_url. "
     "Do not invent advisory content, summarize from progress events, or cancel solely because this await call timed out."
 )
+RUN_OWNER_ROLES = {"reviewer_subagent", "main_agent_takeover", "non_codex_client"}
+BLOCKING_WRAPPER_TOOLS = [
+    "ask_antigravity",
+    "follow_up_antigravity",
+    "ask_antigravity_json",
+    "review_current_diff_with_antigravity",
+]
 
 
 @dataclass(slots=True)
@@ -167,6 +174,7 @@ class GemnessService:
             if observer.get(key):
                 warnings.append(f"Observer {key}: {observer[key]}")
         status = "warning" if warnings else "ok"
+        codex_delegation = _codex_delegation_guidance(codex_host, resolved_cwd)
         return {
             "status": status,
             "server": {
@@ -177,6 +185,7 @@ class GemnessService:
             },
             "mcp": {"transport": "stdio", "tools": TOOL_NAMES},
             "codex_host": codex_host,
+            "codex_delegation": codex_delegation,
             "workspace": workspace,
             "antigravity": antigravity,
             "observer": observer,
@@ -184,31 +193,133 @@ class GemnessService:
             "warnings": warnings,
         }
 
-    def ask_antigravity(self, prompt: str, cwd: str | None = None) -> dict[str, Any]:
-        started = self.start_antigravity(prompt, cwd=cwd)
+    def ask_antigravity(
+        self,
+        prompt: str,
+        cwd: str | None = None,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
+        started = self.start_antigravity(
+            prompt,
+            cwd=cwd,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+        )
         if started.get("status") == "error":
-            return started
-        return self._await_blocking(str(started["run_id"]))
+            return self._with_codex_direct_call_warning(
+                started,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="ask_antigravity",
+            )
+        result = self._await_blocking(str(started["run_id"]))
+        return self._with_codex_direct_call_warning(
+            result,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+            tool_name="ask_antigravity",
+        )
 
-    def ask_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None) -> dict[str, Any]:
-        started = self.start_antigravity_json(prompt, schema, cwd=cwd)
+    def ask_antigravity_json(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        cwd: str | None = None,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
+        started = self.start_antigravity_json(
+            prompt,
+            schema,
+            cwd=cwd,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+        )
         if started.get("status") == "error":
-            return started
-        return self._await_blocking(str(started["run_id"]))
+            return self._with_codex_direct_call_warning(
+                started,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="ask_antigravity_json",
+            )
+        result = self._await_blocking(str(started["run_id"]))
+        return self._with_codex_direct_call_warning(
+            result,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+            tool_name="ask_antigravity_json",
+        )
 
-    def review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None) -> dict[str, Any]:
-        started = self.start_review_current_diff_with_antigravity(base_ref=base_ref, cwd=cwd)
+    def review_current_diff_with_antigravity(
+        self,
+        base_ref: str = "HEAD",
+        cwd: str | None = None,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
+        started = self.start_review_current_diff_with_antigravity(
+            base_ref=base_ref,
+            cwd=cwd,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+        )
         if started.get("status") == "error":
-            return started
-        return self._await_blocking(str(started["run_id"]))
+            return self._with_codex_direct_call_warning(
+                started,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="review_current_diff_with_antigravity",
+            )
+        result = self._await_blocking(str(started["run_id"]))
+        return self._with_codex_direct_call_warning(
+            result,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+            tool_name="review_current_diff_with_antigravity",
+        )
 
-    def follow_up_antigravity(self, parent_session_id: str, instruction: str) -> dict[str, Any]:
-        started = self.start_follow_up_antigravity(parent_session_id, instruction)
+    def follow_up_antigravity(
+        self,
+        parent_session_id: str,
+        instruction: str,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
+        started = self.start_follow_up_antigravity(
+            parent_session_id,
+            instruction,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+        )
         if started.get("status") == "error":
-            return started
-        return self._await_blocking(str(started["run_id"]))
+            return self._with_codex_direct_call_warning(
+                started,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="follow_up_antigravity",
+            )
+        result = self._await_blocking(str(started["run_id"]))
+        return self._with_codex_direct_call_warning(
+            result,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+            tool_name="follow_up_antigravity",
+        )
 
-    def start_antigravity(self, prompt: str, cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+    def start_antigravity(
+        self,
+        prompt: str,
+        cwd: str | None = None,
+        idempotency_key: str | None = None,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
         try:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
         except WorkspaceAccessError as exc:
@@ -218,7 +329,13 @@ class GemnessService:
         with self._idempotency_scope(idempotency_key, idempotency_context):
             existing = self._existing_idempotent_run(idempotency_key, idempotency_context=idempotency_context)
             if existing is not None:
-                return existing
+                return self._with_codex_direct_call_warning(
+                    existing,
+                    caller_role=caller_role,
+                    takeover_reason=takeover_reason,
+                    tool_name="start_antigravity",
+                    idempotency_key=idempotency_key,
+                )
             session = self._session("ask_antigravity", None, None, _session_title(prompt, "ask_antigravity"), cwd=resolved_cwd)
             self._record_request_provenance(session.session_id, provenance)
             self.run_manager.start(
@@ -237,9 +354,25 @@ class GemnessService:
                 idempotency_key=idempotency_key,
                 idempotency_context=idempotency_context,
             )
-            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            payload = self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            return self._with_codex_direct_call_warning(
+                payload,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="start_antigravity",
+                idempotency_key=idempotency_key,
+            )
 
-    def start_antigravity_json(self, prompt: str, schema: dict[str, Any], cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+    def start_antigravity_json(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        cwd: str | None = None,
+        idempotency_key: str | None = None,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
         schema_error = validate_schema_definition(schema)
         if schema_error:
             return {"status": "error", "message": f"Invalid JSON Schema: {schema_error}"}
@@ -252,7 +385,13 @@ class GemnessService:
         with self._idempotency_scope(idempotency_key, idempotency_context):
             existing = self._existing_idempotent_run(idempotency_key, idempotency_context=idempotency_context)
             if existing is not None:
-                return existing
+                return self._with_codex_direct_call_warning(
+                    existing,
+                    caller_role=caller_role,
+                    takeover_reason=takeover_reason,
+                    tool_name="start_antigravity_json",
+                    idempotency_key=idempotency_key,
+                )
             session = self._session("ask_antigravity_json", None, None, _session_title(prompt, "ask_antigravity_json"), cwd=resolved_cwd)
             self._record_request_provenance(session.session_id, provenance)
             self.run_manager.start(
@@ -272,9 +411,24 @@ class GemnessService:
                 idempotency_key=idempotency_key,
                 idempotency_context=idempotency_context,
             )
-            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            payload = self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            return self._with_codex_direct_call_warning(
+                payload,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="start_antigravity_json",
+                idempotency_key=idempotency_key,
+            )
 
-    def start_review_current_diff_with_antigravity(self, base_ref: str = "HEAD", cwd: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+    def start_review_current_diff_with_antigravity(
+        self,
+        base_ref: str = "HEAD",
+        cwd: str | None = None,
+        idempotency_key: str | None = None,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
         try:
             resolved_cwd = resolve_workspace_cwd(self.config, cwd)
         except WorkspaceAccessError as exc:
@@ -299,7 +453,13 @@ class GemnessService:
         with self._idempotency_scope(idempotency_key, idempotency_context):
             existing = self._existing_idempotent_run(idempotency_key, idempotency_context=idempotency_context)
             if existing is not None:
-                return existing
+                return self._with_codex_direct_call_warning(
+                    existing,
+                    caller_role=caller_role,
+                    takeover_reason=takeover_reason,
+                    tool_name="start_review_current_diff_with_antigravity",
+                    idempotency_key=idempotency_key,
+                )
             session = self.hub.create_session(
                 "review_current_diff_with_antigravity",
                 DEFAULT_MODEL_LABEL,
@@ -328,13 +488,33 @@ class GemnessService:
             )
             payload = self._start_payload(session.session_id, idempotency_key=idempotency_key)
             payload["expected_review_scope"] = review_workspace.to_payload()
-            return payload
+            return self._with_codex_direct_call_warning(
+                payload,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="start_review_current_diff_with_antigravity",
+                idempotency_key=idempotency_key,
+            )
 
-    def start_follow_up_antigravity(self, parent_session_id: str, instruction: str, idempotency_key: str | None = None) -> dict[str, Any]:
+    def start_follow_up_antigravity(
+        self,
+        parent_session_id: str,
+        instruction: str,
+        idempotency_key: str | None = None,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
         with self._idempotency_scope(idempotency_key):
             existing = self._existing_idempotent_run(idempotency_key)
             if existing is not None:
-                return existing
+                return self._with_codex_direct_call_warning(
+                    existing,
+                    caller_role=caller_role,
+                    takeover_reason=takeover_reason,
+                    tool_name="start_follow_up_antigravity",
+                    idempotency_key=idempotency_key,
+                )
             self.hub.refresh_from_disk()
             if parent_session_id not in self.hub.sessions:
                 return {"status": "error", "message": f"Unknown parent_session_id: {parent_session_id}"}
@@ -392,18 +572,53 @@ class GemnessService:
                     )
 
             self.run_manager.start(session.session_id, run, idempotency_key=idempotency_key)
-            return self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            payload = self._start_payload(session.session_id, idempotency_key=idempotency_key)
+            return self._with_codex_direct_call_warning(
+                payload,
+                caller_role=caller_role,
+                takeover_reason=takeover_reason,
+                tool_name="start_follow_up_antigravity",
+                idempotency_key=idempotency_key,
+            )
 
     def get_antigravity_run(self, run_id: str, event_cursor: str | None = None, recent_event_limit: int = 20) -> dict[str, Any]:
         return self._run_status_payload(run_id, event_cursor=event_cursor, recent_event_limit=recent_event_limit)
 
-    def await_antigravity_run(self, run_id: str, timeout_sec: float = 5.0, event_cursor: str | None = None, recent_event_limit: int = 20) -> dict[str, Any]:
+    def await_antigravity_run(
+        self,
+        run_id: str,
+        timeout_sec: float = 5.0,
+        event_cursor: str | None = None,
+        recent_event_limit: int = 20,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
         self.run_manager.await_run(run_id, timeout_sec)
-        return self._run_status_payload(run_id, event_cursor=event_cursor, recent_event_limit=recent_event_limit)
+        payload = self._run_status_payload(run_id, event_cursor=event_cursor, recent_event_limit=recent_event_limit)
+        return self._with_codex_direct_call_warning(
+            payload,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+            tool_name="await_antigravity_run",
+            idempotency_key=payload.get("idempotency_key") if isinstance(payload, dict) else None,
+        )
 
-    def cancel_antigravity_run(self, run_id: str) -> dict[str, Any]:
+    def cancel_antigravity_run(
+        self,
+        run_id: str,
+        *,
+        caller_role: str | None = None,
+        takeover_reason: str | None = None,
+    ) -> dict[str, Any]:
         cancelled = self.run_manager.cancel(run_id)
-        return self._run_status_payload(run_id) | {"cancel": cancelled}
+        payload = self._run_status_payload(run_id) | {"cancel": cancelled}
+        return self._with_codex_direct_call_warning(
+            payload,
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+            tool_name="cancel_antigravity_run",
+        )
 
     def start_follow_up(self, parent_session_id: str, instruction: str) -> str:
         return str(self.start_follow_up_antigravity(parent_session_id, instruction)["run_id"])
@@ -1321,6 +1536,69 @@ class GemnessService:
                 self._conversation_locks[key] = lock
             return lock
 
+    def _with_codex_direct_call_warning(
+        self,
+        payload: dict[str, Any],
+        *,
+        caller_role: str | None,
+        takeover_reason: str | None,
+        tool_name: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        warning = self._codex_direct_call_warning(
+            caller_role=caller_role,
+            takeover_reason=takeover_reason,
+            tool_name=tool_name,
+            idempotency_key=idempotency_key,
+        )
+        if warning is None:
+            return payload
+        updated = dict(payload)
+        updated["codex_delegation_warning"] = warning
+        return updated
+
+    def _codex_direct_call_warning(
+        self,
+        *,
+        caller_role: str | None,
+        takeover_reason: str | None,
+        tool_name: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        role = _clean_caller_role(caller_role)
+        reason = _clean_takeover_reason(takeover_reason)
+        if role == "main_agent_takeover" and not reason:
+            return {
+                "severity": "warning",
+                "reason": "takeover_reason_missing",
+                "tool": tool_name,
+                "message": "Main-agent takeover should include a concrete takeover_reason and reuse an existing run when available.",
+                "allowed_direct_roles": sorted(RUN_OWNER_ROLES),
+            }
+        if role in RUN_OWNER_ROLES:
+            return None
+        if idempotency_key and tool_name.startswith("start_"):
+            return None
+        codex_host, cache_warnings = codex_host_capabilities(self.config.codex_host_capabilities_file)
+        multi_agent = codex_host.get("multi_agent", {}) if isinstance(codex_host, dict) else {}
+        if multi_agent.get("available") is not True:
+            return None
+        return {
+            "severity": "warning",
+            "reason": "codex_multi_agent_available_without_run_owner",
+            "tool": tool_name,
+            "message": (
+                "This Codex host reports multi-agent support. The main agent should delegate Gemness work "
+                "to a reviewer subagent and let that reviewer own start_antigravity/await_antigravity_run."
+            ),
+            "recommended_flow": "spawn_reviewer_subagent",
+            "reviewer_tool_sequence": ["start_antigravity", "await_antigravity_run"],
+            "blocking_wrapper_tools": BLOCKING_WRAPPER_TOOLS,
+            "allowed_direct_roles": sorted(RUN_OWNER_ROLES),
+            "takeover_requires_reason": True,
+            "cache_warnings": cache_warnings,
+        }
+
     def _request_provenance(
         self,
         mode: str,
@@ -1360,6 +1638,67 @@ def validate_base_ref(base_ref: str) -> str:
     if len(ref) > 200:
         raise ValueError("base_ref too long")
     return ref
+
+
+def _codex_delegation_guidance(codex_host: dict[str, Any], cwd: Path | None) -> dict[str, Any]:
+    multi_agent = codex_host.get("multi_agent", {}) if isinstance(codex_host, dict) else {}
+    available = multi_agent.get("available")
+    if available is True:
+        recommended_flow = "spawn_reviewer_subagent"
+        reason = "Codex host capability cache reports multi-agent support."
+    elif available is False:
+        recommended_flow = "direct_mcp_fallback"
+        reason = "Codex host capability cache reports multi-agent support is unavailable."
+    else:
+        recommended_flow = "probe_multi_agent_then_record_health"
+        reason = "Codex host multi-agent capability is not recorded or is unreadable."
+    cwd_text = str(cwd) if cwd is not None else None
+    return {
+        "recommended_flow": recommended_flow,
+        "reason": reason,
+        "codex_multi_agent_available": available,
+        "reviewer_tool_sequence": ["start_antigravity", "await_antigravity_run"],
+        "blocking_wrapper_tools": BLOCKING_WRAPPER_TOOLS,
+        "main_agent_direct_use": {
+            "allowed_when": [
+                "reviewer_spawn_failed",
+                "reviewer_task_failed",
+                "pending_handoff_takeover",
+                "explicit_user_direct_request",
+                "non_codex_client",
+            ],
+            "takeover_must_reuse_existing_run": True,
+            "takeover_requires_reason": True,
+        },
+        "handoff_template": {
+            "gemness_health_handoff": {
+                "cwd": cwd_text,
+                "health_status": "<status from this antigravity_health result>",
+                "codex_host.multi_agent.available": available,
+                "antigravity_health_already_called": True,
+            },
+            "delegated_run_handoff": {
+                "cwd": cwd_text,
+                "task": "<user task>",
+                "mode": "ask|json|review_current_diff|follow_up",
+                "delegation_id": "<parent-generated stable id>",
+            },
+        },
+    }
+
+
+def _clean_caller_role(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip().lower()
+    return cleaned or None
+
+
+def _clean_takeover_reason(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _session_title(prompt: str, tool_name: str, limit: int = 45) -> str:
