@@ -79,6 +79,9 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert "idempotency_key" in text
     assert 'model="gpt-5.5"' in text
     assert 'reasoning_effort="medium"' in text
+    assert "host call-shape constraints" in text
+    assert "`items` without `message`" in text
+    assert "Treat direct fallback as available only after the simplified reviewer spawn also fails" in text
     assert "gpt-5.4-mini" not in text
     assert "gpt-5.5-mini" not in text
     assert 'reasoning_effort="high"' not in text
@@ -98,6 +101,9 @@ def test_skill_front_matter_is_yamlish() -> None:
     assert "must forward the instruction to Antigravity" in text
     assert "must not answer the parent follow-up from the reviewer model's own reasoning" in text
     assert "must not self-initiate another Antigravity turn" in text
+    assert 'caller_role="main_agent_takeover"' in text
+    assert "takeover_reason" in text
+    assert 'caller_role="reviewer_subagent"' in text
     assert "non-overlapping local tasks" in text
     assert "blocking convenience wrappers" in text
     assert "Pass this cwd to `antigravity_health`" in text

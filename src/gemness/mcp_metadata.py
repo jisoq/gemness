@@ -5,11 +5,11 @@ SERVER_VERSION = "0.1.3"
 
 TOOL_NAMES = [
     "antigravity_health",
-    "ask_antigravity",
     "start_antigravity",
+    "await_antigravity_run",
+    "cancel_antigravity_run",
+    "ask_antigravity",
     "follow_up_antigravity",
     "ask_antigravity_json",
     "review_current_diff_with_antigravity",
-    "await_antigravity_run",
-    "cancel_antigravity_run",
 ]

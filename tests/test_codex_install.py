@@ -28,11 +28,13 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert "cwd" not in server
     assert server["tool_timeout_sec"] == 600
     assert server["required"] is False
-    assert "antigravity_health" in server["enabled_tools"]
+    assert server["enabled_tools"][:4] == [
+        "antigravity_health",
+        "start_antigravity",
+        "await_antigravity_run",
+        "cancel_antigravity_run",
+    ]
     assert "ask_antigravity" in server["enabled_tools"]
-    assert "start_antigravity" in server["enabled_tools"]
-    assert "await_antigravity_run" in server["enabled_tools"]
-    assert "cancel_antigravity_run" in server["enabled_tools"]
     assert "start_antigravity_json" not in server["enabled_tools"]
     assert "start_review_current_diff_with_antigravity" not in server["enabled_tools"]
     assert "start_follow_up_antigravity" not in server["enabled_tools"]
@@ -47,7 +49,9 @@ def test_build_uvx_config_uses_gemness_server_name(tmp_path) -> None:
     assert server["env"]["GEMNESS_AGY_CONCURRENCY_LIMIT"] == "4"
     assert server["tools"]["start_antigravity"]["approval_mode"] == "prompt"
     assert server["tools"]["cancel_antigravity_run"]["approval_mode"] == "prompt"
-    assert server["tools"]["ask_antigravity"]["approval_mode"] == "approve"
+    assert server["tools"]["ask_antigravity"]["approval_mode"] == "prompt"
+    assert server["tools"]["follow_up_antigravity"]["approval_mode"] == "prompt"
+    assert server["tools"]["await_antigravity_run"]["approval_mode"] == "approve"
     assert "GEMNESS_AGY_COMMAND" not in server["env"]
     assert "GEMNESS_WORKSPACE_ROOT" not in server["env"]
     assert "GEMNESS_ALLOWED_ROOTS" not in server["env"]

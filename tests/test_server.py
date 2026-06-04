@@ -309,22 +309,36 @@ def test_start_antigravity_schema_declares_mode_requirements() -> None:
 def test_tool_metadata_declares_delegated_run_ownership() -> None:
     start_tool = next(tool for tool in TOOLS if tool["name"] == "start_antigravity")
     await_tool = next(tool for tool in TOOLS if tool["name"] == "await_antigravity_run")
+    ask_tool = next(tool for tool in TOOLS if tool["name"] == "ask_antigravity")
+    json_tool = next(tool for tool in TOOLS if tool["name"] == "ask_antigravity_json")
+    review_tool = next(tool for tool in TOOLS if tool["name"] == "review_current_diff_with_antigravity")
 
     assert "delegated reviewer-owned flow" in start_tool["description"]
     assert "explicit takeover" in start_tool["description"]
+    assert "spawn/delegate to a reviewer subagent first" in start_tool["description"]
     assert "must forward that follow-up to Antigravity" in start_tool["description"]
     assert "must not answer it itself" in start_tool["description"]
     idempotency_description = start_tool["inputSchema"]["properties"]["idempotency_key"]["description"]
     assert "Parent-supplied delegation key" in idempotency_description
     assert "delegation_id" in idempotency_description
+    assert "caller_role" in start_tool["inputSchema"]["properties"]
+    assert "takeover_reason" in start_tool["inputSchema"]["properties"]
     assert "delegated run owner" in await_tool["description"]
     assert "explicit main-agent takeover" in await_tool["description"]
     assert "do not invent advisory content" in await_tool["description"]
+    assert "caller_role" in await_tool["inputSchema"]["properties"]
     cancel_tool = next(tool for tool in TOOLS if tool["name"] == "cancel_antigravity_run")
     assert "Do not use this merely because an await call timed out" in cancel_tool["description"]
     follow_up_tool = next(tool for tool in TOOLS if tool["name"] == "follow_up_antigravity")
     assert "must call this or start mode=follow_up to forward the instruction to Antigravity" in follow_up_tool["description"]
     assert "not answer the follow-up themselves" in follow_up_tool["description"]
+    assert "not the default main-agent path" in ask_tool["description"]
+    assert "not the default main-agent path" in json_tool["description"]
+    assert "not the default main-agent path" in review_tool["description"]
+    assert "caller_role" in ask_tool["inputSchema"]["properties"]
+    assert "caller_role" in follow_up_tool["inputSchema"]["properties"]
+    assert "caller_role" in json_tool["inputSchema"]["properties"]
+    assert "caller_role" in review_tool["inputSchema"]["properties"]
     start_mode_description = start_tool["inputSchema"]["properties"]["mode"]["description"]
     assert "forward a parent follow-up handoff to Antigravity" in start_mode_description
     assert "instead of answering it itself" in start_mode_description

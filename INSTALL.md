@@ -152,4 +152,4 @@ Report these items back to the user:
 - Antigravity CLI command and version.
 - Smoke-test result.
 - Whether Codex must be restarted before `gemness` tools appear.
-- The first phrase to try after restart: `use gemness health check`. That health check should record whether this Codex host exposes multi-agent spawn/delegation tooling, then reuse the recorded result for later repositories.
+- The first phrase to try after restart: `use gemness health check`. That health check should record whether this Codex host exposes multi-agent spawn/delegation tooling, return `codex_delegation.recommended_flow`, then reuse the recorded result for later repositories.
