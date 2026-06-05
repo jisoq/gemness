@@ -126,6 +126,22 @@ def test_dashboard_refresh_marks_dead_started_process_as_error(tmp_path, monkeyp
     assert error_event["payload"]["status"] == "error"
 
 
+def test_dashboard_refresh_uses_latest_non_status_event_for_stale_age(tmp_path, monkeypatch) -> None:
+    writer = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    session = writer.create_session("ask_antigravity", "fake-model")
+    writer.set_status(session.session_id, "running", "antigravity.started", {"pid": 999999})
+    heartbeat = writer.append_event(session.session_id, "antigravity.heartbeat", "gemness", {"pid": 999999})
+    dashboard = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False))
+    monkeypatch.setattr("gemness.observer._age_seconds", lambda updated_at, now: 1.0 if updated_at == heartbeat.ts else 60.0)
+    monkeypatch.setattr("gemness.observer._process_is_running", lambda pid: False)
+
+    listed = dashboard.list_sessions()[0]
+    events = dashboard.get_events(session.session_id, raw=True)
+
+    assert listed["status"] == "running"
+    assert not [event for event in events if event["type"] == "session.error"]
+
+
 def test_dashboard_refresh_marks_unupdated_open_session_as_error(tmp_path, monkeypatch) -> None:
     hub = ObserverHub(GemnessConfig(transcript_dir=tmp_path, observer_enabled=False, agy_timeout_sec=10))
     session = hub.create_session("ask_antigravity", "fake-model")

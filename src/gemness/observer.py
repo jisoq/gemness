@@ -1265,6 +1265,7 @@ class ObserverHub:
                     fallback_used=bool(payload.get("fallback_used", False)),
                     fallback_reason=payload.get("fallback_reason") if isinstance(payload.get("fallback_reason"), str) else None,
                     stream_events_path=payload.get("stream_events_path") if isinstance(payload.get("stream_events_path"), str) else None,
+                    updated_at=event.ts,
                 ),
             )
             session = self.sessions[session_id]
@@ -1289,6 +1290,8 @@ class ObserverHub:
         session = self.sessions.get(event.session_id)
         if session is None:
             return
+        if event.ts > session.updated_at:
+            session.updated_at = event.ts
         if event.type == "run.command":
             argv = event.payload.get("command_argv")
             if isinstance(argv, list):
